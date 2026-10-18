@@ -56,6 +56,15 @@ class Crash3Levels(Range):
     default = 31
 
 
+class StartingLevels(Range):
+    """Number of starting level entrances per enabled campaign."""
+
+    display_name = "Starting Levels per Campaign"
+    range_start = 1
+    range_end = 31
+    default = 2
+
+
 class Goal(Choice):
     """Choose what the player must complete to win.
 
@@ -252,6 +261,7 @@ class CrashOptions(PerGameCommonOptions):
     crash1_levels: Crash1Levels
     crash2_levels: Crash2Levels
     crash3_levels: Crash3Levels
+    starting_levels: StartingLevels
     white_gem_checks: WhiteGemChecks
     colored_gem_checks: ColoredGemChecks
     crystal_checks: CrystalChecks

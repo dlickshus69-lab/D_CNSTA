@@ -336,9 +336,10 @@ class CrashWorld(World):
                 and level.key.startswith("L")
                 and level.key not in SECRET_SOURCES
             ]
-            # unlock the destinations behind the first two entrances of each campaign
+            # unlock destinations behind the requested number of entrances per campaign
             self.starting_levels.extend(
-                self.level_placements[key] for key in entrances[:2]
+                self.level_placements[key]
+                for key in entrances[: self.options.starting_levels.value]
             )
         choices = {
             "white_gem": self.options.white_gem_checks.value,

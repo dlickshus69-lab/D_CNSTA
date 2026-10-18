@@ -36,6 +36,7 @@ When item spoilers are enabled, the client scouts selected locations on connecti
 Secret destinations include required source levels automatically.
 
 - Choose any campaign combination, level pool and level counts.
+- `starting_levels`: starting entrances per enabled campaign, from 1–31 (default 2), capped at the selected regular entrances.
 - `level_shuffle`: `off`, `within_campaign` or `across_campaigns`.
 - `boxsanity`: 0–100% of the boxes turn into ap locations. There are 5291 boxes across 85 stages.
 - `white_gem_checks`, `colored_gem_checks`, `crystal_checks`, `relic_checks`: percentages of collectible locations to select as AP checks. Unselected collectibles stay vanilla or are overwritten by collectible_rewards.
