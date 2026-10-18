@@ -1,0 +1,218 @@
+#include "check_progress.h"
+#include "ingame_protocol.h"
+#include <algorithm>
+#include <stdexcept>
+
+namespace
+{
+    struct LogicLevel
+    {
+        const char *key;
+        const char *title;
+        std::map<std::string, std::vector<std::int64_t>> rules;
+    };
+    const LogicLevel catalogue[]{
+#include "check_logic_specs.inc"
+    };
+    const LogicLevel *level_logic(const std::string &key)
+    {
+        const auto found = std::find_if(std::begin(catalogue), std::end(catalogue),
+                                        [&](const auto &entry) { return key == entry.key; });
+        return found == std::end(catalogue) ? nullptr : found;
+    }
+    std::set<std::int64_t> known_items()
+    {
+        std::set<std::int64_t> result;
+        for (const auto &level : catalogue)
+            for (const auto &[event, ids] : level.rules)
+                result.insert(ids.begin(), ids.end());
+        return result;
+    }
+} // namespace
+
+unsigned box_marker_color(bool spoilers, const Json::Value &location_flags, std::int64_t location)
+{
+    if (!spoilers || !location_flags.isObject())
+        return 0;
+    const auto &flags = location_flags[std::to_string(location)];
+    if (!flags.isUInt() || flags.asUInt() > 7)
+        return 0;
+    return ingame::item_color((flags.asUInt() & 4) ? 1u : flags.asUInt());
+}
+std::string CheckCounts::text() const
+{
+    return std::to_string(done) + "/" + (logic_known ? std::to_string(in_logic) : "?") + " (" + std::to_string(total) +
+           ")";
+}
+std::string LevelProgress::collectible_text() const
+{
+    std::string result;
+    const char *labels[]{"C", "P", "R"};
+    for (unsigned i = 0; i < collectibles.size(); ++i)
+        if (collectibles[i].total)
+        {
+            if (!result.empty())
+                result += "   ";
+            result += std::string(labels[i]) + ": " + collectibles[i].text();
+        }
+    return result;
+}
+std::array<LevelProgress, 3> campaign_progress(const CheckProgress &progress,
+                                               const std::map<std::string, std::string> &placements)
+{
+    std::array<LevelProgress, 3> result{};
+    std::map<std::string, std::string> entrances;
+    for (const auto &[source, destination] : placements)
+        entrances[destination] = source;
+    for (const auto &[destination, level] : progress.levels)
+    {
+        const auto found = entrances.find(destination);
+        const auto &source = found == entrances.end() ? destination : found->second;
+        if (source.size() != 4 || source[1] < '1' || source[1] > '3')
+            continue;
+        auto &campaign = result[source[1] - '1'];
+        campaign.done += level.done;
+        campaign.in_logic += level.in_logic;
+        campaign.total += level.total;
+        campaign.logic_known = campaign.logic_known && level.logic_known;
+    }
+    return result;
+}
+
+CheckRules compile_check_rules(const std::map<std::pair<std::string, std::string>, std::int64_t> &checks,
+                               const Json::Value &slot_data, const std::set<std::string> &selected)
+{
+    CheckRules result;
+    const auto &rules = slot_data["check_requirements"];
+    static const auto valid_items = known_items();
+    const bool rules_valid = rules.isObject() && rules.size() == checks.size();
+    if (!rules_valid)
+        result.error = "Invalid check_requirements. Reachable markers hidden";
+    {
+        const auto &local_sources = slot_data["local_reward_sources"];
+        try
+        {
+            if (!local_sources.isObject() || local_sources.size() > 4 * ingame::max_levels)
+                throw std::runtime_error("Invalid local collectible rules");
+            for (const auto &id : local_sources.getMemberNames())
+            {
+                std::size_t used = 0;
+                const auto address = std::stoll(id, &used);
+                if (used != id.size() || std::to_string(address) != id)
+                    throw std::runtime_error("Invalid local collectible identity");
+                ingame::local_collectible_item(slot_data, address);
+                if (!selected.count(local_sources[id]["level"].asString()))
+                    throw std::runtime_error("Local collectible outside selected levels");
+                const auto &rule = local_sources[id]["requirements"];
+                if (!rule.isArray() || rule.empty() || rule.size() > 40)
+                    throw std::runtime_error("Invalid local collectible requirements");
+                std::set<std::int64_t> unique;
+                for (const auto &item : rule)
+                    if (!item.isInt64() || !valid_items.count(item.asInt64()) || !unique.insert(item.asInt64()).second)
+                        throw std::runtime_error("Unknown local collectible requirement");
+                // reachable vanilla pickups do not activate platforms until actually collected
+                const auto item = local_sources[id]["item"].asInt64();
+                if (ingame::colored_gem_item(item))
+                    result.local_reward_items.emplace(address, item);
+            }
+        }
+        catch (const std::exception &e)
+        {
+            result.error = e.what();
+        }
+    }
+    const bool local_rules_valid = result.error.empty();
+    for (const auto &[key, id] : checks)
+    {
+        std::vector<std::int64_t> required;
+        bool known = rules_valid && local_rules_valid;
+        if (rules_valid)
+        {
+            const auto &rule = rules[std::to_string(id)];
+            known = known && rule.isArray() && !rule.empty() && rule.size() <= 40;
+            std::set<std::int64_t> unique;
+            if (known)
+                for (const auto &item : rule)
+                {
+                    if (!item.isInt64() || !valid_items.count(item.asInt64()) || !unique.insert(item.asInt64()).second)
+                    {
+                        known = false;
+                        break;
+                    }
+                    required.push_back(item.asInt64());
+                }
+        }
+        else
+            known = false;
+        const auto *level = level_logic(key.first);
+        result.checks.push_back({key, id, level ? level->title : key.first, std::move(required), known});
+        if (!known && result.error.empty())
+            result.error = "Unknown check requirements. Affected reachable markers hidden";
+    }
+    return result;
+}
+
+CheckProgress check_progress(const CheckRules &rules, const std::vector<std::pair<std::int64_t, int>> &items,
+                             const std::set<std::int64_t> &checked, const std::set<std::int64_t> &pending,
+                             const std::set<std::int64_t> &local_collected)
+{
+    CheckProgress result;
+    result.error = rules.error;
+    std::set<std::int64_t> owned;
+    for (const auto &item : items)
+        owned.insert(item.first);
+    for (const auto &[location, item] : rules.local_reward_items)
+        if (local_collected.count(location))
+            owned.insert(item);
+    for (const auto &rule : rules.checks)
+    {
+        const auto &key = rule.key;
+        const auto id = rule.id;
+        const bool known = rule.known;
+        const auto &required = rule.required;
+        auto &count = result.levels[key.first];
+        const auto event = key.second;
+        auto *collectible = (event == "gem" || event == "extra_gem") ? &count.collectibles[0]
+                            : event == "crystal"                     ? &count.collectibles[1]
+                            : event == "relic"                       ? &count.collectibles[2]
+                                                                     : nullptr;
+        count.title = rule.title;
+        ++count.total;
+        if (collectible)
+            ++collectible->total;
+        const bool done = checked.count(id) || pending.count(id);
+        if (done)
+            ++count.done;
+        if (done && collectible)
+            ++collectible->done;
+        if (!known)
+            count.logic_known = false;
+        if (!known && collectible)
+            collectible->logic_known = false;
+        if (!known && result.error.empty())
+            result.error = "Unknown check requirements. Affected reachable markers hidden";
+        if (known && std::all_of(required.begin(), required.end(), [&](auto item) { return owned.count(item) != 0; }))
+        {
+            ++count.in_logic;
+            if (collectible)
+                ++collectible->in_logic;
+            if (!done)
+                result.reachable.insert(id);
+        }
+    }
+    return result;
+}
+
+std::set<std::int64_t> box_marker_ids(const CheckProgress &progress,
+                                      const std::map<std::pair<std::string, std::string>, std::int64_t> &checks,
+                                      const std::set<std::int64_t> &checked, const std::set<std::int64_t> &pending,
+                                      bool out_of_logic)
+{
+    if (!out_of_logic)
+        return progress.reachable;
+    std::set<std::int64_t> result;
+    for (const auto &[key, id] : checks)
+        if (key.second.rfind("box:", 0) == 0 && !checked.count(id) && !pending.count(id))
+            result.insert(id);
+    return result;
+}
