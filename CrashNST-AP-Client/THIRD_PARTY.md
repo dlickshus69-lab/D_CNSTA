@@ -1,6 +1,10 @@
 # Client dependencies
 
-The `licenses` directory containts dependency notices.
+The `licenses` directory contains dependency notices.
+
+Corresponding APCpp source and relinking materials are available in
+`CrashNST-AP-Relinking-1.0.0.zip` alongside the client download in the same release.
+These files are for developers and do not need to be installed to play.
 
 The standalone AP DLL statically links APCpp, its dependencies, liblzma and the MinGW runtime.
 It uses Windows' D3D11, DXGI, shader compiler, DirectInput and GDI APIs.
@@ -8,7 +12,7 @@ It reads the Zoinks bitmap font from the installed game's permanent.pak, and fal
 
 | Component | Source | License |
 | --- | --- | --- |
-| APCpp | https://github.com/randomcodegen/APCpp , sibling `../APCpp` | LGPL 2.1 |
+| APCpp | https://github.com/randomcodegen/APCpp | LGPL 2.1 |
 | IXWebSocket | APCpp's `IXWebSocket` | BSD 3-clause |
 | jsoncpp | APCpp's `jsoncpp` | MIT/public-domain alternative |
 | zlib | APCpp's `zlib` | zlib |

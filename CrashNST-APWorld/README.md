@@ -39,7 +39,7 @@ Close NST before switching to another seed or slot.
 
 ## Play
 
-See the [player guide](PLAYER_GUIDE.md) for world options, controls, etc.
+See the [player guide](https://github.com/randomcodegen/CrashNST-AP/blob/main/CrashNST-APWorld/PLAYER_GUIDE.md) for world options, controls, etc.
 
 ## Source layout
 
