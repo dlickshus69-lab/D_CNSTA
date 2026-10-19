@@ -1,6 +1,7 @@
 #include "game_runtime.h"
 #include "engine_memory.h"
 #include "function_hook.h"
+#include "movement_rules.h"
 #include "game_pickups.h"
 #include "game_memory.h"
 #include "crate_specs.h"
@@ -12,6 +13,7 @@
 #include <memory>
 #include <iostream>
 #include <set>
+#include <string_view>
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
@@ -81,6 +83,65 @@ namespace ingame
             return result;
         }
 
+        FunctionHook ui_audio_hook;
+        std::atomic<Address> permanent_audio_pool{0};
+        bool shared_ui_audio(Address path)
+        {
+            std::array<char, 256> bytes{};
+            if (!read(path, bytes))
+                return false;
+            const auto end = static_cast<char *>(std::memchr(bytes.data(), 0, bytes.size()));
+            if (!end)
+                return false;
+            std::transform(bytes.data(), end, bytes.data(), [](unsigned char c) { return std::tolower(c); });
+            std::string_view name(bytes.data(), end - bytes.data());
+            // loaders can receive archive paths before the engine expands their virtual-directory aliases
+            if (name.rfind("sounds:", 0) == 0)
+                name.remove_prefix(7);
+            else if (name.rfind("sounds/", 0) == 0)
+                name.remove_prefix(6);
+            for (const auto bank : {"/banks/ui_bank_c1_bank.igz", "/banks/ui_bank_c2_bank.igz", "/banks/ui_bank_c3_bank.igz"})
+                if (name == bank)
+                    return true;
+            if (name.rfind("data:/", 0) == 0)
+                name.remove_prefix(6);
+            if (name.rfind("sound_samples/", 0) == 0)
+                for (const auto bank : {",ui_bank_c1_bank,", ",ui_bank_c2_bank,", ",ui_bank_c3_bank,"})
+                    if (name.find(bank) != name.npos)
+                        return true;
+            return false;
+        }
+        Address load_ui_audio(Address path, Address pool, unsigned flags)
+        {
+            if (shared_ui_audio(path))
+            {
+                auto permanent = permanent_audio_pool.load();
+                if (!permanent)
+                {
+                    // the streaming manager's inline chunk vector has count +24, byte capacity +32 and entries +40
+                    const auto manager = value<Address>(base() + 0x1aa9eb8);
+                    const auto count = value<unsigned>(manager + 24);
+                    const auto capacity = value<std::uint64_t>(manager + 32) & 0xfffffffffffffULL;
+                    if (typed(manager, 0x1616f60) && count <= 4096 && capacity >= count * 8)
+                        for (unsigned i = 0; i < count; ++i)
+                        {
+                            const auto chunk = value<Address>(value<Address>(manager + 40) + i * 8);
+                            if (typed(chunk, 0x1615820) && string(value<Address>(chunk + 16)) == "permanent_pkg")
+                            {
+                                permanent = value<Address>(chunk + 96);
+                                if (!typed(permanent, 0x17a2808))
+                                    permanent = 0;
+                                permanent_audio_pool = permanent;
+                                break;
+                            }
+                        }
+                }
+                // C2's hub shares C3 UI audio. a level pool reset would invalidate the persistent campaign package.
+                if (permanent)
+                    pool = permanent;
+            }
+            return reinterpret_cast<Address (*)(Address, Address, unsigned)>(ui_audio_hook.original)(path, pool, flags);
+        }
         FunctionHook license_hook;
         void license_query(unsigned key, unsigned char *result)
         {
@@ -95,73 +156,96 @@ namespace ingame
                 *result = 1;
             }
         }
-        struct Binding
-        {
-            Address meta = 0, at = 0;
-            unsigned original = 1, current = 1;
-            std::string name;
-        };
-        std::vector<Binding> styles;
-        void restore_styles()
-        {
-            for (auto &b : styles)
-                if (typed(b.meta, 0x1745d78) && string(value<Address>(b.meta + 16)) == b.name &&
-                    typed(b.at - 24, 0x1749820) && value<unsigned>(b.at) == b.current)
-                {
-                    SIZE_T done = 0;
-                    WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(b.at), &b.original, 4, &done);
-                    b.current = b.original;
-                }
-            styles.clear();
-        }
-        void bind_styles()
-        {
-            static std::uint64_t retry_after = 0;
-            if (GetTickCount64() < retry_after)
-                return;
-            retry_after = GetTickCount64() + 500;
-            const auto context = value<Address>(base() + 0x1acbe40), registry = value<Address>(context + 32);
-            const auto count = value<unsigned>(registry);
-            const auto bytes = value<std::uint64_t>(registry + 8) & 0xffffffffffffULL;
-            const auto entries = value<Address>(registry + 16);
-            if (!context || !registry || !entries || count > 65535 || bytes < count * 8 || bytes > 65536 * 8)
-                return;
-            for (unsigned i = 0; i < count; ++i)
-            {
-                const auto meta = value<Address>(entries + i * 8);
-                if (!typed(meta, 0x1745d78))
-                    continue;
-                const auto name = string(value<Address>(meta + 16));
-                unsigned offset = 0;
-                std::vector<unsigned> enums;
-                if (name == "Scripts.Graph.Crash_CrouchCrawlSlide")
-                {
-                    // these slab offsets locate campaign constants used by movement tests, not player physics fields.
-                    offset = 93020;
-                    enums = {92196};
-                }
-                if (name == "Scripts.Graph.CrashBandicoot_JumpFlip")
-                {
-                    offset = 43056;
-                    enums = {39200, 39952};
-                }
-                if (!offset || meta < offset)
-                    continue;
-                for (const auto e : enums)
-                {
-                    const auto at = meta - offset + e + 24;
-                    if (typed(at - 24, 0x1749820) && value<unsigned>(at) == 1)
-                        styles.push_back({meta, at, 1, 1, name});
-                }
-            }
-        }
-        unsigned style_value(unsigned desired, unsigned actual, unsigned original) { return !desired ? original : desired == original ? actual
-                                                                                                                                      : 0; }
         bool special_level(const std::string &key)
         {
             static const std::vector<std::string> levels{"L107", "L114", "L208", "L213", "L215", "L222", "L224", "L226",
                                                          "L302", "L303", "L305", "L308", "L310", "L312", "L314", "L317", "L318", "L322", "L324", "L326", "L328", "L330", "L331", "L332"};
             return std::find(levels.begin(), levels.end(), key) != levels.end();
+        }
+        std::mutex movement_mutex;
+        std::map<std::string, unsigned> movement_styles;
+        std::atomic_bool vanilla_movement{false};
+        FunctionHook movement_check_hook, movement_input_hook, movement_attack_hook, movement_skill_hook;
+        Address missing_crouch_actor = 0, movement_input_code = 0;
+        std::atomic<Address> blocked_crouch_controller{0};
+        unsigned assigned_movement()
+        {
+            const auto world = value<Address>(base() + 0x1a64690);
+            const auto key = level_key(string(value<Address>(world + 184)));
+            if (special_level(key))
+                return 0;
+            std::lock_guard lock(movement_mutex);
+            const auto found = movement_styles.find(key);
+            return found == movement_styles.end() ? 0 : found->second;
+        }
+        unsigned scene_campaign()
+        {
+            const auto world = value<Address>(base() + 0x1a64690);
+            return world ? reinterpret_cast<unsigned (*)(Address)>(base() + 0x131400)(world) : 0;
+        }
+        unsigned effective_movement()
+        {
+            return movement_style(assigned_movement(), scene_campaign(), vanilla_movement);
+        }
+        std::uint64_t movement_attack(Address component, Address input, unsigned char ignore_blocks)
+        {
+            const auto selected = reinterpret_cast<std::uint64_t (*)(Address, Address, unsigned char)>(movement_attack_hook.original)(component, input, ignore_blocks);
+            if (selected < 4)
+            {
+                const auto style = effective_movement();
+                const auto actor = value<Address>(component + 24);
+                if (style == 1 && typed(component, 0x1427ae0) && actor && actor == player() && typed(value<Address>(actor + 424), 0x1589128))
+                {
+                    // filter pressed and buffered slides before the attack state or animation changes
+                    const auto event = reinterpret_cast<Address (*)(Address, unsigned)>(base() + 0x47cfa0)(component, static_cast<unsigned>(selected));
+                    return movement_attack_selection(static_cast<unsigned>(selected), style, string(event));
+                }
+            }
+            return selected;
+        }
+        unsigned char movement_skill(Address filter, Address actor)
+        {
+            const auto original = reinterpret_cast<unsigned char (*)(Address, Address)>(movement_skill_hook.original)(filter, actor);
+            if (typed(filter, 0x1496238) && actor && actor == player() && typed(value<Address>(actor + 424), 0x1589128))
+            {
+                // OButton is the base slide/body-slam skill. AP power skills retain their original ownership checks.
+                const auto skill = resolve(value<Address>(filter + 24));
+                if (typed(skill, 0x15ad140))
+                    return movement_skill_filter(original != 0, effective_movement(), value<unsigned>(filter + 16),
+                                                string(value<Address>(skill + 24)));
+            }
+            return original;
+        }
+        void movement_check(Address context, Address args, Address outputs)
+        {
+            const auto accessor = value<Address>(value<Address>(args + 16));
+            bool crouch = false, jump = false;
+            if (typed(accessor, 0x1749820) && value<unsigned>(accessor + 24) == 1)
+                for (const auto &[delta, name] : std::array<std::pair<unsigned, const char *>, 3>{{
+                         {824, "Scripts.Graph.Crash_CrouchCrawlSlide"},
+                         {3856, "Scripts.Graph.CrashBandicoot_JumpFlip"},
+                         {3104, "Scripts.Graph.CrashBandicoot_JumpFlip"}}})
+                {
+                    // Slab distances identify these three graph constants without changing shared script data.
+                    const auto meta = accessor + delta;
+                    if (typed(meta, 0x1745d78) && string(value<Address>(meta + 16)) == name)
+                    {
+                        crouch = delta == 824;
+                        jump = !crouch;
+                        break;
+                    }
+                }
+            const auto branches = (crouch || jump) ? list(outputs, 2) : std::vector<Address>{};
+            if (branches.size() == 2)
+            {
+                // OnStart removes crouch in Crash 1. retain it before initialization for either advanced style
+                // retaining it across F10 switches is safe because the input hook blocks Crash 1 crouch
+                const bool matches = crouch ? !movement_needs_crouch(assigned_movement(), scene_campaign())
+                                            : effective_movement() == 1;
+                reinterpret_cast<void (*)(Address, Address)>(base() + 0xcb6db0)(context, branches[matches ? 0 : 1]);
+                return;
+            }
+            reinterpret_cast<void (*)(Address, Address, Address)>(movement_check_hook.original)(context, args, outputs);
         }
         Address last_actor = 0;
         std::atomic_bool remote_death{false};
@@ -214,7 +298,6 @@ namespace ingame
             return typed(controls, 0x13eb4b8) && value<int>(controls + 16) == 0 && value<int>(invulnerable + 16) == 0;
         }
         std::atomic_uint active_style{0};
-        unsigned double_jump_allowed(unsigned owned, unsigned style, unsigned scene_campaign) { return owned && (style ? style : scene_campaign) == 3; }
         using Matrix = std::array<float, 16>;
         Matrix multiply(const Matrix &a, const Matrix &b)
         {
@@ -329,6 +412,10 @@ namespace ingame
         SceneView result;
         const auto world = value<Address>(base() + 0x1a64690);
         result.zone = string(value<Address>(world + 184));
+        if (const auto actor = player())
+            result.player_active = read(actor + 32, result.player_position) &&
+                                   std::all_of(result.player_position.begin(), result.player_position.end(),
+                                               [](float f) { return std::isfinite(f); });
         const auto system = value<Address>(base() + 0x1a890e0), meta = value<Address>(base() + 0x1a891d0);
         if (!system || !meta)
             return result;
@@ -375,6 +462,7 @@ namespace ingame
             Address model = 0, bundle = 0;
             unsigned color = 0;
             Address handle = 0;
+            float opacity = default_tint_opacity;
         };
         std::mutex crate_mutex;
         std::vector<TintedModel> tinted_models;
@@ -654,19 +742,12 @@ namespace ingame
             SIZE_T done = 0;
             return WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(at), &data, sizeof(data), &done) && done == sizeof(data);
         }
-        // try to get pale cyan (#8FD8D8) on all box types
-        constexpr std::array<float, 4> blue_tint{1, 1, 1, 1}, blue_blend{0.8f, 3.25f, 10.5f, 0.75f};
-        std::array<float, 4> tint_blend(unsigned color)
-        {
-            if (!color)
-                return blue_blend;
-            return {(color & 255) * 0.8f / 143, ((color >> 8) & 255) * 3.25f / 216, ((color >> 16) & 255) * 10.5f / 216, blue_blend[3]};
-        }
+        constexpr std::array<float, 4> blue_tint{1, 1, 1, 1};
         constexpr std::array<float, 4> default_tint{1, 1, 1, 1}, default_blend{1, 1, 1, 0}, default_emissive{1, 0, 0, 0};
         bool marker_tint(const TintedModel &t)
         {
             return typed(t.bundle, 0x138da80) && value<std::array<float, 4>>(t.bundle + 32) == blue_tint &&
-                   value<std::array<float, 4>>(t.bundle + 48) == tint_blend(t.color) && value<std::array<float, 4>>(t.bundle + 64) == default_emissive;
+                   value<std::array<float, 4>>(t.bundle + 48) == tint_blend(t.color, t.opacity) && value<std::array<float, 4>>(t.bundle + 64) == default_emissive;
         }
         bool has_tint(const TintedModel &t)
         {
@@ -713,7 +794,7 @@ namespace ingame
                 restore_tints(false);
                 return;
             }
-            if (!state.visible || state.marker_mode != MarkersTint || level_key(zone).empty())
+            if (!state.visible || state.marker_mode != MarkersTint || state.tint_opacity == 0 || level_key(zone).empty())
             {
                 restore_tints(true);
                 return;
@@ -721,7 +802,7 @@ namespace ingame
             const auto targets = crates(state, zone);
             for (auto it = tinted_models.begin(); it != tinted_models.end();)
             {
-                if (!has_tint(*it) || !marker_tint(*it) || std::none_of(targets.begin(), targets.end(), [&](const auto &c)
+                if (!has_tint(*it) || !marker_tint(*it) || it->opacity != state.tint_opacity || std::none_of(targets.begin(), targets.end(), [&](const auto &c)
                                                                         { return c.model == it->model && c.identity.color == it->color; }))
                 {
                     clear_tint(*it);
@@ -747,7 +828,7 @@ namespace ingame
                 // the factory's count of 1 means no retained owner. keep our own reference across game object removal
                 retain(bundle);
                 if (value<std::array<float, 4>>(bundle + 32) != default_tint || value<std::array<float, 4>>(bundle + 48) != default_blend ||
-                    value<std::array<float, 4>>(bundle + 64) != default_emissive || !write(bundle + 32, blue_tint) || !write(bundle + 48, tint_blend(c.identity.color)))
+                    value<std::array<float, 4>>(bundle + 64) != default_emissive || !write(bundle + 32, blue_tint) || !write(bundle + 48, tint_blend(c.identity.color, state.tint_opacity)))
                 {
                     release(bundle);
                     return;
@@ -764,8 +845,8 @@ namespace ingame
                     continue;
                 }
                 reinterpret_cast<void (*)(Address, Address)>(base() + 0xacd1c0)(c.model, bundle);
-                if (has_tint({c.model, bundle, c.identity.color, handle}))
-                    tinted_models.push_back({c.model, bundle, c.identity.color, handle});
+                if (has_tint({c.model, bundle, c.identity.color, handle, state.tint_opacity}))
+                    tinted_models.push_back({c.model, bundle, c.identity.color, handle, state.tint_opacity});
                 else
                 {
                     release(bundle);
@@ -1024,6 +1105,53 @@ namespace ingame
         license_hook.attach(0x7550c0, {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x20},
                             reinterpret_cast<Address>(license_query));
     }
+    void preserve_shared_ui_audio()
+    {
+        // the common resource loader serves both sound banks and their samples. installed before the first hub loads.
+        ui_audio_hook.attach(0x307ee0, {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x55, 0x57, 0x41, 0x56},
+                             reinterpret_cast<Address>(load_ui_audio));
+    }
+    void configure_movement(const std::map<std::string, unsigned> &styles)
+    {
+        if (!styles.empty())
+        {
+            // installed at the startup save gate, before the first player runs its graph's OnStart
+            if (!code_matches(0xcb6db0, std::array<unsigned char, 10>{0x48, 0x85, 0xd2, 0x74, 0x36, 0x48, 0x89, 0x5c, 0x24, 0x08}))
+                throw std::runtime_error("Movement graph dispatcher differs from the verified build");
+            if (!code_matches(0x47cfa0, std::array<unsigned char, 15>{0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x20}))
+                throw std::runtime_error("Movement attack event lookup differs from the verified build");
+            if (!movement_input_code)
+            {
+                if (!code_matches(0x4c06ee, std::array<unsigned char, 4>{0x0f, 0x92, 0xc0, 0xc3}))
+                    throw std::runtime_error("Movement input getter differs from the verified build");
+                const auto code = movement_input_stub(reinterpret_cast<Address>(&blocked_crouch_controller));
+                const auto memory = VirtualAlloc(nullptr, code.size(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                if (!memory)
+                    throw std::runtime_error("Cannot allocate movement input guard");
+                std::memcpy(memory, code.data(), code.size());
+                DWORD before = 0;
+                if (!VirtualProtect(memory, code.size(), PAGE_EXECUTE_READ, &before))
+                {
+                    VirtualFree(memory, 0, MEM_RELEASE);
+                    throw std::runtime_error("Cannot protect movement input guard");
+                }
+                FlushInstructionCache(GetCurrentProcess(), memory, code.size());
+                movement_input_code = reinterpret_cast<Address>(memory);
+            }
+            movement_input_hook.attach(0x4c06e0, {0x48, 0x8b, 0x41, 0x10, 0x8b, 0xca, 0x48, 0x8b, 0x40, 0x10, 0x48, 0x0f, 0xa3, 0xc8},
+                                       movement_input_code);
+            // the attack selector returns 0..3 or 4 for no attack. walking slide uses TertiaryFadeIn.
+            movement_attack_hook.attach(0x483670, {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20},
+                                        reinterpret_cast<Address>(movement_attack));
+            // CSkillUpgradeFilter resolves its skill handle at +24 and applies the normal/inverted mode at +16
+            movement_skill_hook.attach(0x4e9f60, {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18},
+                                       reinterpret_cast<Address>(movement_skill));
+            movement_check_hook.attach(0x82f220, {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x20},
+                                       reinterpret_cast<Address>(movement_check));
+        }
+        std::lock_guard lock(movement_mutex);
+        movement_styles = styles;
+    }
     std::vector<LiveBox> live_boxes(const Shared &state, const std::string &zone)
     {
         if (!marker_bounds(state.marker_mode))
@@ -1047,54 +1175,35 @@ namespace ingame
         update_collectibles(state, string(value<Address>(marker_world + 184)));
         update_tints(state, string(value<Address>(marker_world + 184)));
         const auto actor = player();
-        unsigned desired = 0;
+        vanilla_movement = state.vanilla_controls != 0;
         const auto world = value<Address>(base() + 0x1a64690);
         const auto key = level_key(string(value<Address>(world + 184)));
-        // mixed vehicle levels also retain vanilla controls until their active form is mapped
+        // mixed vehicle levels retain normal controls until their active form is mapped
         const bool walking = actor && typed(value<Address>(actor + 424), 0x1589128) && !special_level(key);
-        if (walking && !state.vanilla_controls && !key.empty() && key[0] == 'L')
-            for (unsigned i = 0; i < state.level_count; ++i)
-                if (key == state.levels[i].key)
-                    desired = state.levels[i].style;
-        if (desired > 3)
-            desired = 0;
+        const auto desired = walking && !vanilla_movement ? assigned_movement() : 0;
+        blocked_crouch_controller = walking && movement_style(desired, scene_campaign(), false) == 1
+                                        ? value<Address>(actor + 424) : 0;
         active_style = 0;
         state.applied_style = 0;
-        if (!desired)
+        if (desired && movement_check_hook.installed && movement_input_hook.installed && movement_attack_hook.installed && movement_skill_hook.installed)
         {
-            restore_styles();
-        }
-        else
-        {
-            bool changed = false;
-            for (const auto &b : styles)
-                if (!typed(b.at - 24, 0x1749820) || !typed(b.meta, 0x1745d78) || string(value<Address>(b.meta + 16)) != b.name)
-                    changed = true;
-            if (changed || styles.size() < 3)
-                restore_styles();
-            if (styles.empty())
-                bind_styles();
-            const auto manager = value<Address>(base() + 0x1a64690);
-            const auto actual = manager ? reinterpret_cast<unsigned (*)(Address)>(base() + 0x131400)(manager) : 0;
-            if (actual >= 1 && actual <= 3 && styles.size() >= 3)
-                for (auto &b : styles)
-                {
-                    if (value<unsigned>(b.at) != b.current)
-                    {
-                        state.vanilla_controls = 1;
-                        active_style = 0;
-                        restore_styles();
-                        copy(state.error, "Crashsanity stopped: movement query changed");
-                        break;
-                    }
-                    const auto requested = style_value(desired, actual, b.original);
-                    SIZE_T done = 0;
-                    if (!WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(b.at), &requested, 4, &done) || done != 4)
-                        throw std::runtime_error("Cannot update movement-style query");
-                    b.current = requested;
-                    active_style = desired;
-                    state.applied_style = desired;
-                }
+            bool crouch = false;
+            for (const auto component : list(value<Address>(actor + 24), 128))
+                if (typed(component, 0x13bbbd0) && value<Address>(component + 24) == actor &&
+                    (value<unsigned>(component + 32) & 1) && !(value<unsigned>(component + 32) & 24) &&
+                    string(value<Address>(value<Address>(component + 56) + 16)) == "Scripts.Graph.Crash_CrouchCrawlSlide")
+                    crouch = true;
+            if (desired == 1 || crouch)
+            {
+                missing_crouch_actor = 0;
+                active_style = desired;
+                state.applied_style = desired;
+            }
+            else if (actor != missing_crouch_actor)
+            {
+                missing_crouch_actor = actor;
+                copy(state.error, "Crashsanity waiting for crouch/slide component. Re-enter the level.");
+            }
         }
         if (key.empty() || !state.death_link)
         {
@@ -1144,7 +1253,10 @@ namespace ingame
         std::lock_guard lock(crate_mutex);
         restore_tints(game_thread);
         active_style = 0;
-        restore_styles();
+        // these guards remain active because an existing actor could retain its crouch component
+        vanilla_movement = true;
+        const auto actor = player(), controller = value<Address>(actor + 424);
+        blocked_crouch_controller = actor && typed(controller, 0x1589128) && scene_campaign() == 1 ? controller : 0;
         death_handle = 0;
         death_hook.restore();
         observed_deaths = 0;
@@ -1165,6 +1277,6 @@ namespace ingame
         const auto manager = value<Address>(base() + 0x1a64690);
         const auto campaign = style ? 0 : manager ? reinterpret_cast<unsigned (*)(Address)>(base() + 0x131400)(manager)
                                                   : 0;
-        return double_jump_allowed(owned, style, campaign);
+        return movement_double_jump_allowed(owned, style, campaign);
     }
 }

@@ -429,8 +429,15 @@ namespace
             command("/quit");
             return 0;
         }
-        if (message == WM_KILLFOCUS && console_open)
+        if (message == WM_KILLFOCUS && console_open && !startup_mode)
             toggle_console();
+        // F10 is a system key. Consume releases and repeats too, so Windows is stopped here from entering menu mode
+        if (wp == VK_F10 && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN || message == WM_KEYUP || message == WM_SYSKEYUP))
+        {
+            if ((message == WM_KEYDOWN || message == WM_SYSKEYDOWN) && !(lp & (1LL << 30)))
+                command("/crashsanity toggle");
+            return 0;
+        }
         if (message == WM_KEYDOWN && !(lp & (1LL << 30)))
         {
             if (wp == VK_F1)
@@ -441,11 +448,6 @@ namespace
             if (wp == VK_F7)
             {
                 command("/markers toggle");
-                return 0;
-            }
-            if (wp == VK_F10)
-            {
-                command("/crashsanity toggle");
                 return 0;
             }
         }
@@ -1169,12 +1171,15 @@ namespace
                                0xffeeeeee);
                 }
                 std::vector<std::array<float, 4>> labels;
+                const auto campaign = ingame::hub_campaign(scene.zone);
                 for (unsigned i = 0; i < snapshot->entrance_count; ++i)
                 {
                     const auto &anchor = snapshot->entrances[i];
                     auto hub = std::string(anchor.hub);
                     hub[0] = 'l';
                     if (scene.zone.rfind("crash" + hub.substr(1, 1) + "/" + hub + "_", 0) != 0)
+                        continue;
+                    if (!campaign || !scene.player_active || !entrance_label_visible(scene.player_position, anchor.position, snapshot->hub_label_distances[campaign - 1]))
                         continue;
                     const auto target = level(anchor.destination);
                     if (!target)

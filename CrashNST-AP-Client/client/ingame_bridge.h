@@ -24,7 +24,8 @@ public:
     void update(std::vector<BoxMarker> markers);
     void message(std::string text);
     void goal(const std::string &text);
-    void progress(const CheckProgress &counts, const std::map<std::string, std::string> &placements);
+    void progress(const CheckProgress &counts, const std::map<std::string, std::string> &placements,
+                  const std::set<std::string> &unlocked);
     void feed(ingame::Line line, bool popup = true);
     void completion(const std::vector<std::string> &items, const std::vector<std::string> &locations);
     void configure(const std::map<std::string, unsigned> &styles, bool death_link);
@@ -42,6 +43,8 @@ public:
     bool startup() const { return startup_; }
     void startup_popup(bool show);
     void marker_mode(unsigned mode);
+    void hub_distance(const std::array<unsigned, 3> &distances);
+    void tint_opacity(float opacity);
     bool toggle(const std::string &target, const std::string &value);
     void stop(bool handover = false);
 

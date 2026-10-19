@@ -299,7 +299,8 @@ namespace ingame
                         observed |= 0x2000;
                     if (value<unsigned char>(row + 0x4c))
                         observed |= 0x200;
-                    collectible_earned[level] |= observed & collectible_mask(*spec) & ~c.selected;
+                    collectible_earned[level] |= collectible_pickups_from_save(
+                        observed & collectible_mask(*spec), c.selected, c.owned);
                 }
                 if (!c.owned)
                     continue;

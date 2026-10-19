@@ -72,6 +72,7 @@ class ClientRuntime
     std::string staged_server = server, staged_slot = slot, connection_password;
     std::vector<std::string> c2_access_levels = c2_regular_levels;
     ingame::StartupConnection startup_connection;
+    std::chrono::steady_clock::time_point transport_connected_at{};
     bool popups_ready = false, receipt_history_ready = false;
     std::map<int, std::string> player_aliases;
     std::vector<Json::Value> fresh_receipts;
@@ -108,6 +109,8 @@ class ClientRuntime
     const std::filesystem::path display_file = standalone::state_directory() / "display.json";
     unsigned box_marker_mode = ingame::MarkersTint;
     bool out_of_logic_markers = false;
+    std::array<unsigned, 3> hub_label_distances = ingame::default_hub_distances;
+    float tint_opacity = ingame::default_tint_opacity;
 
     std::string marker_error;
     std::chrono::steady_clock::time_point next_marker_attach = std::chrono::steady_clock::now();

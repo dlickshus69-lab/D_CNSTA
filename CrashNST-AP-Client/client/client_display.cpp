@@ -1,5 +1,6 @@
 #include "client_runtime.h"
 #include "ap_console.h"
+#include "game_runtime.h"
 #include <algorithm>
 #include <iostream>
 #include "crate_catalogue.h"
@@ -22,6 +23,12 @@ void ClientRuntime::update_bridge(AP_ConnectionStatus status)
     if (cloud && !session_failed)
         try
         {
+            if (seed && cloud->ready() && !cloud->game_pid())
+            {
+                // the save gate waits after executable unpacking and before the first hub loads
+                ingame::preserve_shared_ui_audio();
+                ingame::configure_movement(seed->movement_styles);
+            }
             cloud->tick(status == AP_ConnectionStatus::Authenticated);
         }
         catch (const std::exception &error)
@@ -41,6 +48,8 @@ void ClientRuntime::update_bridge(AP_ConnectionStatus status)
         try
         {
             box_markers = std::make_unique<BoxMarkers>(pid, !standalone::save_ready(), box_marker_mode);
+            box_markers->hub_distance(hub_label_distances);
+            box_markers->tint_opacity(tint_opacity);
             names_loaded = false;
             gem_refresh.reset();
             for (const auto &line : feed_history)
@@ -203,7 +212,11 @@ void ClientRuntime::update_display(ClientTick &tick)
             std::cout << "AP check display: " << progress_message << std::endl;
             previous_progress_message = progress_message;
         }
-        box_markers->progress(progress, tick.placements);
+        std::set<std::string> unlocked;
+        for (const auto &level : tick.levels)
+            if (has_access(tick.items, level))
+                unlocked.insert(level);
+        box_markers->progress(progress, tick.placements, unlocked);
     }
     if (tick.room_ready && box_markers)
     {

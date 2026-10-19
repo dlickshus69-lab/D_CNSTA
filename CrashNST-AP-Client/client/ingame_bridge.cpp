@@ -66,6 +66,8 @@ BoxMarkers::BoxMarkers(DWORD pid, bool startup, unsigned marker_mode) : startup_
         shared_->version = ingame::protocol;
         shared_->bytes = sizeof(*shared_);
         shared_->box_half_size = 50;
+        shared_->hub_label_distances = ingame::default_hub_distances;
+        shared_->tint_opacity = ingame::default_tint_opacity;
         if (const auto size = std::getenv("CRASH_NST_MARKER_SIZE"))
         {
             char *end = nullptr;
@@ -258,7 +260,8 @@ void BoxMarkers::c3_buttons(bool ready, const std::set<std::string> &allowed)
     shared_->c3_buttons_active = mask;
     unlock();
 }
-void BoxMarkers::progress(const CheckProgress &counts, const std::map<std::string, std::string> &placements)
+void BoxMarkers::progress(const CheckProgress &counts, const std::map<std::string, std::string> &placements,
+                          const std::set<std::string> &unlocked)
 {
     if (counts.levels.size() > ingame::max_levels)
         throw std::runtime_error("Too many level labels");
@@ -279,14 +282,17 @@ void BoxMarkers::progress(const CheckProgress &counts, const std::map<std::strin
     int c3_index = 0;
     for (const auto &anchor : entrance_anchors())
     {
-        auto &entry = shared_->entrances[shared_->entrance_count++];
         const auto index = anchor.hub == "L300" ? c3_index++ : -1;
+        const auto found = placements.find(anchor.level);
+        const auto &destination = found == placements.end() ? anchor.level : found->second;
+        if (!unlocked.count(destination))
+            continue;
+        auto &entry = shared_->entrances[shared_->entrance_count++];
         if (index < 0 || entry.c3_button != index || std::strcmp(entry.hub, anchor.hub.c_str()))
             std::memcpy(entry.position, anchor.position.data(), 12);
         entry.c3_button = index;
         ingame::copy(entry.hub, anchor.hub);
-        const auto found = placements.find(anchor.level);
-        ingame::copy(entry.destination, found == placements.end() ? anchor.level : found->second);
+        ingame::copy(entry.destination, destination);
     }
     ++shared_->revision;
     unlock();
@@ -406,6 +412,24 @@ void BoxMarkers::marker_mode(unsigned mode)
         throw std::invalid_argument("Invalid crate marker mode");
     lock();
     shared_->marker_mode = mode;
+    ++shared_->revision;
+    unlock();
+}
+void BoxMarkers::hub_distance(const std::array<unsigned, 3> &distances)
+{
+    if (std::any_of(distances.begin(), distances.end(), [](unsigned distance) { return distance > ingame::max_hub_distance; }))
+        throw std::invalid_argument("Invalid hub label distance");
+    lock();
+    shared_->hub_label_distances = distances;
+    ++shared_->revision;
+    unlock();
+}
+void BoxMarkers::tint_opacity(float opacity)
+{
+    if (!ingame::valid_tint_opacity(opacity))
+        throw std::invalid_argument("Invalid tint opacity");
+    lock();
+    shared_->tint_opacity = opacity;
     ++shared_->revision;
     unlock();
 }

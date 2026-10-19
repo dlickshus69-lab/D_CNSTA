@@ -35,6 +35,11 @@ namespace ingame
         return (mask & 0x2000) ? mask | 0x7000 : mask;
     }
     inline unsigned collectible_observed(unsigned mask) { return (mask & 0x7000) ? (mask & ~0x7000) | 0x2000 : mask; }
+    inline unsigned collectible_pickups_from_save(unsigned observed, unsigned selected, unsigned owned)
+    {
+        // received AP items also set save bits and must not count as pickups of selected checks
+        return observed & ~(selected & owned);
+    }
     inline constexpr const char *collectible_events[]{"gem", "extra_gem", "relic", "crystal"};
     inline std::int64_t collectible_location(const CollectibleSpec &spec, unsigned i)
     {

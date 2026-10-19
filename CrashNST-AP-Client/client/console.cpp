@@ -82,7 +82,7 @@ namespace ingame
     {
         static const std::vector<std::string> names{
             "/help", "/server", "/port", "/slot", "/password", "/connect", "/disconnect", "/status", "/quit",
-            "/crashsanity", "/markers", "/boxmarkers", "/outoflogic", "/clear", "!help", "!license", "!options", "!admin", "!players", "!getitem", "!hint", "!hint_location", "!remaining",
+            "/crashsanity", "/markers", "/boxmarkers", "/outoflogic", "/hubdistance", "/hubdistance_c1", "/hubdistance_c2", "/hubdistance_c3", "/tint_opacity", "/clear", "!help", "!license", "!options", "!admin", "!players", "!getitem", "!hint", "!hint_location", "!remaining",
             "!missing", "!checked", "!status", "!release", "!collect", "!countdown", "!alias"};
         return names;
     }
@@ -193,6 +193,37 @@ namespace ingame
         if (zone.rfind("maps/", 0) == 0)
             zone.erase(0, 5);
         return zone == "crash1/c1_startscreen/c1_startscreen";
+    }
+    float tint_opacity(const std::string &value)
+    {
+        std::size_t end = 0;
+        float opacity;
+        try
+        {
+            opacity = std::stof(value, &end);
+        }
+        catch (const std::exception &)
+        {
+            throw std::invalid_argument("Use /tint_opacity 0..1");
+        }
+        if (end != value.size() || !valid_tint_opacity(opacity))
+            throw std::invalid_argument("Use /tint_opacity 0..1");
+        return opacity;
+    }
+    unsigned hub_distance(const std::string &value)
+    {
+        if (value.empty() || value.size() > 6 ||
+            !std::all_of(value.begin(), value.end(), [](unsigned char c) { return c >= '0' && c <= '9'; }))
+            throw std::invalid_argument("Use /hubdistance 0..100000 (0 hides labels)");
+        const auto distance = std::stoul(value);
+        if (distance > max_hub_distance)
+            throw std::invalid_argument("Use /hubdistance 0..100000 (0 hides labels)");
+        return static_cast<unsigned>(distance);
+    }
+    bool entrance_label_visible(const std::array<float, 3> &player, const float *entrance, unsigned distance)
+    {
+        const float dx = player[0] - entrance[0], dy = player[1] - entrance[1], dz = player[2] - entrance[2];
+        return distance && dx * dx + dy * dy + dz * dz <= static_cast<float>(distance) * distance;
     }
     std::array<POINT, 3> campaign_label_positions(unsigned width, unsigned height)
     {

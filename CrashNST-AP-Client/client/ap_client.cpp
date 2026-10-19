@@ -163,12 +163,12 @@ void ClientRuntime::finish()
                 }
             }
             if (cloud->uploading())
-                std::cerr << "Final cloud acknowledgement pending.\n"
+                std::cerr << "Final AP progress acknowledgement pending.\n"
                              "Local working saves and upload journal retained for reconnect.\n";
         }
         catch (const std::exception &error)
         {
-            std::cerr << "Final AP cloud save: " << error.what() << ". Local working saves retained.\n";
+            std::cerr << "Final AP progress sync: " << error.what() << ". Local saves and progress retained.\n";
         }
     }
 }

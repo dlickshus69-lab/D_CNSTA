@@ -11,6 +11,8 @@ namespace ingame
     std::vector<std::string> unpack_names(const Shared &state, unsigned begin, unsigned end);
     const std::vector<std::string> &commands();
     unsigned box_marker_mode(const std::string &name);
+    unsigned hub_distance(const std::string &value);
+    float tint_opacity(const std::string &value);
     const char *box_marker_mode_name(unsigned mode);
     bool valid_server(const std::string &server);
     struct ConsoleInput
@@ -43,6 +45,7 @@ namespace ingame
         }
     };
     std::array<POINT, 3> campaign_label_positions(unsigned width, unsigned height);
+    bool entrance_label_visible(const std::array<float, 3> &player, const float *entrance, unsigned distance);
     struct Popup
     {
         Line line;

@@ -953,8 +953,8 @@ LevelRouting::LevelRouting(DWORD pid, const std::map<std::string, std::string> &
         {
             if (count >= 101)
                 throw std::runtime_error("Too many level placements");
-            if (source[1] == '1' && (read<int>(process_, zone_for(source) + 344) < 0 || read<int>(process_, zone_for(source) + 344) > 34))
-                throw std::runtime_error("C1 physical entrance has an invalid game progression index");
+            if (source[1] == '1' && !c1_entrance_progression_valid(source, read<int>(process_, zone_for(source) + 344)))
+                throw std::runtime_error("C1 physical entrance has an invalid game progression index: " + source);
             put(256 + count * 24, zone_for(source));
             put(264 + count * 24, zone_for(destination));
             put(272 + count * 24, zone_for("L" + source.substr(1, 1) + "00"));
@@ -1070,7 +1070,7 @@ void LevelRouting::detach()
     }
 }
 
-bool LevelRouting::bind_secret(std::uintptr_t handle)
+bool LevelRouting::bind_secret(const std::array<unsigned char, 48> &handle)
 {
     const auto variable = probe_secret_variable(process_, handle);
     if (variable == variable_)

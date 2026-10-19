@@ -21,17 +21,17 @@ namespace ingame
         const auto at = reinterpret_cast<void *>(base() + rva);
         if (!ReadProcessMemory(GetCurrentProcess(), at, actual.data(), actual.size(), &got) || got != actual.size() ||
             actual != from)
-            throw std::runtime_error("Local collectible hook changed");
+            throw std::runtime_error("Game function hook changed");
         DWORD previous = 0;
         if (!VirtualProtect(at, to.size(), PAGE_EXECUTE_READWRITE, &previous))
-            throw std::runtime_error("Cannot protect collectible hook");
+            throw std::runtime_error("Cannot protect game function hook");
         const bool written =
             WriteProcessMemory(GetCurrentProcess(), at, to.data(), to.size(), &got) && got == to.size();
         DWORD unused = 0;
         const bool protected_again = VirtualProtect(at, to.size(), previous, &unused) != 0;
         FlushInstructionCache(GetCurrentProcess(), at, to.size());
         if (!written || !protected_again)
-            throw std::runtime_error("Cannot write collectible hook");
+            throw std::runtime_error("Cannot write game function hook");
     }
     void FunctionHook::attach(Address at, std::initializer_list<unsigned char> prefix, Address callback)
     {
@@ -48,7 +48,7 @@ namespace ingame
                 !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(base() + rva), actual.data(),
                                    actual.size(), &got) ||
                 got != actual.size() || actual != before)
-                throw std::runtime_error("Local collectible function differs");
+                throw std::runtime_error("Game function differs from the verified build");
             auto trampoline = before;
             // calling original replays the displaced prologue, then resumes after the overwritten bytes
             const auto resume = jump(base() + rva + before.size(), 14);
@@ -56,13 +56,13 @@ namespace ingame
             const auto memory = reinterpret_cast<Address>(
                 VirtualAlloc(nullptr, trampoline.size(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
             if (!memory)
-                throw std::runtime_error("Cannot allocate collectible trampoline");
+                throw std::runtime_error("Cannot allocate game function trampoline");
             std::memcpy(reinterpret_cast<void *>(memory), trampoline.data(), trampoline.size());
             DWORD old = 0;
             if (!VirtualProtect(reinterpret_cast<void *>(memory), trampoline.size(), PAGE_EXECUTE_READ, &old))
             {
                 VirtualFree(reinterpret_cast<void *>(memory), 0, MEM_RELEASE);
-                throw std::runtime_error("Cannot protect collectible trampoline");
+                throw std::runtime_error("Cannot protect game function trampoline");
             }
             FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void *>(memory), trampoline.size());
             original = memory;

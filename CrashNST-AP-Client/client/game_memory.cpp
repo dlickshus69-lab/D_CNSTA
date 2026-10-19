@@ -1956,7 +1956,7 @@ GemTemplates probe_gem_templates_at(HANDLE process, const GemDiscovery &found)
     {
         if (!found.handles[i])
             throw std::runtime_error("A resolved local gem variable is missing");
-        result.handles[i] = read<48>(process, found.handles[i]);
+        result.handles[i] = *found.handles[i];
         gem_handle(process, result.handles[i], i);
     }
     return result;
@@ -2130,7 +2130,7 @@ GemDiscovery find_gem_routes(DWORD pid, const GemDiscovery &cached)
                         { return p != 0; }))
         {
             probe_gem_templates_at(process.get(), found);
-            probe_secret_variable(process.get(), found.secret_handle);
+            probe_secret_variable(process.get(), *found.secret_handle);
             for (unsigned i = 0; i < 6; ++i)
                 upgrade_handle(process.get(), found.upgrades[i], i, base);
             return found; // registry discovers new script allocations without scanning their bytes
@@ -2178,18 +2178,19 @@ GemDiscovery find_gem_routes(DWORD pid, const GemDiscovery &cached)
                         continue;
                     if (value<unsigned>(raw, 16) == 0xeb8b471d)
                     {
+                        const auto handle = read<48>(process.get(), pos + off);
                         try
                         {
-                            probe_secret_variable(process.get(), pos + off);
+                            probe_secret_variable(process.get(), handle);
                         }
                         catch (const std::exception &)
                         {
                             continue;
                         }
-                        if (found.secret_handle && value<std::uintptr_t>(read<48>(process.get(), found.secret_handle).data(), 40) !=
-                                                       value<std::uintptr_t>(raw, 40))
+                        if (found.secret_handle && value<std::uintptr_t>(found.secret_handle->data(), 40) !=
+                                                       value<std::uintptr_t>(handle.data(), 40))
                             throw std::runtime_error("Ambiguous engine secret-entry variable");
-                        found.secret_handle = pos + off;
+                        found.secret_handle = handle;
                     }
                     for (unsigned i = 0; i < 6; ++i)
                         if (value<unsigned>(raw, 16) == gem_hashes[i])
@@ -2203,32 +2204,17 @@ GemDiscovery find_gem_routes(DWORD pid, const GemDiscovery &cached)
                             {
                                 continue;
                             }
-                            if (found.handles[i] && value<std::uintptr_t>(read<48>(process.get(), found.handles[i]).data(), 40) !=
+                            if (found.handles[i] && value<std::uintptr_t>(found.handles[i]->data(), 40) !=
                                                         value<std::uintptr_t>(handle.data(), 40))
                                 throw std::runtime_error("Ambiguous local gem variable");
-                            found.handles[i] = pos + off;
-                        }
-                    for (unsigned i = 0; i < 6; ++i)
-                        if (value<unsigned>(raw, 16) == upgrade_hashes[i])
-                        {
-                            try
-                            {
-                                upgrade_handle(process.get(), pos + off, i, base);
-                            }
-                            catch (const std::exception &)
-                            {
-                                continue;
-                            }
-                            if (found.upgrades[i] && value<std::uintptr_t>(read<48>(process.get(), found.upgrades[i]).data(), 40) !=
-                                                         value<std::uintptr_t>(raw, 40))
-                                throw std::runtime_error("Ambiguous engine ability variable");
-                            found.upgrades[i] = pos + off;
+                            found.handles[i] = handle;
                         }
                 }
             }
         address = end;
     }
     probe_gem_templates_at(process.get(), found);
+    found.upgrades = ability_handles_at(process.get(), found.power_meta - 67452, base);
     return found;
 }
 
@@ -2314,6 +2300,27 @@ AbilityProbe probe_abilities_at(HANDLE process, const GemDiscovery &found, bool 
         read<5>(process, result.jump_call) != (installed ? jump_override : original_jump_call))
         throw std::runtime_error("Engine Double Jump call differs from the pinned build or has another override");
     return result;
+}
+
+std::vector<unsigned char> movement_input_stub(std::uintptr_t blocked_controller)
+{
+    if (!blocked_controller)
+        throw std::invalid_argument("Missing movement input state");
+    // this getter is a leaf. keep direction registers untouched instead of calling C++ from it
+    std::vector<unsigned char> code{
+        0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, // address of the controller restricted to CB1 movement
+        0x48, 0x3b, 0x08, 0x75, 0x1a,       // other controllers use the original getter
+        0x83, 0xfa, 0x3e, 0x77, 0x15,       // keep bit indices outside the reflected XBUTTON range unchanged
+        0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0,
+        0x48, 0x0f, 0xa3, 0xd0, 0x73, 0x05, // test the crouch/slide input mask
+        0x8b, 0xca, 0x31, 0xc0, 0xc3,
+        0x48, 0x8b, 0x41, 0x10, 0x8b, 0xca, 0x48, 0x8b, 0x40, 0x10,
+        0x48, 0x0f, 0xa3, 0xc8, 0x0f, 0x92, 0xc0, 0xc3};
+    // XBUTTON_B, R1, ATTACK_TERTIARY, B_LSHIFT and B_RCLICK all reach crouch/slide paths
+    const std::uint64_t buttons = (1ULL << 5) | (1ULL << 13) | (1ULL << 27) | (1ULL << 57) | (1ULL << 59);
+    std::memcpy(code.data() + 2, &blocked_controller, 8);
+    std::memcpy(code.data() + 22, &buttons, 8);
+    return code;
 }
 
 AbilityOwnership ability_ownership(const std::set<std::int64_t> &items, const std::set<char> &campaigns)
@@ -2904,7 +2911,7 @@ GemRefreshProbe probe_gem_refresh_at(HANDLE process, const GemDiscovery &found,
         value<std::uintptr_t>(p.method.entry.data(), 48) != slab + 67292)
         throw std::runtime_error("Engine gem refresh method templates changed");
     for (unsigned i = 0; i < 6; ++i)
-        p.variables[i] = value<std::uintptr_t>(read<48>(process, found.handles[i]).data(), 40);
+        p.variables[i] = value<std::uintptr_t>(found.handles[i]->data(), 40);
     return p;
 }
 
@@ -3411,10 +3418,9 @@ std::vector<unsigned char> c3_platform_event_copy(const C3ButtonEventProbe &butt
 
 std::uintptr_t nst_module_base(HANDLE process) { return module_base(process); }
 
-std::uintptr_t probe_secret_variable(HANDLE process, std::uintptr_t address)
+std::uintptr_t probe_secret_variable(HANDLE process, const std::array<unsigned char, 48> &handle)
 {
     const auto base = module_base(process);
-    const auto handle = read<48>(process, address);
     if ((value<unsigned>(handle.data(), 0) & 0xf0000000) != 0x40000000 ||
         value<unsigned>(handle.data(), 16) != 0xeb8b471d || value<unsigned>(handle.data(), 32) != 0x4a98ee98 ||
         metadata_name(process, value<std::uintptr_t>(handle.data(), 8)) != "SecretPortal_ID" ||
@@ -3430,6 +3436,12 @@ std::uintptr_t probe_secret_variable(HANDLE process, std::uintptr_t address)
         read<5>(process, base + 0x68b830) != std::array<unsigned char, 5>{{0xe9, 0x9b, 0x76, 0xe7, 0xff}})
         throw std::runtime_error("Engine secret-entry setter or variable type differs");
     return variable;
+}
+
+bool c1_entrance_progression_valid(const std::string &level, int index)
+{
+    // stormy Ascent has no position in the regular map progression. the game uses -1 for it..
+    return level == "L128" ? index == -1 : index >= 0 && index <= 34;
 }
 
 std::vector<ZoneRecord> read_zone_registry(HANDLE process)

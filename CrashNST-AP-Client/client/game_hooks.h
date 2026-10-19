@@ -19,7 +19,7 @@ public:
     ~LevelRouting();
     void detach();
     std::uintptr_t state() const { return remote_ + 4096; }
-    bool bind_secret(std::uintptr_t handle);
+    bool bind_secret(const std::array<unsigned char, 48> &handle);
     bool ready() const { return variable_ != 0; }
     unsigned start_count() const;
     unsigned secret_return_count() const;

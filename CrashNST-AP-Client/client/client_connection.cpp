@@ -69,7 +69,7 @@ void ClientRuntime::initialize_ap()
     deferred_receipt_bytes = 0;
     startup_connection.retry(server);
     AP_Init(server.c_str(), "Crash Bandicoot N. Sane Trilogy", slot.c_str(), connection_password.c_str());
-    AP_NetworkVersion client_version{1, 0, 0};
+    AP_NetworkVersion client_version{1, 0, 1};
     AP_SetClientVersion(&client_version);
     AP_EnableQueueItemRecvMsgs(false);
     AP_SetDeathLinkSupported(true);
@@ -130,6 +130,27 @@ int ClientRuntime::initialize()
                     throw std::runtime_error("Invalid out-of-logic marker setting");
                 out_of_logic_markers = config["out_of_logic_markers"].asBool();
             }
+            if (config.isMember("hub_label_distance"))
+            {
+                if (!config["hub_label_distance"].isUInt() || config["hub_label_distance"].asUInt() > ingame::max_hub_distance)
+                    throw std::runtime_error("Invalid hub label distance");
+                hub_label_distances.fill(config["hub_label_distance"].asUInt());
+            }
+            for (unsigned i = 0; i < hub_label_distances.size(); ++i)
+            {
+                const auto key = "hub_label_distance_c" + std::to_string(i + 1);
+                if (!config.isMember(key))
+                    continue;
+                if (!config[key].isUInt() || config[key].asUInt() > ingame::max_hub_distance)
+                    throw std::runtime_error("Invalid Crash " + std::to_string(i + 1) + " hub label distance");
+                hub_label_distances[i] = config[key].asUInt();
+            }
+            if (config.isMember("tint_opacity"))
+            {
+                if (!config["tint_opacity"].isNumeric() || !ingame::valid_tint_opacity(config["tint_opacity"].asFloat()))
+                    throw std::runtime_error("Invalid tint opacity");
+                tint_opacity = config["tint_opacity"].asFloat();
+            }
         }
     }
     catch (const std::exception &e)
@@ -158,7 +179,8 @@ void ClientRuntime::handle_commands()
             if (command == "/help")
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
-                    "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | "
+                    "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -275,6 +297,57 @@ void ClientRuntime::handle_commands()
                 print_console(std::string("Crate markers: ") + ingame::box_marker_mode_name(box_marker_mode) +
                               ". Use /boxmarkers bounds, tint or off.");
             }
+            else if (command == "/tint_opacity")
+            {
+                if (!argument.empty())
+                {
+                    const auto opacity = ingame::tint_opacity(argument);
+                    auto config = std::filesystem::exists(display_file) ? read_state_json(display_file)
+                                                                        : Json::Value(Json::objectValue);
+                    config["tint_opacity"] = opacity;
+                    std::filesystem::create_directories(display_file.parent_path());
+                    write_state_json(display_file, config);
+                    tint_opacity = opacity;
+                    if (box_markers)
+                        box_markers->tint_opacity(opacity);
+                }
+                print_console("Tint opacity: " + std::to_string(tint_opacity) + ". Use /tint_opacity 0..1 (default 0.75).");
+            }
+            else if (command == "/hubdistance" || command == "/hubdistance_c1" || command == "/hubdistance_c2" || command == "/hubdistance_c3")
+            {
+                const int hub = command == "/hubdistance" ? -1 : command.back() - '1';
+                if (!argument.empty())
+                {
+                    const auto distance = ingame::hub_distance(argument);
+                    auto config = std::filesystem::exists(display_file) ? read_state_json(display_file)
+                                                                        : Json::Value(Json::objectValue);
+                    auto distances = hub_label_distances;
+                    if (hub < 0)
+                    {
+                        distances.fill(distance);
+                        config["hub_label_distance"] = distance;
+                        for (unsigned i = 0; i < distances.size(); ++i)
+                            config.removeMember("hub_label_distance_c" + std::to_string(i + 1));
+                    }
+                    else
+                    {
+                        distances[hub] = distance;
+                        config["hub_label_distance_c" + std::to_string(hub + 1)] = distance;
+                    }
+                    std::filesystem::create_directories(display_file.parent_path());
+                    write_state_json(display_file, config);
+                    hub_label_distances = distances;
+                    if (box_markers)
+                        box_markers->hub_distance(distances);
+                }
+                if (hub < 0)
+                    print_console("Hub label distances: Crash 1 " + std::to_string(hub_label_distances[0]) +
+                                  ", Crash 2 " + std::to_string(hub_label_distances[1]) + ", Crash 3 " + std::to_string(hub_label_distances[2]) +
+                                  " game units. /hubdistance sets all three. /hubdistance_c1, _c2 or _c3 sets one (0 hides labels).");
+                else
+                    print_console("Crash " + std::to_string(hub + 1) + " hub label distance: " + std::to_string(hub_label_distances[hub]) +
+                                  " game units (0 hides labels).");
+            }
             else if (command == "/outoflogic")
             {
                 if (!argument.empty())
@@ -343,6 +416,29 @@ void ClientRuntime::process_packets(AP_ConnectionStatus status)
                 {
                     const auto command = message["cmd"].asString();
                     startup_connection.packet(command, message.get("fallback_pending", true).asBool());
+                    if (command == "NativeTransport")
+                        transport_connected_at = std::chrono::steady_clock::now();
+                    else if (command == "NativeDisconnected")
+                    {
+                        std::string notice = "AP disconnected";
+                        if (transport_connected_at != std::chrono::steady_clock::time_point{})
+                            notice += " after " + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::steady_clock::now() - transport_connected_at).count()) + "s";
+                        const auto code = message["close_code"].asUInt();
+                        if (code)
+                            notice += " (" + std::string(message["remote"].asBool() ? "server" : "client") +
+                                      " close " + std::to_string(code) + ")";
+                        const auto reason = message["reason"].asString();
+                        print_console(notice + ": " + (reason.empty() ? "No close reason supplied." : reason));
+                        transport_connected_at = {};
+                        if (message.get("retry_limit", false).asBool())
+                        {
+                            startup_connection.show = true;
+                            print_console("Connection stopped after 5 failed attempts. Correct /server and /slot, then use /connect to try again.");
+                        }
+                    }
+                    else if (command == "InvalidPacket")
+                        print_console("AP rejected " + message["original_cmd"].asString() + ": " + message["text"].asString());
                     if ((command == "Connected" || command == "RoomUpdate") && message["players"].isArray())
                         for (const auto &player : message["players"])
                             if (player["slot"].isInt() && player["alias"].isString())
@@ -371,7 +467,7 @@ void ClientRuntime::process_packets(AP_ConnectionStatus status)
                             (session.seed() != observed_seed || session.team() != message["team"].asInt() ||
                              session.slot() != message["slot"].asInt()))
                             throw std::runtime_error(
-                                "AP identity changed. Close NST before switching its cloud-save profile");
+                                "AP identity changed. Close NST before switching its local save profile");
                         SeedConfig validated_seed(slot_data);
                         session.open(session_directory, observed_seed, message["team"].asInt(), message["slot"].asInt(),
                                      slot_data);
@@ -402,7 +498,7 @@ void ClientRuntime::process_packets(AP_ConnectionStatus status)
                         {
                             deferred_receipt_bytes += Json::FastWriter().write(message).size();
                             if (deferred_receipts.size() >= 256 || deferred_receipt_bytes > 16 * 1024 * 1024)
-                                throw std::runtime_error("Too much received-item data before cloud sync");
+                                throw std::runtime_error("Too much received-item data before AP progress sync");
                             deferred_receipts.push_back(message);
                         }
                         else

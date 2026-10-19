@@ -63,7 +63,7 @@ void ClientRuntime::update_routing(ClientTick &tick)
                 routing_secret_return_count = secret_returns;
                 std::cout << "CB2 secret-room return selected. Original entrance preserved.\n";
             }
-            if (gem_cache.secret_handle && level_routing->bind_secret(gem_cache.secret_handle))
+            if (gem_cache.secret_handle && level_routing->bind_secret(*gem_cache.secret_handle))
             {
                 gem_refresh.reset();
                 routing_error.clear();

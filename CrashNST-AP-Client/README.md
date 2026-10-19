@@ -8,7 +8,7 @@
 
 ### Client
 1. In Steam, right-click **Crash Bandicoot N. Sane Trilogy → Manage → Browse local files**. Find `CrashBandicootNSaneTrilogy.exe`.
-2. Extract **`CrashNST-AP-Standalone-Windows-x64.zip`** into that folder, or copy **`dinput8.dll` and the entire `CrashNSTAP` folder** from the extracted ZIP.  
+2. Extract **`CrashNST-AP-Client-x64.zip`** into that folder, or copy **`dinput8.dll` and the entire `CrashNSTAP` folder** from the extracted ZIP.
         
 Place them directly next to the game EXE.  
 The resulting layout is:

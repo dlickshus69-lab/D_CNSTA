@@ -11,9 +11,18 @@
 | F10 | Restore normal movement if you're stuck in Crashsanity |
 
 Console input supports Left/Right, Home/End, Shift selection and Ctrl+A/C/V.
+Automatic connection attempts stop after five failures.  
+Correct the connection settings and use `/connect` to start a fresh attempt.
 
-HUD counters use **`checked/in logic (total)`**. `C`, `P` and `R` show selected gem, power-crystal and relic checks. 
-Campaign totals appear in the game chooser and on hub maps.
+HUD counters use **`checked/in logic (total)`**. `C`, `P` and `R` show selected gem, power-crystal and relic checks.   
+Campaign totals appear in the game choose menu and on hub maps.  
+Approach an unlocked hub entrance to see its destination label and check counts.  
+`/hubdistance_c1`, `/hubdistance_c2` and `/hubdistance_c3` show each hub's label
+distance.   
+Add a number to change it in game units (default 250, maximum 100000).  
+Use 0 to hide that hub's labels.  
+`/hubdistance 500` sets all three hubs to 500.  
+Settings are saved locally and restored next time.
 
 Useful local commands:
 
@@ -21,12 +30,19 @@ Useful local commands:
 /help
 /status
 /boxmarkers tint/bounds/off
+/tint_opacity 0.5
+/hubdistance 500
+/hubdistance_c1 1000
+/hubdistance_c2 250
+/hubdistance_c3 500
 /outoflogic on/off
 /disconnect
 /connect
 ```
 
 Markers normally show unchecked selected crates that are in logic. `/outoflogic on` also shows out-of-logic crates. 
+`/tint_opacity` shows the current tint strength.  
+Set it from 0 (no tint) to 1 (full tint), for example `/tint_opacity 0.5` for 50%. The default is 0.75.
 `box_item_spoilers` in the yaml can color markers by item category. Chat and `!` commands go to the AP server.
 
 When item spoilers are enabled, the client scouts selected locations on connection without creating hints. Item flags are cached per seed and slot for offline play. Boxes use the normal marker color until their flags arrive.

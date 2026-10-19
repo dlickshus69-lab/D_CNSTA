@@ -48,7 +48,7 @@ public:
         auto p = path_.parent_path() / "profiles" / path_.stem();
         return p;
     }
-    std::string storage_key() const { return "CrashNST:" + path_.stem().string() + ":state:v1"; }
+    std::string storage_key() const { return "CrashNST:" + path_.stem().string() + ":progress:v2"; }
     Json::Value cloud_progress() const;
     void restore_cloud_progress(const Json::Value &progress);
     const Json::Value &slot_data() const { return data_["slot_data"]; }

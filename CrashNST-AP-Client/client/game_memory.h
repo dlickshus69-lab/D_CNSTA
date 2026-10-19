@@ -4,9 +4,12 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
+
+std::vector<unsigned char> movement_input_stub(std::uintptr_t blocked_controller);
 
 struct ZoneRecord
 {
@@ -32,9 +35,12 @@ struct SceneView
     std::uintptr_t zone_address = 0;
     std::array<float, 16> view_projection{};
     bool camera_active = false;
+    std::array<float, 3> player_position{};
+    bool player_active = false;
 };
 std::uintptr_t nst_module_base(HANDLE process);
 std::vector<ZoneRecord> read_zone_registry(HANDLE process);
+bool c1_entrance_progression_valid(const std::string &level, int index);
 SceneView read_scene(HANDLE process);
 struct EntranceAnchor
 {
@@ -190,8 +196,9 @@ struct GemDiscovery
     std::uintptr_t ability_menu_meta = 0;
     std::uintptr_t crate_meta = 0;
     std::uintptr_t hud_meta = 0;
-    std::uintptr_t secret_handle = 0;
-    std::array<std::uintptr_t, 6> handles{};
+    // Scanning this process also finds temporary handle copies. Retain bytes, never their addresses.
+    std::optional<std::array<unsigned char, 48>> secret_handle;
+    std::array<std::optional<std::array<unsigned char, 48>>, 6> handles{};
     std::array<std::uintptr_t, 6> upgrades{}; // AP ability order, distinct from gem colors
     std::map<std::string, std::uintptr_t> graphs;
 };
@@ -299,7 +306,7 @@ GemRefreshProbe probe_gem_refresh_at(HANDLE process, const GemDiscovery &found,
 std::vector<unsigned char> gem_refresh_stub(const GemRefreshProbe &probe,
                                             const std::vector<GemRouteProbe> &jobs, std::uintptr_t remote,
                                             std::uintptr_t addon_tick = 0);
-std::uintptr_t probe_secret_variable(HANDLE process, std::uintptr_t handle);
+std::uintptr_t probe_secret_variable(HANDLE process, const std::array<unsigned char, 48> &handle);
 
 struct C3PlatformProbe
 {

@@ -494,19 +494,14 @@ std::map<char, std::string> Session::bind_saves(const std::filesystem::path &sav
 Json::Value Session::cloud_progress() const
 {
     Json::Value progress(Json::objectValue);
-    auto earned = checked();
-    const auto queued = pending();
-    earned.insert(queued.begin(), queued.end());
-    progress["earned"] = array(earned);
     progress["filler_cursor"] = filler_cursor();
     progress["local_collectibles"] = array(local_collectibles());
     return progress;
 }
 void Session::restore_cloud_progress(const Json::Value &progress)
 {
-    if (!ready() || !progress.isObject())
+    if (!ready() || !progress.isObject() || progress.size() != 2)
         throw std::runtime_error("Invalid cloud AP progress");
-    const auto earned = locations(progress["earned"]);
     const auto &cursor = progress["filler_cursor"];
     if (!cursor.isUInt() || cursor.asUInt() > max_items)
         throw std::runtime_error("Invalid cloud filler cursor");
@@ -516,16 +511,6 @@ void Session::restore_cloud_progress(const Json::Value &progress)
         ingame::local_collectible_item(data_["slot_data"], id);
         collected.insert(id);
     }
-    auto queued = pending();
-    const auto done = checked();
-    for (const auto id : earned)
-    {
-        if (!data_["slot_data"]["checks"].isMember(std::to_string(id)))
-            throw std::runtime_error("Cloud progress includes a location outside this slot");
-        if (!done.count(id))
-            queued.insert(id);
-    }
-    data_["pending"] = array(queued);
     data_["filler_cursor"] = std::max(filler_cursor(), cursor.asUInt());
     data_["local_collectibles"] = array(collected);
     dirty_ = true;
