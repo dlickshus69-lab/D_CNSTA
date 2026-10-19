@@ -609,6 +609,41 @@ namespace ingame
             }
             return false;
         }
+        bool request_scripted_death(Address actor)
+        {
+            if (!code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                      0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0}))
+                throw std::runtime_error("DeathLink script-message sender differs");
+            for (const auto component : list(value<Address>(actor + 24), 128))
+            {
+                const auto meta = value<Address>(component + 56), data = value<Address>(component + 16);
+                if (!typed(component, 0x13bbbd0) || value<Address>(component + 24) != actor ||
+                    !(value<unsigned>(component + 32) & 1) || (value<unsigned>(component + 32) & 24) ||
+                    !(value<unsigned char>(component + 40) & 1) || !typed(meta, 0x1745d78) ||
+                    string(value<Address>(meta + 16)) != "Scripts.Graph.Crash_DamageManager" ||
+                    !typed(data, 0x13bbb10) || !death_handle || value<Address>(data + 80) != death_handle.load())
+                    continue;
+                for (const auto delegator : list(value<Address>(meta + 160), 128))
+                {
+                    const auto message = value<Address>(delegator + 24), target = value<Address>(delegator + 32);
+                    if (!typed(delegator, 0x13bc268) || !typed(message, 0x17b6578) || !typed(target, 0x13bbcb8) ||
+                        string(value<Address>(message + 16)) != "Crash_DamageManager_c.GraphEvent_id_pmrewwnd_Definition")
+                        continue;
+                    if (!field_at(message, "_sender", 32, 8) ||
+                        !field_at(message, "GraphEvent_id_snc05c5g_Definition_Parameter", 56, 8) ||
+                        !field_at(message, "Field_id_16ghylas", 64, 1))
+                        throw std::runtime_error("DeathLink falling-death message layout differs");
+                    // CrashFallingDeath runs the normal respawn script. 
+                    // KillEntity leaves this reused actor at zero health so we can't use it :(
+                    std::array<Address, 11> sender{base() + 0x13bc390, 0, message, target};
+                    std::array<Address, 6> context{component};
+                    reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(
+                        reinterpret_cast<Address>(sender.data()), reinterpret_cast<Address>(context.data()));
+                    return true;
+                }
+            }
+            return false;
+        }
         void bind_player_death(Address actor)
         {
             if (actor == last_actor && bound_player_died())
@@ -1363,10 +1398,9 @@ namespace ingame
         if (!actor)
             return;
         bind_player_death(actor);
-        // verify CPlayer's vtable identity before reading health or invoking KillEntity.
-        if (value<Address>(base() + 0x1592220 + 0x138) != base() + 0x4eb7f0 ||
-            value<Address>(base() + 0x1592220 + 0x178) != base() + 0x4c3590)
-            return;
+        if (!code_matches(0x4df230, std::array<unsigned char, 16>{0x48, 0x89, 0x5c, 0x24, 8, 0x57, 0x48, 0x83,
+                                                                  0xec, 0x20, 0x8b, 0xb9, 0xf8, 0, 0, 0}))
+            throw std::runtime_error("DeathLink health getter differs");
         const auto health = reinterpret_cast<int (*)(Address)>(base() + 0x4df230)(actor);
         if (health < 0 || health > 10000)
             return;
@@ -1378,19 +1412,20 @@ namespace ingame
         if (remote_death && alive && GetTickCount64() > remote_deadline)
         {
             remote_death = false;
-            copy(state.error, "DeathLink death was not observed after the game KillEntity function");
+            copy(state.error, "DeathLink death was not observed after the game death script");
         }
         if (state.death_request != state.death_ack && alive && !remote_death && !state.console_open &&
             death_controls_ready(actor, scene().camera_active))
         {
-            if (!code_matches(0x4eb7f0, std::array<unsigned char, 16>{0x48, 0x89, 0x5c, 0x24, 0x10,
-                                                                      0x48, 0x89, 0x6c, 0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57}))
-                throw std::runtime_error("DeathLink KillEntity function differs");
-            // KillEntity builds game lethal-damage state and runs the death behavior
             remote_death = true;
             remote_deadline = GetTickCount64() + 3000;
-            reinterpret_cast<void (*)(Address, unsigned char, unsigned char, unsigned char, Address)>(base() + 0x4eb7f0)(actor, 0, 0, 0, 0);
-            state.death_ack = state.death_request;
+            if (request_scripted_death(actor))
+                state.death_ack = state.death_request;
+            else
+            {
+                remote_death = false;
+                copy(state.error, "DeathLink waiting for the player's death script");
+            }
         }
     }
     unsigned take_observed_deaths() { return observed_deaths.exchange(0); }
