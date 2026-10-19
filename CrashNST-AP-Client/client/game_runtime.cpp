@@ -52,6 +52,106 @@ namespace ingame
     namespace
     {
         using namespace engine_memory;
+        FunctionHook hub_bool_hook, hub_int_hook, hub_gate_query_hook;
+        std::atomic<unsigned> hub_areas{0x7fff};
+
+        void hub_gate_query(Address context, Address args, Address outputs)
+        {
+            const auto instance = value<Address>(context);
+            const auto meta = value<Address>(instance + 56);
+            const auto inputs = value<Address>(args + 16);
+            if (typed(instance, 0x13bbbd0) && typed(meta, 0x1745d78) &&
+                string(value<Address>(meta + 16)) == "Scripts.Graph.L300_Hub_C3_Hub_ElectricGate" &&
+                value<Address>(inputs) == meta - 23764 + 20316 &&
+                value<Address>(inputs + 8) == meta - 23764 + 20508 &&
+                typed(meta - 23764 + 20316, 0x1747910) && typed(meta - 23764 + 20508, 0x1749820) &&
+                value<unsigned>(meta - 23764 + 20508 + 24) == 0x800)
+            {
+                const auto branches = list(outputs, 2);
+                const auto owner = value<Address>(instance + 24);
+                const auto name = string(value<Address>(owner + 128));
+                const bool known = typed(owner, 0x141d490) && name.size() == 21 &&
+                                   name.compare(0, 20, "C3_Hub_ElectricGate0") == 0 && name[20] >= '2' && name[20] <= '5';
+                const bool unlocked = known && (hub_areas.load(std::memory_order_relaxed) & (1u << (10 + name[20] - '1')));
+                // OnStart otherwise disables gates from saved boss rewards before the contact adapter attaches
+                if (branches.size() == 2)
+                    reinterpret_cast<void (*)(Address, Address)>(base() + 0xcb6db0)(context, branches[unlocked ? 0 : 1]);
+                return;
+            }
+            reinterpret_cast<void (*)(Address, Address, Address)>(hub_gate_query_hook.original)(context, args, outputs);
+        }
+
+        unsigned hub_islands()
+        {
+            const auto mask = hub_areas.load(std::memory_order_relaxed);
+            return (mask & 6) == 6 ? 3 : (mask & 2) ? 2 : 1;
+        }
+
+        bool hub_bool_field(Address accessor, Address context)
+        {
+            // getter arguments and their field metadata are owned by the engine for this call
+            const auto field = *reinterpret_cast<const Address *>(accessor + 24);
+            const auto instance = *reinterpret_cast<const Address *>(context);
+            if (field && instance && *reinterpret_cast<const Address *>(instance) == base() + 0x13bbbd0)
+            {
+                const auto meta = *reinterpret_cast<const Address *>(instance + 56);
+                const auto name = meta ? *reinterpret_cast<const char *const *>(meta + 16) : nullptr;
+                // compiled C1 accessor descriptors omit names. match the verified descriptor and instance offset.
+                if (name && !std::strcmp(name, "Scripts.Graph.common_Crash1_Hub_Manager") &&
+                    field == meta - 142276 + 117340 && *reinterpret_cast<const unsigned short *>(field + 24) == 64)
+                    return false;
+                const auto offset = *reinterpret_cast<const unsigned short *>(field + 24);
+                // +224/+225 cache HUD choices and must still clear when the player leaves the lift
+                if (name && (offset == 161 || offset == 162) &&
+                    !std::strcmp(name, "Scripts.Graph.common_Crash2_Hub_WarpLift"))
+                {
+                    const auto entity = *reinterpret_cast<const Address *>(instance + 24);
+                    const auto owner = entity ? *reinterpret_cast<const char *const *>(entity + 128) : nullptr;
+                    if (owner && !std::strncmp(owner, "Floor0", 6) && owner[6] >= '1' && owner[6] <= '5' &&
+                        !std::strcmp(owner + 7, "_WarpLift"))
+                    {
+                        const auto floor = unsigned(owner[6] - '0');
+                        const auto area = offset == 161 ? floor + 1 : floor - 1;
+                        return area >= 1 && area <= 5 && (hub_areas.load(std::memory_order_relaxed) & (1u << (area + 4)));
+                    }
+                }
+            }
+            return reinterpret_cast<bool (*)(Address, Address)>(hub_bool_hook.original)(accessor, context);
+        }
+
+        int hub_int_field(Address accessor, Address context)
+        {
+            const auto original = reinterpret_cast<int (*)(Address, Address)>(hub_int_hook.original)(accessor, context);
+            const auto field = *reinterpret_cast<const Address *>(accessor + 24);
+            const auto instance = *reinterpret_cast<const Address *>(context);
+            if (field && instance && *reinterpret_cast<const Address *>(instance) == base() + 0x13bbbd0)
+            {
+                const auto meta = *reinterpret_cast<const Address *>(instance + 56);
+                const auto name = meta ? *reinterpret_cast<const char *const *>(meta + 16) : nullptr;
+                const auto offset = *reinterpret_cast<const unsigned short *>(field + 24);
+                // Only this navigation comparison uses the count. The separate initialization count must stay complete.
+                if (name && !std::strcmp(name, "Scripts.Graph.common_Crash1_Hub_Manager") &&
+                    field == meta - 142276 + 120244 && offset == 152)
+                    return std::min(original, static_cast<int>(hub_islands()));
+                // Reject a direction in the input router, before it changes map indices or starts the camera.
+                if (name && !std::strcmp(name, "Scripts.Graph.common_Crash1_Hub_Manager") &&
+                    field == meta - 142276 + 145340 && offset == 176)
+                {
+                    const auto island = *reinterpret_cast<const int *>(instance + 192);
+                    const auto spot = *reinterpret_cast<const int *>(instance + 208);
+                    const auto end = *reinterpret_cast<const int *>(instance + 204);
+                    const auto islands = static_cast<int>(hub_islands());
+                    const auto stormy = (original == 5 || original == 6) &&
+                        string(value<Address>(value<Address>(instance + 72) + 128)) == "Isle01_MapSpot_00_StormyTeleport";
+                    // direction 4 takes the engine's no-move/input-resume branch. counts used by initialization stay intact.
+                    if (island < 0 || island > 2 ||
+                        (original == 1 && (spot < 0 || end <= 0 || end > 64 || (spot >= end - 1 && island + 1 >= islands))) ||
+                        (island == 0 && islands < 3 && ((original == 0 && spot <= 0) || stormy)))
+                        return 4;
+                }
+            }
+            return original;
+        }
         bool event_owner(Address entity)
         {
             return entity && (typed(entity, 0x1592220) || typed(entity, 0x14c8ef8) || typed(entity, 0x14c7fb0) || typed(entity, 0x141d490)) && (value<unsigned>(entity + 56) & 4);
@@ -412,7 +512,35 @@ namespace ingame
         SceneView result;
         const auto world = value<Address>(base() + 0x1a64690);
         result.zone = string(value<Address>(world + 184));
-        if (const auto actor = player())
+        auto actor = player();
+        static Address map_actor = 0;
+        static std::uint64_t next_map_actor = 0;
+        if (hub_campaign(result.zone) == 1)
+        {
+            // C1 moves a separate overworld character. Hero_Crash stays near the map origin.
+            if (GetTickCount64() >= next_map_actor)
+            {
+                map_actor = 0;
+                next_map_actor = GetTickCount64() + 250;
+                for (const auto entity : event_owners())
+                    if (typed(entity, 0x14c8ef8) && string(value<Address>(entity + 128)) == "CrashHub" &&
+                        (value<unsigned>(entity + 56) & 0x100))
+                    {
+                        map_actor = entity;
+                        break;
+                    }
+            }
+            actor = event_owner(map_actor) && typed(map_actor, 0x14c8ef8) &&
+                            string(value<Address>(map_actor + 128)) == "CrashHub" &&
+                            (value<unsigned>(map_actor + 56) & 0x100)
+                        ? map_actor : 0;
+        }
+        else
+        {
+            map_actor = 0;
+            next_map_actor = 0;
+        }
+        if (actor)
             result.player_active = read(actor + 32, result.player_position) &&
                                    std::all_of(result.player_position.begin(), result.player_position.end(),
                                                [](float f) { return std::isfinite(f); });
@@ -1110,6 +1238,24 @@ namespace ingame
         // the common resource loader serves both sound banks and their samples. installed before the first hub loads.
         ui_audio_hook.attach(0x307ee0, {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x55, 0x57, 0x41, 0x56},
                              reinterpret_cast<Address>(load_ui_audio));
+    }
+    void configure_hub_access(const std::array<unsigned, 3> &areas)
+    {
+        if ((areas[0] & ~7u) || (areas[1] & ~31u) || (areas[2] & ~31u))
+            throw std::runtime_error("Invalid hub area permissions");
+        hub_areas.store(areas[0] | (areas[1] << 5) | (areas[2] << 10), std::memory_order_relaxed);
+        // copy each complete leaf function, including its internal short branches and returns.
+        hub_bool_hook.attach(0xc9c130, {0x48, 0x8b, 0x41, 0x18, 0x48, 0x85, 0xc0, 0x74, 0x11, 0x48, 0x8b, 0x0a,
+                                      0x48, 0x85, 0xc9, 0x74, 0x09, 0x0f, 0xb7, 0x40, 0x18, 0x0f, 0xb6, 0x04,
+                                      0x08, 0xc3, 0x32, 0xc0, 0xc3}, reinterpret_cast<Address>(hub_bool_field));
+        hub_int_hook.attach(0xc9e820, {0x4c, 0x8b, 0x02, 0x4d, 0x85, 0xc0, 0x74, 0x12, 0x48, 0x8b, 0x41, 0x18,
+                                     0x48, 0x85, 0xc0, 0x74, 0x09, 0x0f, 0xb7, 0x40, 0x18, 0x42, 0x8b, 0x04,
+                                     0x00, 0xc3, 0x33, 0xc0, 0xc3}, reinterpret_cast<Address>(hub_int_field));
+        if (!hub_gate_query_hook.installed &&
+            !code_matches(0xcb6db0, std::array<unsigned char, 10>{0x48, 0x85, 0xd2, 0x74, 0x36, 0x48, 0x89, 0x5c, 0x24, 8}))
+            throw std::runtime_error("Hub graph dispatcher differs from the verified build");
+        hub_gate_query_hook.attach(0x831da0, {0x48, 0x89, 0x5c, 0x24, 8, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57,
+                                            0x48, 0x83, 0xec, 0x20}, reinterpret_cast<Address>(hub_gate_query));
     }
     void configure_movement(const std::map<std::string, unsigned> &styles)
     {

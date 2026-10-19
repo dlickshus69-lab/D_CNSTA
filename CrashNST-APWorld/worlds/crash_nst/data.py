@@ -1,13 +1,14 @@
 """level data, archipelago IDs and item requirements"""
 
 from dataclasses import dataclass
+from collections import Counter
 import hashlib
 import json
 from pkgutil import get_data
 
 GAME = "Crash Bandicoot N. Sane Trilogy"
 BASE = 0xCB0000
-PROTOCOL = 2
+PROTOCOL = 4
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,63 @@ FILLER = ("1-Up", "Wumpa Fruit")
 ITEMS.update({name: BASE + 2201 + index for index, name in enumerate(FILLER)})
 TOKEN = "AP Token"
 ITEMS[TOKEN] = BASE + 2203
+HUB_ITEMS = {
+    (1, 2): "Crash 1 - Progressive Island Access",
+    (2, 2): "Crash 2 - Progressive Elevator Access",
+    **{(3, area): f"Crash 3 - Hub Section {area} Unlock" for area in range(2, 6)},
+}
+ITEMS.update(
+    {name: BASE + 2300 + game * 10 + area for (game, area), name in HUB_ITEMS.items()}
+)
+HUB_ITEM_COUNTS = {HUB_ITEMS[1, 2]: 2, HUB_ITEMS[2, 2]: 4}
+
+
+def valid_requirement_counts(items):
+    return all(
+        count <= HUB_ITEM_COUNTS.get(name, 1) for name, count in Counter(items).items()
+    )
+
+
+def hub_area(key):
+    """area of a physical entrance. secret stages use their source entrance."""
+    key = SECRET_SOURCES.get(key, key)
+    game, number = int(key[1]), int(key[2:])
+    if game == 1:
+        if key[0] == "B":
+            return 1 if number == 1 else 2 if number <= 3 else 3
+        return 1 + (number >= 9) + (number >= 16)
+    if key[0] == "B":
+        return number
+    # crash 3's bonus/DLC buttons are outside the four electric gates
+    if game == 3 and number > 25:
+        return 1
+    return (number - 1) // 5 + 1
+
+
+def hub_requirements(key):
+    game, area = int(key[1]), hub_area(key)
+    if area == 1:
+        return ()
+    if game != 3:
+        return (HUB_ITEMS[game, 2],) * (area - 1)
+    return (HUB_ITEMS[game, area],)
+
+
+def lock_requirements(required, placements, hub_locks, level_locks):
+    entrances = {destination: source for source, destination in placements.items()}
+    access_levels = {f"{level.name} - Access": level.key for level in LEVELS}
+    result = Counter()
+    for name in required:
+        key = access_levels.get(name)
+        if key is None:
+            result[name] = 1
+            continue
+        if level_locks:
+            result[name] = 1
+        if hub_locks:
+            parent = SECRET_SOURCES.get(key, key)
+            result |= Counter(hub_requirements(entrances.get(parent, parent)))
+    return tuple(result.elements())
 
 
 def validate_victory_goal(selected, bosses, config):

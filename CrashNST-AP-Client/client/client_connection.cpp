@@ -69,7 +69,7 @@ void ClientRuntime::initialize_ap()
     deferred_receipt_bytes = 0;
     startup_connection.retry(server);
     AP_Init(server.c_str(), "Crash Bandicoot N. Sane Trilogy", slot.c_str(), connection_password.c_str());
-    AP_NetworkVersion client_version{1, 0, 1};
+    AP_NetworkVersion client_version{1, 0, 3};
     AP_SetClientVersion(&client_version);
     AP_EnableQueueItemRecvMsgs(false);
     AP_SetDeathLinkSupported(true);
@@ -86,6 +86,14 @@ void ClientRuntime::initialize_ap()
     AP_SetItemRecvCallback([](std::int64_t, int, bool) {});
     AP_SetLocationCheckedCallback([](std::int64_t) {});
     AP_Start();
+}
+
+void ClientRuntime::save_connection()
+{
+    Json::Value config;
+    config["server"] = staged_server;
+    config["slot"] = staged_slot;
+    write_state_json(standalone::connection_file(), config);
 }
 
 int ClientRuntime::initialize()
@@ -105,8 +113,9 @@ int ClientRuntime::initialize()
     }
     catch (const std::exception &error)
     {
-        std::cerr << "Session resume: " << error.what() << std::endl;
-        return 2;
+        startup_connection.show = true;
+        std::cerr << "Cached AP session unavailable: " << error.what()
+                  << ". Cached files retained. Connect to a current seed using the startup console.\n";
     }
     const auto host = server.rfind("wss://", 0) == 0  ? server.substr(6)
                       : server.rfind("ws://", 0) == 0 ? server.substr(5)
@@ -190,7 +199,8 @@ void ClientRuntime::handle_commands()
                 else if (ingame::valid_server(argument))
                 {
                     staged_server = argument;
-                    print_console("Server set to " + argument + ". /connect applies it.");
+                    save_connection();
+                    print_console("Server saved as " + argument + (standalone::save_ready() ? ". Restart NST to apply it." : ". /connect applies it."));
                 }
                 else
                     print_console("Invalid server. Use host:port, ws://host:port or wss://host:port.");
@@ -211,7 +221,8 @@ void ClientRuntime::handle_commands()
                 else
                 {
                     staged_server = address;
-                    print_console("Server set to " + address + ". /connect applies it.");
+                    save_connection();
+                    print_console("Server saved as " + address + (standalone::save_ready() ? ". Restart NST to apply it." : ". /connect applies it."));
                 }
             }
             else if (command == "/slot")
@@ -222,7 +233,8 @@ void ClientRuntime::handle_commands()
                                                                 [](unsigned char c) { return c < 32 || c == 127; }))
                 {
                     staged_slot = argument;
-                    print_console("Slot set to " + argument + ". /connect applies it.");
+                    save_connection();
+                    print_console("Slot saved as " + argument + (standalone::save_ready() ? ". Restart NST to apply it." : ". /connect applies it."));
                 }
                 else
                     print_console("Invalid slot name.");
@@ -241,9 +253,10 @@ void ClientRuntime::handle_commands()
                 running = false;
             else if (command == "/connect")
             {
+                save_connection();
                 if ((staged_server != server || staged_slot != slot) && standalone::save_ready())
-                    print_console("Close NST before changing server or slot. Its saves belong to the current AP "
-                                  "profile. Settings are staged.");
+                    print_console("Connection settings saved. Restart NST to use the new server or slot. "
+                                  "This running game keeps its current save profile.");
                 else
                 {
                     AP_Shutdown();
@@ -270,10 +283,6 @@ void ClientRuntime::handle_commands()
                     names_loaded = false;
                     submitted_checks.clear();
                     goal_sent = false;
-                    Json::Value config;
-                    config["server"] = server;
-                    config["slot"] = slot;
-                    write_state_json(standalone::connection_file(), config);
                     print_console("Connecting to " + server + " as " + slot + ".");
                 }
             }
@@ -477,10 +486,7 @@ void ClientRuntime::process_packets(AP_ConnectionStatus status)
                         const auto scouts = session.scout_locations();
                         if (!scouts.empty())
                             AP_SendLocationScouts(scouts, 0);
-                        Json::Value config;
-                        config["server"] = server;
-                        config["slot"] = slot;
-                        write_state_json(standalone::connection_file(), config);
+                        save_connection();
                         if (cloud && cloud->key() != session.storage_key())
                             throw std::runtime_error(
                                 "AP seed changed. Close NST and restart it through Steam for the new save profile");

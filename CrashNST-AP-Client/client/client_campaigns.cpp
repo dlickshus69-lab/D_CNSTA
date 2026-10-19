@@ -102,7 +102,7 @@ void ClientRuntime::update_c2(ClientTick &tick)
                 c2_boss = std::make_unique<C2BossPortals>(pid, active_bosses);
                 for (const auto &[level, entity] : active_bosses)
                     std::cout << level
-                              << " Access applied. Approach the boss entrance once to enable it, then step away "
+                              << " unlocked. Approach the boss entrance once to enable it, then step away "
                               << "and approach again after its teleport effect appears.\n"
                               << std::flush;
             }
@@ -190,7 +190,7 @@ C3HubState ClientRuntime::update_c3_gates(ClientTick &tick)
         {
             try
             {
-                // Alternate buttons use their destination's Access item, not their displayed hub number.
+                // alternate buttons follow their destination's lock settings
                 bool locked = !c3_allowed.count(key);
                 if (gate->set_locked(locked))
                 {
@@ -231,7 +231,7 @@ void ClientRuntime::update_c1(ClientTick &tick)
             {
                 c1_map = std::make_unique<C1MapAccess>(pid, found);
                 previous_c1_allowed.clear();
-                std::cout << "C1 map access hook attached. Level confirmation requires Access.\n" << std::flush;
+                std::cout << "C1 map access hook attached. Level confirmation follows AP lock settings.\n" << std::flush;
             }
             c1_error.clear();
         }
@@ -300,7 +300,7 @@ void ClientRuntime::update_c3_access(ClientTick &tick, const C3HubState &hub)
             {
                 const auto &anchor = *c3_entities.begin();
                 c3_portals = std::make_unique<C3PortalAccess>(pid, anchor.second, anchor.first);
-                std::cout << "C3 portal entry hook attached. Current destinations require their Access items.\n"
+                std::cout << "C3 portal entry hook attached. Destinations follow AP lock settings.\n"
                           << std::flush;
             }
             if (c3_portals && !c3_portals->update(c3_allowed))
@@ -334,7 +334,10 @@ void ClientRuntime::update_c3_access(ClientTick &tick, const C3HubState &hub)
                              "central platform.\n"
                           << std::flush;
             }
-            if (c3_access && !c3_access->update(c3_allowed, c3_selected))
+            std::array<bool, 4> areas{};
+            for (unsigned i = 0; i < areas.size(); ++i)
+                areas[i] = tick.room_ready && hub_area_unlocked(*seed, tick.items, 3, i + 2);
+            if (c3_access && !c3_access->update(c3_allowed, c3_selected, areas))
                 c3_access.reset();
             if (box_markers)
                 box_markers->c3_buttons(c3_access != nullptr, c3_allowed);

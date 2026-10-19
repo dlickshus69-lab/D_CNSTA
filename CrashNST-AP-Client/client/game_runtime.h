@@ -18,6 +18,7 @@ namespace ingame
     std::string level_key(std::string zone);
     unsigned hub_campaign(std::string zone);
     void preserve_shared_ui_audio();
+    void configure_hub_access(const std::array<unsigned, 3> &areas);
     void configure_movement(const std::map<std::string, unsigned> &styles);
     void update_gameplay(Shared &state);
     unsigned take_observed_deaths();

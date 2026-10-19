@@ -607,7 +607,7 @@ namespace
         return c;
     }
 
-    // the C1 hub queries the previously played zone to select its map spot. Use the physical entrance.
+    // hub scripts select map spots/return portals from the previous level. supply the physical entrance.
     std::vector<unsigned char> previous_entrance_stub(std::uintptr_t state, std::uintptr_t manager,
                                                       std::uintptr_t current_zone, std::uintptr_t original, std::uintptr_t assign, bool index)
     {
@@ -624,23 +624,41 @@ namespace
         imm(state);
         emit({0x80, 0x7e, 4, 1});
         std::vector<std::size_t> done{branch(0x85)};
-        emit({0x48, 0x8b, 0x86, 152, 0, 0, 0, 0x48, 0x85, 0xc0});
-        done.push_back(branch(0x84));
-        emit({0x48, 0x3b, 0x46, 32});
-        done.push_back(branch(0x85));
-        emit({0x48, 0x83, 0xbe, 144, 0, 0, 0, 0});
-        done.push_back(branch(0x84));
         emit({0x48, 0xb8});
         imm(manager);
         emit({0x48, 0x8b, 0x08, 0x48, 0x85, 0xc9});
         done.push_back(branch(0x84));
         emit({0x48, 0xb8});
         imm(current_zone);
-        emit({0xff, 0xd0, 0x48, 0x3b, 0x46, 32});
-        done.push_back(branch(0x85));
+        emit({0xff, 0xd0});
+        std::vector<std::size_t> hubs;
+        for (unsigned offset : {32u, 40u, 48u})
+        {
+            emit({0x48, 0x3b, 0x46, static_cast<unsigned char>(offset)});
+            hubs.push_back(branch(0x84));
+        }
+        emit({0xe9, 0, 0, 0, 0});
+        done.push_back(c.size() - 4);
+        for (auto at : hubs)
+        {
+            const auto d = static_cast<std::int32_t>(c.size() - at - 4);
+            std::memcpy(c.data() + at, &d, 4);
+        }
+        // no matching entrance history means a fresh hub spawn
+        emit({0x31, 0xd2, 0x48, 0x3b, 0x86, 152, 0, 0, 0});
+        const auto other_hub = branch(0x85);
         emit({0x48, 0x8b, 0x96, 144, 0, 0, 0});
+        const auto delta = static_cast<std::int32_t>(c.size() - other_hub - 4);
+        std::memcpy(c.data() + other_hub, &delta, 4);
         if (index)
-            emit({0x8b, 0x82, 88, 1, 0, 0, 0x89, 0x03, 0x48, 0x8b, 0xdf}); // CZoneInfo::_progressionIndex, +344.
+        {
+            emit({0xb8, 0xff, 0xff, 0xff, 0xff, 0x48, 0x85, 0xd2});
+            const auto no_entrance = branch(0x84);
+            emit({0x8b, 0x82, 88, 1, 0, 0}); // CZoneInfo::_progressionIndex, +344.
+            const auto d = static_cast<std::int32_t>(c.size() - no_entrance - 4);
+            std::memcpy(c.data() + no_entrance, &d, 4);
+            emit({0x89, 0x03, 0x48, 0x8b, 0xdf});
+        }
         emit({0x48, 0x8b, 0x0b, 0x48, 0x89, 0x13, 0x48, 0xb8});
         imm(assign);
         emit({0xff, 0xd0});
@@ -767,9 +785,7 @@ namespace
         return c;
     }
 
-    // New Game targets C1_Intro, which subsequently loads L101. Continue can target L101 directly.
-    // Redirect C1's menu destinations and C2's intro to their hubs.
-    // Hub entrances still use the normal shuffled loader and its recorded return destination.
+    // campaign menu loads always start at the default hub spawn, with no previous entrance history
     std::vector<unsigned char> campaign_start_stub(std::uintptr_t state, std::uintptr_t getter,
                                                    std::uintptr_t zone_vtable)
     {
@@ -786,10 +802,10 @@ namespace
         {
             emit({0x48, 0x8b, 0x48, 16, 0x48, 0x85, 0xc9});
             fallback.push_back(branch(0x84));
-            for (unsigned i = 0; i <= std::strlen(expected); ++i)
+            for (unsigned i = 0; i < std::strlen(expected); ++i)
             {
                 emit({0x80, 0x79, static_cast<unsigned char>(i), static_cast<unsigned char>(expected[i])});
-                fallback.push_back(branch(0x85)); // Exact terminator. Stop before reading past shorter strings.
+                fallback.push_back(branch(0x85)); // a shorter path fails at its terminator before any further byte is read
             }
         };
         emit({0x53, 0x48, 0x83, 0xec, 32, 0x48, 0xb8});
@@ -804,22 +820,21 @@ namespace
         imm(zone_vtable);
         emit({0x48, 0x39, 0x10});
         done.push_back(branch(0x85));
-        emit({0x48, 0x83, 0x7b, 120, 0});
-        std::vector<std::size_t> crash2{branch(0x84)};
-        emit({0x48, 0x3b, 0x43, 120});
-        const auto first_stage = branch(0x84);
-        // the menu resolves its intro resource outside the regular level registry.
-        path("crash1/c1_intro/c1_intro", crash2);
-        bind(first_stage, c.size());
-        emit({0x48, 0x8b, 0x4b, 32, 0xe9, 0, 0, 0, 0});
-        const auto c1_hub = c.size() - 4;
-        for (auto at : crash2)
+        std::vector<std::size_t> selected;
+        for (unsigned game = 1; game <= 3; ++game)
+        {
+            std::vector<std::size_t> next;
+            const auto prefix = "crash" + std::to_string(game) + "/";
+            path(prefix.c_str(), next);
+            emit({0x48, 0x8b, 0x4b, static_cast<unsigned char>(24 + game * 8), 0xe9, 0, 0, 0, 0});
+            selected.push_back(c.size() - 4);
+            for (auto at : next)
+                bind(at, c.size());
+        }
+        emit({0xe9, 0, 0, 0, 0});
+        done.push_back(c.size() - 4);
+        for (auto at : selected)
             bind(at, c.size());
-        emit({0x48, 0x83, 0xbb, 128, 0, 0, 0, 0});
-        done.push_back(branch(0x84)); // C2 must be enabled in this seed.
-        path("crash2/l200_intro/l200_intro", done);
-        emit({0x48, 0x8b, 0x8b, 128, 0, 0, 0});
-        bind(c1_hub, c.size());
         emit({0x48, 0x85, 0xc9});
         done.push_back(branch(0x84));
         emit({0x48, 0x39, 0x11});
@@ -873,8 +888,8 @@ LevelRouting::LevelRouting(DWORD pid, const std::map<std::string, std::string> &
             base_ + 0x7627e7, //tail jump to the map loader
             base_ + 0x830fd1, // pause-menu quit: choose the physical entrance's campaign hub
             base_ + 0x81a6d0, // campaign start: redirect intro/first-stage destinations to hubs
-            base_ + 0x274c85, // C1 map: query the previous zone using the physical entrance
-            base_ + 0x26fc5c, // C1 map: query its progression index using the physical entrance
+            base_ + 0x274c85, // hub spawn: query the physical previous entrance
+            base_ + 0x26fc5c, // hub spawn: query its physical progression index
             base_ + 0x74e85e // C2 secret-exit fade: return through the secret warp room
         }};
         // original opcode/displacement bytes, in sites order, used to verify and restore each patch.
@@ -2305,7 +2320,7 @@ C3HubAccess::C3HubAccess(DWORD pid, const std::map<std::string, std::uintptr_t> 
         const auto &anchor = *entities.begin();
         barriers_ = probe_c3_barriers_at(process_, anchor.second, anchor.first);
         platform_before_ = probe_c3_platform_at(process_, anchor.second, anchor.first);
-        remote_ = reinterpret_cast<std::uintptr_t>(VirtualAllocEx(process_, nullptr, probes.size() * 512 + 3 * 256,
+        remote_ = reinterpret_cast<std::uintptr_t>(VirtualAllocEx(process_, nullptr, probes.size() * 512 + 7 * 256,
                                                                   MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
         if (!remote_)
             throw std::runtime_error("Cannot allocate C3 script-event copies");
@@ -2314,6 +2329,9 @@ C3HubAccess::C3HubAccess(DWORD pid, const std::map<std::string, std::uintptr_t> 
         platform_route_ = remote_ + copied.size();
         const auto platform_event = c3_platform_event_copy(probes.front(), barriers_[0], platform_before_, platform_route_, remote_ + 320);
         copied.insert(copied.end(), platform_event.begin(), platform_event.end());
+        barrier_route_ = remote_ + copied.size();
+        const auto gates = c3_barrier_event_chain(probes.front(), barriers_, barrier_route_);
+        copied.insert(copied.end(), gates.begin(), gates.end());
         verified_copy(process_, remote_, copied.data(), copied.size(), "C3 script-event copies were not verified");
         // validate the whole owner set again before installing the shared route
         for (const auto &[key, probe] : entries_)
@@ -2383,7 +2401,7 @@ bool C3HubAccess::matches(const std::map<std::string, std::uintptr_t> &entities)
     return true;
 }
 
-bool C3HubAccess::update(const std::set<std::string> &allowed, bool traversal)
+bool C3HubAccess::update(const std::set<std::string> &allowed, bool traversal, const std::array<bool, 4> &areas)
 {
     if (!installed_)
         return false;
@@ -2401,7 +2419,7 @@ bool C3HubAccess::update(const std::set<std::string> &allowed, bool traversal)
     }
     const auto &anchor = *entries_.begin();
     const auto barriers = probe_c3_barriers_at(process_, anchor.second.entity, anchor.first,
-                                               traversal_installed_ ? barriers_[0].disable : 0);
+                                               traversal_installed_ ? barrier_route_ : 0);
     for (unsigned i = 0; i < barriers.size(); ++i)
         if (barriers[i].entity != barriers_[i].entity || barriers[i].meta != barriers_[i].meta ||
             barriers[i].entry_output != barriers_[i].entry_output || barriers[i].disable != barriers_[i].disable)
@@ -2465,11 +2483,21 @@ bool C3HubAccess::update(const std::set<std::string> &allowed, bool traversal)
         }
         platform_installed_ = platform;
     }
+    for (unsigned i = 0; i < barriers_.size(); ++i)
+    {
+        const auto branch = barrier_route_ + i * 256 + 32;
+        const auto before = read<std::uintptr_t>(process_, branch);
+        if (before && before != barriers_[i].disable)
+            throw std::runtime_error("C3 area dispatcher has an unknown branch");
+        const auto desired = areas[i] ? barriers_[i].disable : 0;
+        if (before != desired)
+            write(process_, branch, before, desired);
+    }
     if (traversal != traversal_installed_)
     {
         const auto &gate = barriers_[0];
-        const auto before = traversal_installed_ ? gate.disable : gate.original_output;
-        const auto after = traversal ? gate.disable : gate.original_output;
+        const auto before = traversal_installed_ ? barrier_route_ : gate.original_output;
+        const auto after = traversal ? barrier_route_ : gate.original_output;
         try
         {
             write(process_, gate.entry_output, before, after);
@@ -2504,7 +2532,7 @@ void C3HubAccess::detach()
             throw std::runtime_error("C3 graph changed before restoration");
     }
     const auto barriers = probe_c3_barriers_at(process_, anchor.second.entity, anchor.first,
-                                               traversal_installed_ ? barriers_[0].disable : 0);
+                                               traversal_installed_ ? barrier_route_ : 0);
     for (unsigned i = 0; i < barriers.size(); ++i)
         if (barriers[i].entity != barriers_[i].entity || barriers[i].meta != barriers_[i].meta ||
             barriers[i].entry_output != barriers_[i].entry_output || barriers[i].disable != barriers_[i].disable)
@@ -2512,7 +2540,7 @@ void C3HubAccess::detach()
     if (traversal_installed_)
     {
         const auto &gate = barriers_[0];
-        restore_boss_route(process_, gate.entry_output, gate.disable, gate.original_output);
+        restore_boss_route(process_, gate.entry_output, barrier_route_, gate.original_output);
         traversal_installed_ = false;
     }
     if (installed_)

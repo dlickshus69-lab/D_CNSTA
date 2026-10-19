@@ -23,6 +23,16 @@ void ClientRuntime::update_bridge(AP_ConnectionStatus status)
     if (cloud && !session_failed)
         try
         {
+            if (seed && cloud->ready())
+            {
+                std::array<unsigned, 3> areas{};
+                const auto items = session.items();
+                for (unsigned game = 1; game <= 3; ++game)
+                    for (unsigned area = 1; area <= (game == 1 ? 3u : 5u); ++area)
+                        if (hub_area_unlocked(*seed, items, game, area))
+                            areas[game - 1] |= 1u << (area - 1);
+                ingame::configure_hub_access(areas);
+            }
             if (seed && cloud->ready() && !cloud->game_pid())
             {
                 // the save gate waits after executable unpacking and before the first hub loads
@@ -213,9 +223,9 @@ void ClientRuntime::update_display(ClientTick &tick)
             previous_progress_message = progress_message;
         }
         std::set<std::string> unlocked;
-        for (const auto &level : tick.levels)
-            if (has_access(tick.items, level))
-                unlocked.insert(level);
+        for (const auto &[source, destination] : tick.placements)
+            if (!level_locked(*seed, tick.items, source))
+                unlocked.insert(destination);
         box_markers->progress(progress, tick.placements, unlocked);
     }
     if (tick.room_ready && box_markers)

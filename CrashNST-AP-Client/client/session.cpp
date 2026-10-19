@@ -125,6 +125,8 @@ bool Session::resume(const std::filesystem::path &directory, const std::string &
     if (!expected_seed.empty() && seed != expected_seed)
         return false;
     const auto state = read_json(directory / (digest(seed + '\n' + std::to_string(team) + '\n' + std::to_string(slot)) + ".json"));
+    // reject unusable cached rules before acquiring or rewriting any session state
+    const SeedConfig validated(state["slot_data"]);
     open(directory, seed, team, slot, state["slot_data"]);
     return true;
 }

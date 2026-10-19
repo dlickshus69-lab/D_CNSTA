@@ -33,7 +33,7 @@ struct CheckRules
         std::pair<std::string, std::string> key;
         std::int64_t id;
         std::string title;
-        std::vector<std::int64_t> required;
+        std::map<std::int64_t, unsigned> required;
         bool known;
     };
     std::vector<Rule> checks;

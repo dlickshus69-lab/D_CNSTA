@@ -1,5 +1,6 @@
 #include "check_progress.h"
 #include "ingame_protocol.h"
+#include "hub_access.h"
 #include <algorithm>
 #include <stdexcept>
 
@@ -26,6 +27,9 @@ namespace
         for (const auto &level : catalogue)
             for (const auto &[event, ids] : level.rules)
                 result.insert(ids.begin(), ids.end());
+        for (unsigned game = 1; game <= 3; ++game)
+            for (unsigned area = 2; area <= (game == 1 ? 3u : 5u); ++area)
+                result.insert(hub_access_item(game, area));
         return result;
     }
 } // namespace
@@ -104,11 +108,12 @@ CheckRules compile_check_rules(const std::map<std::pair<std::string, std::string
                 if (!selected.count(local_sources[id]["level"].asString()))
                     throw std::runtime_error("Local collectible outside selected levels");
                 const auto &rule = local_sources[id]["requirements"];
-                if (!rule.isArray() || rule.empty() || rule.size() > 40)
+                if (!rule.isArray() || rule.size() > 40)
                     throw std::runtime_error("Invalid local collectible requirements");
-                std::set<std::int64_t> unique;
+                std::map<std::int64_t, unsigned> counts;
                 for (const auto &item : rule)
-                    if (!item.isInt64() || !valid_items.count(item.asInt64()) || !unique.insert(item.asInt64()).second)
+                    if (!item.isInt64() || !valid_items.count(item.asInt64()) ||
+                        ++counts[item.asInt64()] > hub_item_limit(item.asInt64()))
                         throw std::runtime_error("Unknown local collectible requirement");
                 // reachable vanilla pickups do not activate platforms until actually collected
                 const auto item = local_sources[id]["item"].asInt64();
@@ -124,22 +129,21 @@ CheckRules compile_check_rules(const std::map<std::pair<std::string, std::string
     const bool local_rules_valid = result.error.empty();
     for (const auto &[key, id] : checks)
     {
-        std::vector<std::int64_t> required;
+        std::map<std::int64_t, unsigned> required;
         bool known = rules_valid && local_rules_valid;
         if (rules_valid)
         {
             const auto &rule = rules[std::to_string(id)];
-            known = known && rule.isArray() && !rule.empty() && rule.size() <= 40;
-            std::set<std::int64_t> unique;
+            known = known && rule.isArray() && rule.size() <= 40;
             if (known)
                 for (const auto &item : rule)
                 {
-                    if (!item.isInt64() || !valid_items.count(item.asInt64()) || !unique.insert(item.asInt64()).second)
+                    if (!item.isInt64() || !valid_items.count(item.asInt64()) ||
+                        ++required[item.asInt64()] > hub_item_limit(item.asInt64()))
                     {
                         known = false;
                         break;
                     }
-                    required.push_back(item.asInt64());
                 }
         }
         else
@@ -158,12 +162,12 @@ CheckProgress check_progress(const CheckRules &rules, const std::vector<std::pai
 {
     CheckProgress result;
     result.error = rules.error;
-    std::set<std::int64_t> owned;
+    std::map<std::int64_t, unsigned> owned;
     for (const auto &item : items)
-        owned.insert(item.first);
+        ++owned[item.first];
     for (const auto &[location, item] : rules.local_reward_items)
         if (local_collected.count(location))
-            owned.insert(item);
+            owned[item] = std::max(owned[item], 1u);
     for (const auto &rule : rules.checks)
     {
         const auto &key = rule.key;
@@ -191,7 +195,7 @@ CheckProgress check_progress(const CheckRules &rules, const std::vector<std::pai
             collectible->logic_known = false;
         if (!known && result.error.empty())
             result.error = "Unknown check requirements. Affected reachable markers hidden";
-        if (known && std::all_of(required.begin(), required.end(), [&](auto item) { return owned.count(item) != 0; }))
+        if (known && std::all_of(required.begin(), required.end(), [&](const auto &item) { return owned[item.first] >= item.second; }))
         {
             ++count.in_logic;
             if (collectible)

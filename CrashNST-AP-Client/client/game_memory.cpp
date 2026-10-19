@@ -1379,6 +1379,7 @@ std::array<C3BarrierEventProbe, 4> probe_c3_barriers_at(HANDLE process, std::uin
         probe.false_value = constant;
         const auto property = node(20188, 0x1748780);
         const auto owner = node(16548, 0x13bbcb8);
+        probe.owner_accessor = owner;
         probe.enabled_property = read<48>(process, property);
         const auto assignment = read<40>(process, probe.disable);
         const auto root = value<std::uintptr_t>(read<8>(process, probe.entry_output).data(), 0);
@@ -3376,6 +3377,36 @@ C3PlatformProbe probe_c3_platform_at(HANDLE process, std::uintptr_t button, cons
         result.active[i] = (value<unsigned>(entity.data(), 56) & 0x100) != 0;
     }
     return result;
+}
+
+std::vector<unsigned char> c3_barrier_event_chain(const C3ButtonEventProbe &button,
+                                                 const std::array<C3BarrierEventProbe, 4> &barriers,
+                                                 std::uintptr_t remote)
+{
+    if (!remote || (remote & 7) || remote > std::numeric_limits<std::uintptr_t>::max() - 4 * 256)
+        throw std::invalid_argument("Invalid C3 gate dispatch address");
+    std::vector<unsigned char> copied(4 * 256);
+    // the four electric gates share a contact graph, dispatch by its physical owner
+    for (unsigned i = 0; i < barriers.size(); ++i)
+    {
+        if (!barriers[i].entity || !barriers[i].owner_accessor || barriers[i].meta != barriers[0].meta)
+            throw std::invalid_argument("Invalid C3 gate owner or shared graph");
+        for (unsigned j = 0; j < i; ++j)
+            if (barriers[i].entity == barriers[j].entity)
+                throw std::invalid_argument("Duplicate C3 gate owner");
+        auto *raw = copied.data() + i * 256;
+        std::copy_n(button.templates.begin(), 144, raw);
+        const auto address = remote + i * 256;
+        const auto pointer = [&](unsigned offset, std::uintptr_t value)
+        { std::memcpy(raw + offset, &value, 8); };
+        pointer(16, barriers[i].owner_accessor);
+        pointer(24, address + 64);
+        pointer(32, 0);
+        pointer(40, i + 1 < barriers.size() ? address + 256 : 0);
+        pointer(88, address + 96);
+        pointer(136, barriers[i].entity);
+    }
+    return copied;
 }
 
 std::vector<unsigned char> c3_platform_event_copy(const C3ButtonEventProbe &button,

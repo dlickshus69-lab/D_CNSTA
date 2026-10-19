@@ -159,6 +159,7 @@ class ClientRuntime
     void register_packet_callbacks();
     void receive_items(const Json::Value &message);
     void initialize_ap();
+    void save_connection();
     void print_console(const std::string &text, bool popup = true);
     int initialize();
     void handle_commands();

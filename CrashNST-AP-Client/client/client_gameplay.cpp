@@ -28,7 +28,7 @@ void ClientRuntime::update_routing(ClientTick &tick)
             routing_start_count = 0;
             routing_secret_return_count = 0;
             gem_refresh.reset();
-            std::cout << "Campaign-start routing attached. Crash 1 and Crash 2 start in their hubs.\n";
+            std::cout << "Campaign-start routing attached. All campaigns start at their default hub spawn.\n";
             routing_error.clear();
         }
         catch (const std::exception &e)
@@ -48,7 +48,7 @@ void ClientRuntime::update_routing(ClientTick &tick)
         {
             std::set<std::string> allowed;
             for (const auto &[destination, source] : secret_stages)
-                if (tick.levels.count(destination) && has_access(tick.items, destination))
+                if (tick.levels.count(destination) && !level_locked(*seed, tick.items, destination))
                     allowed.insert(destination);
             level_routing->secrets(allowed);
             const auto count = level_routing->start_count();
@@ -78,7 +78,7 @@ void ClientRuntime::update_routing(ClientTick &tick)
         }
     if (!tick.room_valid)
         level_routing.reset();
-    tick.room_ready = tick.room_valid && (!(seed ? seed->shuffle : 0) || (level_routing && level_routing->ready()));
+    tick.room_ready = tick.room_valid && level_routing && level_routing->ready();
 }
 
 void ClientRuntime::update_zone(ClientTick &tick)
@@ -388,7 +388,7 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                     break;
                 const auto scene = read_scene(GetCurrentProcess());
                 const auto level = level_key(scene.zone);
-                if (!scene.camera_active || !tick.levels.count(level) || !has_access(tick.items, level))
+                if (!scene.camera_active || !level_accessible(*seed, tick.items, level))
                     break;
                 if (session.reserve_filler(index))
                 {

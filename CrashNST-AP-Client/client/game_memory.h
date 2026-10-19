@@ -134,7 +134,7 @@ struct C3ButtonEventProbe
 struct C3BarrierEventProbe
 {
     std::uintptr_t entity = 0, meta = 0, entry_output = 0, original_output = 0, disable = 0;
-    std::uintptr_t false_value = 0;
+    std::uintptr_t false_value = 0, owner_accessor = 0;
     std::array<unsigned char, 48> enabled_property{};
 };
 C3ButtonEventProbe probe_c3_button_events_at(HANDLE process, std::uintptr_t entity, const std::string &key,
@@ -142,6 +142,10 @@ C3ButtonEventProbe probe_c3_button_events_at(HANDLE process, std::uintptr_t enti
 std::array<C3BarrierEventProbe, 4> probe_c3_barriers_at(HANDLE process, std::uintptr_t button,
                                                         const std::string &key, std::uintptr_t override_route = 0);
 std::vector<unsigned char> c3_button_event_chain(const std::vector<C3ButtonEventProbe> &probes,
+                                                 std::uintptr_t remote);
+
+std::vector<unsigned char> c3_barrier_event_chain(const C3ButtonEventProbe &button,
+                                                 const std::array<C3BarrierEventProbe, 4> &barriers,
                                                  std::uintptr_t remote);
 
 int c3_button_index(const std::string &name);

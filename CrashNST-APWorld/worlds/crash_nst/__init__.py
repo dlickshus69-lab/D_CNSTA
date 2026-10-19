@@ -1,6 +1,7 @@
 """NST Trilogy world"""
 
 import hashlib
+from collections import Counter
 
 from BaseClasses import Item, ItemClassification, Location, Region
 from worlds.AutoWorld import World
@@ -22,7 +23,6 @@ from .data import (
     CRATES,
     select_crates,
     level_pools,
-    box_requirements,
     entrance_requirements,
     check_requirements,
     VANILLA_REWARDS,
@@ -33,6 +33,9 @@ from .data import (
     TOKEN,
     validate_victory_goal,
     SECRET_SOURCES,
+    lock_requirements,
+    hub_area,
+    valid_requirement_counts,
 )
 
 
@@ -63,7 +66,7 @@ class CrashWorld(World):
     item_name_to_id = ITEMS
     location_name_to_id = LOCATIONS
     ut_can_gen_without_yaml = True
-    required_client_version = (1, 0, 0)
+    required_client_version = (1, 0, 3)
 
     def create_item(self, name):
         classification = (
@@ -83,11 +86,27 @@ class CrashWorld(World):
         # forward slot_data to Universal Tracker
         return slot_data
 
+    def lock_requirements(self, names):
+        return lock_requirements(names, self.level_placements, self.hub_area_locks, self.level_access_locks)
+
+    def requirements(self, level, event):
+        return self.lock_requirements(requirements(level, event))
+
+    def box_requirements(self, level, event="box:"):
+        return self.requirements(level, event)
+
+    def check_requirements(self, level, event):
+        return self.lock_requirements(check_requirements(level, event, self.active_levels))
+
     def _load_tracker_slot(self):
         """Rebuild tracker state from the server slot without rerolling the seed."""
         slot = self.tracker_slot
         if slot.get("protocol") != PROTOCOL:
             raise ValueError("Unsupported NST tracker slot protocol")
+        for name in ("hub_area_locks", "level_access_locks"):
+            if type(slot.get(name)) is not bool:
+                raise ValueError("Invalid NST tracker lock settings")
+            setattr(self, name, slot[name])
         selected = slot["selected_levels"]
         if (
             not isinstance(selected, list)
@@ -144,11 +163,12 @@ class CrashWorld(World):
             or set(rules) != set(server_checks)
             or any(
                 not isinstance(needed, list)
-                or not 0 < len(needed) <= 40
+                or not 0 <= len(needed) <= 40
                 or any(
                     type(item) is not int or item not in self.item_id_to_name
                     for item in needed
                 )
+                or not valid_requirement_counts(self.item_id_to_name[item] for item in needed)
                 for needed in rules.values()
             )
         ):
@@ -183,13 +203,12 @@ class CrashWorld(World):
                 != catalogue[address]
                 or source.get("item") != ITEMS.get(VANILLA_REWARDS.get(int(address)))
                 or not isinstance(source.get("requirements"), list)
-                or not source["requirements"]
                 or len(source["requirements"]) > 40
                 or any(
                     type(item) is not int or item not in self.item_id_to_name
                     for item in source["requirements"]
                 )
-                or len(set(source["requirements"])) != len(source["requirements"])
+                or not valid_requirement_counts(self.item_id_to_name[item] for item in source["requirements"])
             ):
                 raise ValueError("Invalid NST tracker local collectible")
             self.local_reward_sources[int(address)] = VANILLA_REWARDS[int(address)]
@@ -199,6 +218,8 @@ class CrashWorld(World):
         if self.tracker_slot is not None:
             self._load_tracker_slot()
             return
+        self.hub_area_locks = bool(self.options.hub_area_locks.value)
+        self.level_access_locks = bool(self.options.level_access_locks.value)
         rewards = self.options.collectible_rewards.modes()
         self.vanilla_collectibles = {
             key: mode == "vanilla" for key, mode in rewards.items()
@@ -336,7 +357,8 @@ class CrashWorld(World):
                 and level.key.startswith("L")
                 and level.key not in SECRET_SOURCES
             ]
-            # unlock destinations behind the requested number of entrances per campaign
+            entrances.sort(key=hub_area)
+            # fill the earliest hub areas before granting access to later areas
             self.starting_levels.extend(
                 self.level_placements[key]
                 for key in entrances[: self.options.starting_levels.value]
@@ -408,13 +430,11 @@ class CrashWorld(World):
         for level in self.active_levels:
             region = Region(level.name, self.player, self.multiworld)
             self.multiworld.regions.append(region)
-            required = entrance_requirements(level, self.active_levels)
-            if self.tracker_slot is not None:
-                required = (f"{level.name} - Access",)
+            required = self.lock_requirements(entrance_requirements(level, self.active_levels))
             menu.connect(
                 region,
                 name=f"{BY_KEY[entrances[level.key]].name} Entrance",
-                rule=lambda state, names=required: state.has_all(names, self.player),
+                rule=lambda state, names=Counter(required): state.has_all_counts(names, self.player),
             )
             for event, name, address in checks(level):
                 if (
@@ -432,9 +452,9 @@ class CrashWorld(World):
                             ]["requirements"]
                         )
                         if self.tracker_slot is not None
-                        else requirements(level, event)
+                        else self.requirements(level, event)
                     )
-                    location.access_rule = lambda state, needed=needed: state.has_all(
+                    location.access_rule = lambda state, needed=Counter(needed): state.has_all_counts(
                         needed, self.player
                     )
                     location.place_locked_item(
@@ -452,9 +472,9 @@ class CrashWorld(World):
                 needed = (
                     self.tracker_rules[address]
                     if self.tracker_slot is not None
-                    else requirements(level, event)
+                    else self.requirements(level, event)
                 )
-                location.access_rule = lambda state, needed=needed: state.has_all(
+                location.access_rule = lambda state, needed=Counter(needed): state.has_all_counts(
                     needed, self.player
                 )
                 region.locations.append(location)
@@ -483,7 +503,7 @@ class CrashWorld(World):
                     if self.tracker_slot is not None
                     else self.box_requirements(level, crate_event(crate))
                 )
-                location.access_rule = lambda state, needed=needed: state.has_all(
+                location.access_rule = lambda state, needed=Counter(needed): state.has_all_counts(
                     needed, self.player
                 )
                 region.locations.append(location)
@@ -491,7 +511,7 @@ class CrashWorld(World):
                 victory = CrashLocation(
                     self.player, f"{level.name} - Victory Event", None, region
                 )
-                needed = requirements(level, "clear")
+                needed = self.requirements(level, "clear")
                 if self.tracker_slot is not None:
                     needed = self.tracker_rules[
                         next(
@@ -500,7 +520,7 @@ class CrashWorld(World):
                             if event == "clear"
                         )
                     ]
-                victory.access_rule = lambda state, needed=needed: state.has_all(
+                victory.access_rule = lambda state, needed=Counter(needed): state.has_all_counts(
                     needed, self.player
                 )
                 victory.place_locked_item(
@@ -527,9 +547,9 @@ class CrashWorld(World):
                         )
                     ]
                     if self.tracker_slot is not None
-                    else requirements(level, "clear")
+                    else self.requirements(level, "clear")
                 )
-                clear.access_rule = lambda state, needed=needed: state.has_all(
+                clear.access_rule = lambda state, needed=Counter(needed): state.has_all_counts(
                     needed, self.player
                 )
                 clear.place_locked_item(
@@ -545,39 +565,23 @@ class CrashWorld(World):
     def create_items(self):
         if self.tracker_slot is not None:
             return
-        starts = {f"{BY_KEY[key].name} - Access" for key in self.starting_levels}
+        starts = Counter(self.lock_requirements(f"{BY_KEY[key].name} - Access" for key in self.starting_levels))
         starts.update(self.precollected_collectibles.values())
-        for name in sorted(starts):
+        for name in sorted(starts.elements()):
             self.multiworld.push_precollected(self.create_item(name))
-        required = {f"{level.name} - Access" for level in self.active_levels}
-        required.update(
-            item
-            for level in self.active_levels
-            for event, _, address in checks(level)
-            if address in self.active_checks
-            for item in requirements(level, event)
-        )
-        required -= starts
-        required.update(
-            item
-            for crate in self.active_crates
-            for item in self.box_requirements(
-                BY_KEY[crate["level"]], crate_event(crate)
-            )
-        )
-        required.update(
-            item
-            for level in self.active_levels
-            for event, _, address in checks(level)
-            if self.local_reward_sources.get(address) in GEMS
-            for item in requirements(level, event)
-        )
+        required = Counter(self.lock_requirements(f"{level.name} - Access" for level in self.active_levels))
+        for level in self.active_levels:
+            for event, _, address in checks(level):
+                if address in self.active_checks or self.local_reward_sources.get(address) in GEMS:
+                    required |= Counter(self.requirements(level, event))
+        for crate in self.active_crates:
+            required |= Counter(self.box_requirements(BY_KEY[crate["level"]], crate_event(crate)))
         required -= starts
         locked = set(self.locked_collectibles.values())
         local_reward_items = set(self.local_reward_sources.values())
-        required -= locked | local_reward_items
-        shuffled = set(self.shuffled_collectibles.values()) - starts
-        required -= shuffled
+        shuffled = set(self.shuffled_collectibles.values()) - set(starts)
+        for name in locked | local_reward_items | shuffled:
+            required.pop(name, None)
         optional = [
             name
             for name in (*GEMS, *ABILITIES)
@@ -589,14 +593,15 @@ class CrashWorld(World):
             and int(name[6]) in self.enabled_campaigns
         ]
         capacity = len(self.active_checks) - len(self.locked_collectibles)
-        if len(required) + len(shuffled) > capacity:
+        progression_count = sum(required.values()) + len(shuffled)
+        if progression_count > capacity:
             raise ValueError(
                 "Selected randomized checks cannot hold required progression items. "
                 "Enable more box checks or select fewer AP locations"
             )
         names = (
-            sorted(required | shuffled)
-            + optional[: capacity - len(required) - len(shuffled)]
+            sorted([*required.elements(), *shuffled])
+            + optional[: capacity - progression_count]
         )
         pool = [self.create_item(name) for name in names]
         for item in pool:
@@ -643,6 +648,8 @@ class CrashWorld(World):
             return self.tracker_slot
         result = {
             "protocol": PROTOCOL,
+            "hub_area_locks": self.hub_area_locks,
+            "level_access_locks": self.level_access_locks,
             "prototype": True,
             "crate_checks": bool(self.active_crates),
             "crates": self.active_crates,
@@ -676,9 +683,7 @@ class CrashWorld(World):
         result["check_requirements"] = {
             address: [
                 ITEMS[name]
-                for name in check_requirements(
-                    BY_KEY[check["level"]], check["event"], self.active_levels
-                )
+                for name in self.check_requirements(BY_KEY[check["level"]], check["event"])
             ]
             for address, check in result["checks"].items()
         }
@@ -699,7 +704,7 @@ class CrashWorld(World):
                 "item": ITEMS[self.local_reward_sources[address]],
                 "requirements": [
                     ITEMS[name]
-                    for name in check_requirements(level, event, self.active_levels)
+                    for name in self.check_requirements(level, event)
                 ],
             }
             for level in self.active_levels
@@ -712,5 +717,3 @@ class CrashWorld(World):
         }
         result["box_item_spoilers"] = bool(self.options.box_item_spoilers.value)
         return result
-
-    box_requirements = staticmethod(box_requirements)

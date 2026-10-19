@@ -63,7 +63,36 @@ bool level_locked(const SeedConfig &seed, const std::vector<std::pair<std::int64
         source[0] = 'L';
     const auto placement = seed.placements.find(source);
     const auto destination = placement == seed.placements.end() ? source : placement->second;
-    return !seed.levels.count(destination) || !has_access(received, destination);
+    auto physical = source;
+    for (const auto &[secret, parent] : secret_stages)
+        if (source == secret)
+            for (const auto &[entrance, target] : seed.placements)
+                if (target == parent)
+                    physical = entrance;
+    return !seed.levels.count(destination) ||
+           (seed.level_access_locks && !has_access(received, destination)) ||
+           !hub_area_unlocked(seed, received, physical[1] - '0', hub_area(physical));
+}
+
+bool hub_area_unlocked(const SeedConfig &seed, const std::vector<std::pair<std::int64_t, int>> &received,
+                       unsigned campaign, unsigned area)
+{
+    if (campaign < 1 || campaign > 3 || area < 1 || area > (campaign == 1 ? 3u : 5u))
+        return false;
+    if (!seed.hub_area_locks || area == 1)
+        return true;
+    return std::count_if(received.begin(), received.end(), [id = hub_access_item(campaign, area)](const auto &item) {
+               return item.first == id;
+           }) >= (campaign == 3 ? 1 : area - 1);
+}
+
+bool level_accessible(const SeedConfig &seed, const std::vector<std::pair<std::int64_t, int>> &received,
+                      const std::string &level)
+{
+    const auto entrance = std::find_if(seed.placements.begin(), seed.placements.end(), [&](const auto &entry) {
+        return entry.second == level;
+    });
+    return entrance != seed.placements.end() && !level_locked(seed, received, entrance->first);
 }
 
 static CampaignGoals parse_goals(const Json::Value &levels, const std::set<std::string> &selected,
@@ -184,6 +213,10 @@ SeedConfig::SeedConfig(const Json::Value &data)
         throw std::runtime_error("Unsupported seed protocol. Generate a seed with the current APWorld");
     if (!data["level_shuffle"].isInt())
         throw std::runtime_error("Invalid seed shuffle mode");
+    if (!data["hub_area_locks"].isBool() || !data["level_access_locks"].isBool())
+        throw std::runtime_error("Invalid seed lock settings");
+    hub_area_locks = data["hub_area_locks"].asBool();
+    level_access_locks = data["level_access_locks"].asBool();
     checks = parse_checks(data["checks"]);
     levels = parse_selected_levels(data["selected_levels"]);
     shuffle = data["level_shuffle"].asInt();

@@ -2,8 +2,36 @@
 
 from dataclasses import dataclass
 
-from Options import Choice, OptionDict, PerGameCommonOptions, Range, Toggle, DeathLink
+from Options import (
+    Choice,
+    DefaultOnToggle,
+    OptionDict,
+    PerGameCommonOptions,
+    Range,
+    Toggle,
+    DeathLink,
+)
 from .data import LEVELS
+
+
+class HubAreaLocks(Toggle):
+    """Require AP area-unlock items for later islands, elevator floors and gated hub sections.
+
+    Crash 1 has Progressive Island Access items,
+    Crash 2 has Progressive Elevator Access items
+    Crash 3 sections has Hub Section X Unlock items.
+    """
+
+    display_name = "Hub Area Locks"
+
+
+class LevelAccessLocks(DefaultOnToggle):
+    """Require each selected level's Access item. Independent of Hub Area Locks.
+
+    When disabled, selected levels only require their hub area and secret-route requirements.
+    """
+
+    display_name = "Level Access Locks"
 
 
 class Campaigns(Choice):
@@ -57,7 +85,11 @@ class Crash3Levels(Range):
 
 
 class StartingLevels(Range):
-    """Number of starting level entrances per enabled campaign."""
+    """Number of starting level entrances per enabled campaign.
+
+    Fills the earliest hub areas available in the selected level pool first,
+    then unlocks more if needed.
+    """
 
     display_name = "Starting Levels per Campaign"
     range_start = 1
@@ -70,7 +102,7 @@ class Goal(Choice):
 
     All Cortex requires defeating Cortex in every enabled campaign.
     Single-Cortex goals require that campaign to be enabled.
-    Cortex entrances require their own Access items.
+    Cortex entrances follow the chosen hub area and level access locks.
 
     Level clears count distinct regular levels from the selected pool, across all enabled campaigns.
 
@@ -252,6 +284,8 @@ class LevelPool(OptionDict):
 @dataclass
 class CrashOptions(PerGameCommonOptions):
     campaigns: Campaigns
+    hub_area_locks: HubAreaLocks
+    level_access_locks: LevelAccessLocks
     goal: Goal
     require_all_bosses: RequireAllBosses
     goal_count: GoalCount

@@ -14,7 +14,7 @@ Console input supports Left/Right, Home/End, Shift selection and Ctrl+A/C/V.
 Automatic connection attempts stop after five failures.  
 Correct the connection settings and use `/connect` to start a fresh attempt.
 
-HUD counters use **`checked/in logic (total)`**. `C`, `P` and `R` show selected gem, power-crystal and relic checks. 
+HUD counters use **`checked/in logic (total)`**. `C`, `P` and `R` show selected gem, power-crystal and relic checks.   
 Campaign totals appear in the game choose menu and on hub maps.  
 Approach an unlocked hub entrance to see its destination label and check counts.  
 `/hubdistance_c1`, `/hubdistance_c2` and `/hubdistance_c3` show each hub's label
@@ -32,6 +32,9 @@ Useful local commands:
 /boxmarkers tint/bounds/off
 /tint_opacity 0.5
 /hubdistance 500
+/hubdistance_c1 1000
+/hubdistance_c2 250
+/hubdistance_c3 500
 /outoflogic on/off
 /disconnect
 /connect
@@ -49,7 +52,7 @@ When item spoilers are enabled, the client scouts selected locations on connecti
 Secret destinations include required source levels automatically.
 
 - Choose any campaign combination, level pool and level counts.
-- `starting_levels`: starting entrances per enabled campaign, from 1–31 (default 2), capped at the selected regular entrances.
+- `starting_levels`: starting entrances per enabled campaign, from 1–31 (default 2), capped at the selected regular entrances. Fill the earliest available hub areas first. Later areas start unlocked only if the requested count needs them or the pool has no earlier entrances. The selected pool is preserved.
 - `level_shuffle`: `off`, `within_campaign` or `across_campaigns`.
 - `boxsanity`: 0–100% of the boxes turn into ap locations. There are 5291 boxes across 85 stages.
 - `white_gem_checks`, `colored_gem_checks`, `crystal_checks`, `relic_checks`: percentages of collectible locations to select as AP checks. Unselected collectibles stay vanilla or are overwritten by collectible_rewards.
@@ -60,8 +63,17 @@ Secret destinations include required source levels automatically.
 - `death_link` is optional and defaults off. 
 - `crashsanity` is experimental and defaults off.
 
-Totally Bear/Fly, Hot Coco and Eggipus Rex require their vanilla secret paths plus destination Access.
-CB3 relic-room entrances use AP Access items instead of the vanilla relic requirements.
+Totally Bear/Fly, Hot Coco and Eggipus Rex require their usual secret paths and the chosen access locks.  
+CB3 relic-room entrances follow AP access locks instead of vanilla relic requirements.
+
+With Hub Area Locks enabled, each **Crash 1 - Progressive Island Access** opens the next island (two copies total).  
+Each **Crash 2 - Progressive Elevator Access** opens the next warp-room floor (four copies total).  
+Starting entrances fill the earliest selected hub areas first. Any required later-area copies are granted from the start.
+Crash 3 uses a separate **Hub Section Unlock** for each gated section.  
+Boss defeats do not open hub areas.
+
+Leaving a level returns to the physical entrance used, including shuffled levels in another campaign.
+Starting a campaign without entrance history uses its default hub spawn.
 
 Filler rewards are Wumpa Fruit and 1-Ups. Rewards received on hubs wait until gameplay and apply once.
 

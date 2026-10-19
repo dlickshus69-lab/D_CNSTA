@@ -270,7 +270,7 @@ public:
     ~C3HubAccess();
     C3HubAccess(const C3HubAccess &) = delete;
     C3HubAccess &operator=(const C3HubAccess &) = delete;
-    bool update(const std::set<std::string> &allowed, bool traversal);
+    bool update(const std::set<std::string> &allowed, bool traversal, const std::array<bool, 4> &areas);
     bool matches(const std::map<std::string, std::uintptr_t> &entities) const;
     void detach();
     C3PlatformProbe platform_state() const;
@@ -282,6 +282,6 @@ private:
     std::uintptr_t remote_ = 0;
     bool installed_ = false, traversal_installed_ = false, platform_installed_ = false;
     bool platform_unlocked_ = false;
-    std::uintptr_t platform_route_ = 0;
+    std::uintptr_t platform_route_ = 0, barrier_route_ = 0;
     C3PlatformProbe platform_before_{};
 };
