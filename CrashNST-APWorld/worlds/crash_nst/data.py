@@ -172,6 +172,9 @@ ITEMS.update(
     {name: BASE + 2300 + game * 10 + area for (game, area), name in HUB_ITEMS.items()}
 )
 HUB_ITEM_COUNTS = {HUB_ITEMS[1, 2]: 2, HUB_ITEMS[2, 2]: 4}
+# Ability Shuffle: one item per basic move, shared by all three campaigns
+BASIC_MOVES = ("Spin", "Body Slam", "Crouch Jump", "Slide")
+ITEMS.update({name: BASE + 2400 + index for index, name in enumerate(BASIC_MOVES)})
 
 
 def valid_requirement_counts(items):
@@ -505,6 +508,32 @@ def requirements(level, event):
             count = sum(int(level.key[2:]) >= first for first in C3_POWER_STAGES)
         required.extend(ABILITIES[1 : 1 + count])
     return tuple(dict.fromkeys(required))
+
+
+# Ability Shuffle logic. This is a cautious draft, not verified level by level.
+# Loosen a level once it is known to need fewer moves, e.g.
+#   MOVE_OVERRIDES[("L203", "gem")] = ("Spin", "Slide")
+# keys are (level key, event); "box:" covers every box in that level without its own entry.
+MOVE_OVERRIDES = {}
+
+
+def move_requirements(level, event, spin_shuffled, starting_levels):
+    """basic moves logic expects for a check while Ability Shuffle is on"""
+    override = MOVE_OVERRIDES.get((level.key, event))
+    if override is None and event.startswith("box:"):
+        override = MOVE_OVERRIDES.get((level.key, "box:"))
+    if override is not None:
+        return tuple(override)
+    # vehicle stages do not use Crash's on-foot moves
+    if level.key in C3_VEHICLE_LEVELS:
+        return ()
+    if event in ("clear", "crystal"):
+        # with Spin shuffled, the starting levels are assumed clearable by jumping alone
+        return () if spin_shuffled and level.key in starting_levels else ("Spin",)
+    # gems, relics and boxes: Crash 1 levels were built for jump and spin only
+    if level.campaign == 1:
+        return ("Spin",)
+    return BASIC_MOVES
 
 
 def box_requirements(level, event="box:"):

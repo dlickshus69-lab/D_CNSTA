@@ -34,6 +34,8 @@ from .data import (
     validate_victory_goal,
     SECRET_SOURCES,
     C3_VEHICLE_LEVELS,
+    BASIC_MOVES,
+    move_requirements,
     lock_requirements,
     hub_area,
     valid_requirement_counts,
@@ -101,15 +103,23 @@ class CrashWorld(World):
             return ABILITIES[1:] if self.relic_tier == 2 else ("Crash 3 - Speed Shoes",)
         return ()
 
+    def move_requirements(self, level, event):
+        if not self.ability_shuffle:
+            return ()
+        return move_requirements(level, event, self.ability_shuffle == 2, set(self.starting_levels))
+
+    def extra_requirements(self, level, event):
+        return (*self.relic_requirements(level, event), *self.move_requirements(level, event))
+
     def requirements(self, level, event):
-        return self.lock_requirements((*requirements(level, event), *self.relic_requirements(level, event)))
+        return self.lock_requirements((*requirements(level, event), *self.extra_requirements(level, event)))
 
     def box_requirements(self, level, event="box:"):
         return self.requirements(level, event)
 
     def check_requirements(self, level, event):
         return self.lock_requirements(
-            (*check_requirements(level, event, self.active_levels), *self.relic_requirements(level, event))
+            (*check_requirements(level, event, self.active_levels), *self.extra_requirements(level, event))
         )
 
     def _load_tracker_slot(self):
@@ -120,6 +130,10 @@ class CrashWorld(World):
         self.relic_tier = slot.get("relic_requirement", 0)
         if type(self.relic_tier) is not int or not 0 <= self.relic_tier <= 2:
             raise ValueError("Invalid NST tracker relic requirement")
+        self.ability_shuffle = slot.get("ability_shuffle", 0)
+        if type(self.ability_shuffle) is not int or not 0 <= self.ability_shuffle <= 2:
+            raise ValueError("Invalid NST tracker ability shuffle")
+        self.starting_levels = slot.get("starting_levels", [])
         for name in ("hub_area_locks", "level_access_locks"):
             if type(slot.get(name)) is not bool:
                 raise ValueError("Invalid NST tracker lock settings")
@@ -238,6 +252,7 @@ class CrashWorld(World):
         self.hub_area_locks = bool(self.options.hub_area_locks.value)
         self.level_access_locks = bool(self.options.level_access_locks.value)
         self.relic_tier = self.options.relic_requirement.value
+        self.ability_shuffle = self.options.ability_shuffle.value
         rewards = self.options.collectible_rewards.modes()
         self.vanilla_collectibles = {
             key: mode == "vanilla" for key, mode in rewards.items()
@@ -367,6 +382,8 @@ class CrashWorld(World):
                 )
                 self.level_placements.update(zip(entrances, destinations))
         self.starting_levels = []
+        # Ability Shuffle locks most checks behind moves, so one starting level leaves too few early checks
+        starting_count = max(self.options.starting_levels.value, 2 if self.ability_shuffle else 1)
         for game in self.enabled_campaigns:
             entrances = [
                 level.key
@@ -379,7 +396,7 @@ class CrashWorld(World):
             # fill the earliest hub areas before granting access to later areas
             self.starting_levels.extend(
                 self.level_placements[key]
-                for key in entrances[: self.options.starting_levels.value]
+                for key in entrances[:starting_count]
             )
         choices = {
             "white_gem": self.options.white_gem_checks.value,
@@ -585,6 +602,26 @@ class CrashWorld(World):
             return
         starts = Counter(self.lock_requirements(f"{BY_KEY[key].name} - Access" for key in self.starting_levels))
         starts.update(self.precollected_collectibles.values())
+        if self.ability_shuffle == 1:
+            starts["Spin"] = 1
+        spin_locked = False
+        if self.ability_shuffle == 2:
+            # only the starting levels are open without Spin. with very few of their checks, fill cannot
+            # route around it, so Spin goes on one of them directly; otherwise it is placed early at random
+            first_checks = [
+                name
+                for key in self.starting_levels
+                for event, name, address in checks(BY_KEY[key])
+                if event in ("clear", "crystal")
+                and address in self.active_checks
+                and address not in self.locked_collectibles
+            ]
+            if len(first_checks) < 4:
+                location = self.multiworld.get_location(self.random.choice(sorted(first_checks)), self.player)
+                location.place_locked_item(self.create_item("Spin"))
+                spin_locked = True
+            else:
+                self.multiworld.early_items[self.player]["Spin"] = 1
         for name in sorted(starts.elements()):
             self.multiworld.push_precollected(self.create_item(name))
         required = Counter(self.lock_requirements(f"{level.name} - Access" for level in self.active_levels))
@@ -595,12 +632,18 @@ class CrashWorld(World):
         for crate in self.active_crates:
             required |= Counter(self.box_requirements(BY_KEY[crate["level"]], crate_event(crate)))
         required -= starts
+        if spin_locked:
+            required.pop("Spin", None)
         locked = set(self.locked_collectibles.values())
         local_reward_items = set(self.local_reward_sources.values())
         shuffled = set(self.shuffled_collectibles.values()) - set(starts)
         for name in locked | local_reward_items | shuffled:
             required.pop(name, None)
         optional = [
+            name
+            for name in (BASIC_MOVES if self.ability_shuffle else ())
+            if name not in required and name not in starts and not (spin_locked and name == "Spin")
+        ] + [
             name
             for name in (*GEMS, *ABILITIES)
             if name not in required
@@ -610,9 +653,30 @@ class CrashWorld(World):
             and name not in local_reward_items
             and int(name[6]) in self.enabled_campaigns
         ]
-        capacity = len(self.active_checks) - len(self.locked_collectibles)
+        capacity = len(self.active_checks) - len(self.locked_collectibles) - spin_locked
         progression_count = sum(required.values()) + len(shuffled)
+        if self.ability_shuffle and progression_count > capacity:
+            # the move items need room: hand out a few collectible rewards at the start instead of shuffling
+            # them, relics first, then crystals and white gems. colored gems unlock routes and stay shuffled.
+            # their checks stay checks and hold other items.
+            spare = sorted(
+                (name for name in shuffled if name not in GEMS),
+                key=lambda name: (
+                    not name.endswith(" - Relic (Any Tier)"),
+                    not name.endswith(" - Power Crystal"),
+                    hashlib.sha256(f"{self.multiworld.seed}/{self.player}/move_room/{name}".encode()).digest(),
+                ),
+            )
+            for name in spare[: progression_count - capacity]:
+                shuffled.discard(name)
+                self.multiworld.push_precollected(self.create_item(name))
+            progression_count = sum(required.values()) + len(shuffled)
         if progression_count > capacity:
+            if self.ability_shuffle:
+                raise ValueError(
+                    f"Ability Shuffle needs {progression_count - capacity} more checks for its move items. "
+                    "Enable box checks (boxsanity) or more gem, crystal or relic checks"
+                )
             raise ValueError(
                 "Selected randomized checks cannot hold required progression items. "
                 "Enable more box checks or select fewer AP locations"
@@ -734,6 +798,8 @@ class CrashWorld(World):
             for address, name in self.shuffled_collectibles.items()
         }
         result["box_item_spoilers"] = bool(self.options.box_item_spoilers.value)
+        # 0 off, 1 start with Spin, 2 Spin shuffled. Move item IDs are BASE + 2400 + index of BASIC_MOVES.
+        result["ability_shuffle"] = self.ability_shuffle
         # 0 = any tier, 1 = gold or platinum, 2 = platinum only
         result["relic_requirement"] = self.options.relic_requirement.value
         return result
