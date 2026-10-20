@@ -1,11 +1,19 @@
 # Builds the client DLLs on a GitHub Windows machine with the toolchain from the client README
-# (MSYS2 MINGW64, CMake, liblzma, APCpp at its pinned revision).
-# Download the result from the run's "Artifacts" section.
+# (MSYS2 MINGW64, CMake, liblzma, APCpp at its pinned revision) and packages the apworld.
+# Every build is kept under the run's "Artifacts". Builds of main also refresh the
+# "Latest build" release on the Releases page.
 name: Build client
 
 on:
   push:
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -22,6 +30,7 @@ jobs:
           update: true
           install: >-
             git
+            zip
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-make
@@ -44,8 +53,36 @@ jobs:
           mkdir -p package/CrashNSTAP
           cp build/client/proxy/dinput8.dll package/
           cp build/client/crash_nst_ingame.dll package/CrashNSTAP/
+          cp -r CrashNST-AP-Client/licenses package/CrashNSTAP/
+          cp CrashNST-AP-Client/THIRD_PARTY.md CrashNST-AP-Client/PLAYER_GUIDE.md package/CrashNSTAP/
+          cp CrashNST-AP-Client/README.md package/
+          (cd package && zip -r ../CrashNST-AP-Client-x64.zip .)
+
+      - name: Build the apworld
+        shell: pwsh
+        run: python CrashNST-APWorld/tools/build_apworld.py
 
       - uses: actions/upload-artifact@v4
         with:
           name: CrashNST-AP-Client-x64
           path: package/
+
+      - name: Publish the "Latest build" release
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $sha = "$env:GITHUB_SHA".Substring(0, 7)
+          $notes = @"
+          Built automatically from commit $sha.
+
+          **Client:** download CrashNST-AP-Client-x64.zip, back up your old dinput8.dll and CrashNSTAP folder, then extract the zip next to CrashBandicootNSaneTrilogy.exe.
+
+          **Archipelago:** put crash_nst.apworld in Archipelago's custom_worlds folder.
+          "@
+          $existing = gh release list --json tagName --jq '.[].tagName'
+          if ($existing -contains "latest-build") { gh release delete latest-build --cleanup-tag --yes }
+          gh release create latest-build CrashNST-AP-Client-x64.zip CrashNST-APWorld/dist/crash_nst.apworld `
+            --title "Latest build ($sha)" --notes $notes --target $env:GITHUB_SHA --latest
