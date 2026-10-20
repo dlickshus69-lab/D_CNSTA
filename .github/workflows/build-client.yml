@@ -1,0 +1,51 @@
+# Builds the client DLLs on a GitHub Windows machine with the toolchain from the client README
+# (MSYS2 MINGW64, CMake, liblzma, APCpp at its pinned revision).
+# Download the result from the run's "Artifacts" section.
+name: Build client
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-xz
+
+      - name: Fetch APCpp at the pinned revision
+        run: |
+          git clone --recursive https://github.com/randomcodegen/APCpp.git references/APCpp
+          git -C references/APCpp checkout 5eb74d0ee8df27fa1033c2c38d3e03ab1c951241
+          git -C references/APCpp submodule update --init --recursive
+
+      - name: Configure
+        run: cmake -S CrashNST-AP-Client/client -B build/client -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build/client --parallel 4
+
+      - name: Arrange files like the game folder
+        run: |
+          mkdir -p package/CrashNSTAP
+          cp build/client/proxy/dinput8.dll package/
+          cp build/client/crash_nst_ingame.dll package/CrashNSTAP/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CrashNST-AP-Client-x64
+          path: package/
