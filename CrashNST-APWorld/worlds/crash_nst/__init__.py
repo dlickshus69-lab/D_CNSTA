@@ -643,13 +643,24 @@ class CrashWorld(World):
         shuffled = set(self.shuffled_collectibles.values()) - set(starts)
         for name in locked | local_reward_items | shuffled:
             required.pop(name, None)
+        # every ability of the enabled campaigns and every shuffled move is always in the seed to be found,
+        # even when no check needs it (the client only grants abilities as AP items)
+        always = [
+            name
+            for name in (
+                *(BASIC_MOVES if self.ability_shuffle else ()),
+                *(name for name in ABILITIES if int(name[6]) in self.enabled_campaigns),
+            )
+            if name not in required
+            and name not in starts
+            and not (spin_locked and name == "Spin")
+            and name not in locked
+            and name not in shuffled
+            and name not in local_reward_items
+        ]
         optional = [
             name
-            for name in (BASIC_MOVES if self.ability_shuffle else ())
-            if name not in required and name not in starts and not (spin_locked and name == "Spin")
-        ] + [
-            name
-            for name in (*GEMS, *ABILITIES)
+            for name in GEMS
             if name not in required
             and name not in starts
             and name not in locked
@@ -658,9 +669,9 @@ class CrashWorld(World):
             and int(name[6]) in self.enabled_campaigns
         ]
         capacity = len(self.active_checks) - len(self.locked_collectibles) - spin_locked
-        progression_count = sum(required.values()) + len(shuffled)
-        if self.ability_shuffle and progression_count > capacity:
-            # the move items need room: hand out a few collectible rewards at the start instead of shuffling
+        progression_count = sum(required.values()) + len(shuffled) + len(always)
+        if progression_count > capacity:
+            # abilities and moves need room: hand out a few collectible rewards at the start instead of shuffling
             # them, relics first, then crystals and white gems. colored gems unlock routes and stay shuffled.
             # their checks stay checks and hold other items.
             spare = sorted(
@@ -674,19 +685,14 @@ class CrashWorld(World):
             for name in spare[: progression_count - capacity]:
                 shuffled.discard(name)
                 self.multiworld.push_precollected(self.create_item(name))
-            progression_count = sum(required.values()) + len(shuffled)
+            progression_count = sum(required.values()) + len(shuffled) + len(always)
         if progression_count > capacity:
-            if self.ability_shuffle:
-                raise ValueError(
-                    f"Ability Shuffle needs {progression_count - capacity} more checks for its move items. "
-                    "Enable box checks (boxsanity) or more gem, crystal or relic checks"
-                )
             raise ValueError(
-                "Selected randomized checks cannot hold required progression items. "
-                "Enable more box checks or select fewer AP locations"
+                f"{progression_count - capacity} more checks are needed to hold the required items, abilities "
+                "and moves. Enable box checks (boxsanity) or more gem, crystal or relic checks"
             )
         names = (
-            sorted([*required.elements(), *shuffled])
+            sorted([*required.elements(), *shuffled, *always])
             + optional[: capacity - progression_count]
         )
         pool = [self.create_item(name) for name in names]

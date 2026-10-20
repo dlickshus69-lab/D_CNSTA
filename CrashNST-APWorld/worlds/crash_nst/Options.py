@@ -205,8 +205,9 @@ class AbilityShuffle(Choice):
     Logic is a cautious draft: level clears need Spin; gems, relics and boxes need Spin in Crash 1
     and every move in Crash 2 and 3. Gimmick stages (hog, polar bear, jetpack and Crash 3 vehicle
     levels) keep vanilla controls and need none, as with Crashsanity. F10 restores normal controls
-    if a move you need is missing. If the seed has no spare checks for the move items, you start
-    with a few relic, crystal or white gem rewards instead (their checks still count). Each campaign gets at least
+    if a move you need is missing. Every move and ability is always in the seed to be found. If the
+    seed has no spare checks for them, you start with a few relic, crystal or white gem rewards
+    instead (their checks still count); a little boxsanity avoids that. Each campaign gets at least
     two starting levels while this is on.
     """
 
