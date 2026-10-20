@@ -193,6 +193,23 @@ class RelicChecks(Range):
     default = 100
 
 
+class RelicRequirement(Choice):
+    """Minimum relic tier that sends a level's relic check.
+
+    any: sapphire, gold or platinum.
+    gold_or_platinum: gold or platinum.
+    platinum: platinum only.
+    """
+
+    display_name = "Relic Requirement"
+    option_any = 0
+    option_gold_or_platinum = 1
+    option_platinum = 2
+    alias_sapphire = option_any
+    alias_gold = option_gold_or_platinum
+    default = option_any
+
+
 class LevelShuffle(Choice):
     """Shuffle regular level destinations. Bosses and secret stages keep their entrances.
 
@@ -300,6 +317,7 @@ class CrashOptions(PerGameCommonOptions):
     colored_gem_checks: ColoredGemChecks
     crystal_checks: CrystalChecks
     relic_checks: RelicChecks
+    relic_requirement: RelicRequirement
     level_shuffle: LevelShuffle
     boxsanity: Boxsanity
     collectible_rewards: CollectibleRewards

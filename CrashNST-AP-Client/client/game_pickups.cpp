@@ -16,7 +16,17 @@ namespace ingame
         std::mutex collectible_mutex;
         std::vector<Collectible> collectible_config;
         std::map<std::string, unsigned> collectible_earned;
+        // relic ranks: 1 sapphire, 2 gold, 3 platinum. reward bits: 0x2000 sapphire, 0x4000 gold, 0x1000 platinum.
+        unsigned relic_min_rank = 1;
         thread_local bool collectible_grant_active = false;
+        unsigned without_low_relics(unsigned mask, unsigned min_rank)
+        {
+            if (min_rank >= 2)
+                mask &= ~0x2000u;
+            if (min_rank >= 3)
+                mask &= ~0x4000u;
+            return mask;
+        }
         FunctionHook pending_hook, reward_hook, crystal_hook, relic_hook, relic_count_hook, collectible_query_hook;
         std::pair<unsigned, unsigned> pickup_query(const std::string &key, unsigned mask)
         {
@@ -74,7 +84,10 @@ namespace ingame
                             level_key(string(value<Address>(zone + 16))) == key)
                         {
                             std::lock_guard lock(collectible_mutex);
-                            collectible_earned[key] |= 0x2000;
+                            // a lower tier than the seed requires is swallowed, like any blocked relic, but sends
+                            // nothing. the player can replay the time trial for a better relic.
+                            if (rank >= relic_min_rank)
+                                collectible_earned[key] |= 0x2000;
                             return;
                         }
                 }
@@ -101,7 +114,8 @@ namespace ingame
                 if (key == c.key)
                 {
                     const auto spec = collectible_spec(c.key);
-                    collectible_earned[key] |= collectible_observed(mask) & collectible_mask(*spec);
+                    collectible_earned[key] |=
+                        collectible_observed(without_low_relics(mask, relic_min_rank)) & collectible_mask(*spec);
                     return mask & ~c.blocked;
                 }
             return mask;
@@ -215,6 +229,7 @@ namespace ingame
         {
             std::lock_guard lock(collectible_mutex);
             collectible_config.assign(state.collectibles, state.collectibles + state.collectible_count);
+            relic_min_rank = state.relic_min_rank >= 1 && state.relic_min_rank <= 3 ? state.relic_min_rank : 1;
             state.collectible_observation_count = 0;
             for (const auto &[key, mask] : collectible_earned)
                 if (mask && state.collectible_observation_count < max_levels)
@@ -294,8 +309,8 @@ namespace ingame
                 {
                     std::lock_guard lock(collectible_mutex);
                     const auto spec = collectible_spec(c.key);
-                    auto observed = collectible_observed(value<unsigned>(row + 0x50));
-                    if (value<unsigned>(row + 0x48))
+                    auto observed = collectible_observed(without_low_relics(value<unsigned>(row + 0x50), relic_min_rank));
+                    if (value<unsigned>(row + 0x48) >= relic_min_rank)
                         observed |= 0x2000;
                     if (value<unsigned char>(row + 0x4c))
                         observed |= 0x200;

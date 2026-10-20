@@ -716,4 +716,6 @@ class CrashWorld(World):
             for address, name in self.shuffled_collectibles.items()
         }
         result["box_item_spoilers"] = bool(self.options.box_item_spoilers.value)
+        # 0 = any tier, 1 = gold or platinum, 2 = platinum only
+        result["relic_requirement"] = self.options.relic_requirement.value
         return result

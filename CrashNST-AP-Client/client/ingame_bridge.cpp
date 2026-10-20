@@ -68,6 +68,7 @@ BoxMarkers::BoxMarkers(DWORD pid, bool startup, unsigned marker_mode) : startup_
         shared_->box_half_size = 50;
         shared_->hub_label_distances = ingame::default_hub_distances;
         shared_->tint_opacity = ingame::default_tint_opacity;
+        shared_->relic_min_rank = 1;
         if (const auto size = std::getenv("CRASH_NST_MARKER_SIZE"))
         {
             char *end = nullptr;
@@ -309,10 +310,12 @@ void BoxMarkers::configure(const std::map<std::string, unsigned> &styles, bool d
     ++shared_->revision;
     unlock();
 }
-unsigned BoxMarkers::collectibles(std::vector<ingame::Collectible> config)
+unsigned BoxMarkers::collectibles(std::vector<ingame::Collectible> config, unsigned relic_min_rank)
 {
     if (config.size() > ingame::max_levels)
         throw std::runtime_error("Too many collectible levels");
+    if (relic_min_rank < 1 || relic_min_rank > 3)
+        throw std::runtime_error("Invalid relic requirement");
     for (const auto &c : config)
     {
         const auto spec = ingame::collectible_spec(c.key);
@@ -323,6 +326,7 @@ unsigned BoxMarkers::collectibles(std::vector<ingame::Collectible> config)
     lock();
     shared_->collectible_count = static_cast<unsigned>(config.size());
     std::copy(config.begin(), config.end(), shared_->collectibles);
+    shared_->relic_min_rank = relic_min_rank;
     const auto awards = shared_->collectible_awards;
     ++shared_->revision;
     unlock();

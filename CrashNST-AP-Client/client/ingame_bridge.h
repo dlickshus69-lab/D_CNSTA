@@ -30,7 +30,7 @@ public:
     void completion(const std::vector<std::string> &items, const std::vector<std::string> &locations);
     void configure(const std::map<std::string, unsigned> &styles, bool death_link);
     void c3_buttons(bool ready, const std::set<std::string> &allowed = {});
-    unsigned collectibles(std::vector<ingame::Collectible> config);
+    unsigned collectibles(std::vector<ingame::Collectible> config, unsigned relic_min_rank = 1);
     std::vector<ingame::CollectibleObservation> collectible_observations();
     void connection(const std::string &text);
     std::vector<std::string> commands();

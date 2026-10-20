@@ -250,8 +250,16 @@ void ClientRuntime::update_display(ClientTick &tick)
         box_markers->configure(seed->movement_styles, death_link);
         auto collectible_checked = tick.checked;
         collectible_checked.insert(pending.begin(), pending.end());
-        const auto awards = box_markers->collectibles(ingame::collectible_configuration(
-            session.slot_data(), tick.levels, tick.items, local_collected, collectible_checked));
+        // relic_requirement: 0 any tier, 1 gold or platinum, 2 platinum only. older seeds omit it.
+        const auto &relic_requirement = session.slot_data()["relic_requirement"];
+        const unsigned relic_min_rank =
+            relic_requirement.isIntegral() && relic_requirement.asInt64() >= 0 && relic_requirement.asInt64() <= 2
+                ? static_cast<unsigned>(relic_requirement.asInt64()) + 1
+                : 1;
+        const auto awards = box_markers->collectibles(
+            ingame::collectible_configuration(session.slot_data(), tick.levels, tick.items, local_collected,
+                                              collectible_checked),
+            relic_min_rank);
         if (awards != last_collectible_awards)
         {
             last_collectible_awards = awards;
