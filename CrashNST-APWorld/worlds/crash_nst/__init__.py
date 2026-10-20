@@ -36,6 +36,7 @@ from .data import (
     C3_VEHICLE_LEVELS,
     BASIC_MOVES,
     move_requirements,
+    easiest_start,
     lock_requirements,
     hub_area,
     valid_requirement_counts,
@@ -106,7 +107,8 @@ class CrashWorld(World):
     def move_requirements(self, level, event):
         if not self.ability_shuffle:
             return ()
-        return move_requirements(level, event, self.ability_shuffle == 2, set(self.starting_levels))
+        jump_only = {easiest_start(self.starting_levels)} if self.ability_shuffle == 2 else set()
+        return move_requirements(level, event, self.ability_shuffle == 2, jump_only)
 
     def extra_requirements(self, level, event):
         return (*self.relic_requirements(level, event), *self.move_requirements(level, event))
@@ -606,18 +608,20 @@ class CrashWorld(World):
             starts["Spin"] = 1
         spin_locked = False
         if self.ability_shuffle == 2:
-            # only the starting levels are open without Spin. with very few of their checks, fill cannot
-            # route around it, so Spin goes on one of them directly; otherwise it is placed early at random
-            first_checks = [
-                name
+            # only the easiest starting level and gimmick stages are open without Spin. with very few such
+            # checks, fill cannot route around it, so Spin goes on one of their clears; otherwise it is placed
+            # early at random
+            open_checks = [
+                (event, name)
                 for key in self.starting_levels
                 for event, name, address in checks(BY_KEY[key])
-                if event in ("clear", "crystal")
-                and address in self.active_checks
+                if address in self.active_checks
                 and address not in self.locked_collectibles
+                and not self.move_requirements(BY_KEY[key], event)
             ]
-            if len(first_checks) < 4:
-                location = self.multiworld.get_location(self.random.choice(sorted(first_checks)), self.player)
+            if len(open_checks) < 4:
+                first_checks = sorted(name for event, name in open_checks if event in ("clear", "crystal"))
+                location = self.multiworld.get_location(self.random.choice(first_checks), self.player)
                 location.place_locked_item(self.create_item("Spin"))
                 spin_locked = True
             else:

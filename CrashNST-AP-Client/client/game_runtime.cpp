@@ -270,9 +270,14 @@ namespace ingame
         std::atomic_uint owned_moves{MoveAll};
         std::mutex move_log_mutex;
         std::set<std::string> logged_attacks;
+        bool gimmick_level()
+        {
+            // hog, polar bear, jetpack and vehicle stages keep vanilla controls, as with Crashsanity
+            return special_level(level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
+        }
         bool crouch_locked()
         {
-            return move_blocked(MoveCrouch, move_shuffle, vanilla_movement, owned_moves);
+            return move_blocked(MoveCrouch, move_shuffle, vanilla_movement, owned_moves) && !gimmick_level();
         }
         FunctionHook movement_check_hook, movement_input_hook, movement_attack_hook, movement_skill_hook;
         Address missing_crouch_actor = 0, movement_input_code = 0;
@@ -302,7 +307,7 @@ namespace ingame
             if (selected < 4)
             {
                 const auto style = effective_movement();
-                const bool moves = move_shuffle && !vanilla_movement;
+                const bool moves = move_shuffle && !vanilla_movement && !gimmick_level();
                 const auto actor = value<Address>(component + 24);
                 if ((style == 1 || moves) && typed(component, 0x1427ae0) && actor && actor == player() && typed(value<Address>(actor + 424), 0x1589128))
                 {

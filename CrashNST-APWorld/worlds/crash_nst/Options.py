@@ -199,10 +199,12 @@ class AbilityShuffle(Choice):
     One item per move works in all three games, together with Crashsanity and the Crash 3 powers.
     off: normal moves.
     start_with_spin: start with Spin and find the other three.
-    shuffle_spin: find all four. Logic assumes your starting levels can be cleared by jumping alone.
+    shuffle_spin: find all four. Logic only expects your easiest starting level (and gimmick stages)
+    without Spin, and Spin is placed in those first checks.
 
     Logic is a cautious draft: level clears need Spin; gems, relics and boxes need Spin in Crash 1
-    and every move in Crash 2 and 3. Crash 3 vehicle stages need none. F10 restores normal controls
+    and every move in Crash 2 and 3. Gimmick stages (hog, polar bear, jetpack and Crash 3 vehicle
+    levels) keep vanilla controls and need none, as with Crashsanity. F10 restores normal controls
     if a move you need is missing. If the seed has no spare checks for the move items, you start
     with a few relic, crystal or white gem rewards instead (their checks still count). Each campaign gets at least
     two starting levels while this is on.

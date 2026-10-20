@@ -371,6 +371,11 @@ C3_VEHICLE_LEVELS = frozenset(
         "L332",
     }
 )
+# gimmick stages keep vanilla controls under Crashsanity and Ability Shuffle.
+# must match special_level() in the client's game_runtime.cpp
+GIMMICK_LEVELS = C3_VEHICLE_LEVELS | frozenset(
+    {"L107", "L114", "L208", "L213", "L215", "L222", "L224", "L226"}
+)
 # vanilla source: 5 relics, 15 relics, 25 relics, Road Crash, Dino Might.
 C3_SECRET_POWER_COUNTS = {
     "L326": 0,
@@ -517,19 +522,26 @@ def requirements(level, event):
 MOVE_OVERRIDES = {}
 
 
-def move_requirements(level, event, spin_shuffled, starting_levels):
+def easiest_start(starting_levels):
+    """with Spin shuffled, the one starting level logic expects you to clear by jumping alone.
+    level shuffle can start you anywhere, so pick the earliest level by its own position in its game."""
+    regular = [key for key in starting_levels if key not in GIMMICK_LEVELS] or list(starting_levels)
+    return min(regular, key=lambda key: (int(key[2:]), key[1]))
+
+
+def move_requirements(level, event, spin_shuffled, jump_only_levels):
     """basic moves logic expects for a check while Ability Shuffle is on"""
     override = MOVE_OVERRIDES.get((level.key, event))
     if override is None and event.startswith("box:"):
         override = MOVE_OVERRIDES.get((level.key, "box:"))
     if override is not None:
         return tuple(override)
-    # vehicle stages do not use Crash's on-foot moves
-    if level.key in C3_VEHICLE_LEVELS:
+    # hog, polar bear, jetpack and Crash 3 vehicle stages keep vanilla controls
+    if level.key in GIMMICK_LEVELS:
         return ()
     if event in ("clear", "crystal"):
-        # with Spin shuffled, the starting levels are assumed clearable by jumping alone
-        return () if spin_shuffled and level.key in starting_levels else ("Spin",)
+        # with Spin shuffled, your easiest starting level is assumed clearable by jumping alone
+        return () if spin_shuffled and level.key in jump_only_levels else ("Spin",)
     # gems, relics and boxes: Crash 1 levels were built for jump and spin only
     if level.campaign == 1:
         return ("Spin",)
