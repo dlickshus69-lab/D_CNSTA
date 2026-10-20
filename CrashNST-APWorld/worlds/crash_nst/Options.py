@@ -199,6 +199,9 @@ class RelicRequirement(Choice):
     any: sapphire, gold or platinum.
     gold_or_platinum: gold or platinum.
     platinum: platinum only.
+
+    Above any, relic checks stay in logic but never hold important (progression) items,
+    so a relic you cannot earn never blocks the seed.
     """
 
     display_name = "Relic Requirement"

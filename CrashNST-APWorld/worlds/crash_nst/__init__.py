@@ -421,7 +421,12 @@ class CrashWorld(World):
         self.active_crates = [pool[key] for key in sample]
         self.active_checks.update(crate["id"] for crate in self.active_crates)
 
+    def relic_progression_blocked(self):
+        """Gold/platinum relics may be out of reach for a player, so keep progression off relic checks."""
+        return self.tracker_slot is None and self.options.relic_requirement.value > 0
+
     def create_regions(self):
+        relics_blocked = self.relic_progression_blocked()
         menu = Region("Menu", self.player, self.multiworld)
         self.multiworld.regions.append(menu)
         entrances = {
@@ -477,6 +482,9 @@ class CrashWorld(World):
                 location.access_rule = lambda state, needed=Counter(needed): state.has_all_counts(
                     needed, self.player
                 )
+                if relics_blocked and check_category(level, event) == "relic":
+                    # relics stay in logic, but no player's progression item may be placed here
+                    location.item_rule = lambda item: not item.advancement
                 region.locations.append(location)
                 category = {
                     "crystal": "power_crystals",
@@ -627,6 +635,22 @@ class CrashWorld(World):
             self.create_item(self.get_filler_item_name())
             for _ in range(capacity - len(pool))
         )
+        if self.relic_progression_blocked():
+            relic_slots = sum(
+                event == "relic"
+                and address in self.active_checks
+                and address not in self.locked_collectibles
+                for level in self.active_levels
+                for event, _, address in checks(level)
+            )
+            progression = sum(item.advancement for item in pool)
+            if progression > capacity - relic_slots:
+                raise ValueError(
+                    f"Relic Requirement keeps important items off relic checks, leaving "
+                    f"{capacity - relic_slots} checks for {progression} important items. "
+                    "Enable more box checks, lower Relic Checks Percent, "
+                    "or set Relic Requirement to any."
+                )
         self.multiworld.itempool.extend(pool)
 
     def set_rules(self):
