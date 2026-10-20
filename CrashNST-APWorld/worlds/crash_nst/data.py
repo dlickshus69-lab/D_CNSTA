@@ -6,7 +6,7 @@ import hashlib
 import json
 from pkgutil import get_data
 
-GAME = "Crash Bandicoot N. Sane Trilogy"
+GAME = "Crash Bandicoot N. Sane Trilogy Dlickshus"
 BASE = 0xCB0000
 PROTOCOL = 4
 

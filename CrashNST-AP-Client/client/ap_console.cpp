@@ -111,7 +111,7 @@ std::pair<std::vector<std::string>, std::vector<std::string>> ap_completion_name
     Json::Reader reader;
     if (!reader.parse(file, root))
         throw std::runtime_error("AP name cache is incomplete");
-    const auto &game = root["games"]["Crash Bandicoot N. Sane Trilogy"];
+    const auto &game = root["games"]["Crash Bandicoot N. Sane Trilogy Dlickshus"];
     if (!game["item_name_to_id"].isObject() || !game["location_name_to_id"].isObject())
         return {};
     return {game["item_name_to_id"].getMemberNames(), game["location_name_to_id"].getMemberNames()};
