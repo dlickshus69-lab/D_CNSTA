@@ -1,6 +1,7 @@
 #include "client_runtime.h"
 #include "ap_console.h"
 #include "game_runtime.h"
+#include "movement_rules.h"
 #include <algorithm>
 #include <iostream>
 #include "crate_catalogue.h"
@@ -37,7 +38,9 @@ void ClientRuntime::update_bridge(AP_ConnectionStatus status)
             {
                 // the save gate waits after executable unpacking and before the first hub loads
                 ingame::preserve_shared_ui_audio();
-                ingame::configure_movement(seed->movement_styles);
+                const auto &ability_shuffle = session.slot_data()["ability_shuffle"];
+                ingame::configure_movement(seed->movement_styles,
+                                           ability_shuffle.isIntegral() && ability_shuffle.asInt64() > 0);
             }
             cloud->tick(status == AP_ConnectionStatus::Authenticated);
         }
@@ -247,7 +250,16 @@ void ClientRuntime::update_display(ClientTick &tick)
         box_markers->update(std::move(markers));
         std::string text = "F1: console | F7: markers/HUD";
         const bool death_link = session.slot_data()["death_link"].asBool();
-        box_markers->configure(seed->movement_styles, death_link);
+        // Ability Shuffle: 0 off, 1 start with Spin, 2 Spin shuffled. owned moves come from received items,
+        // which include the starting Spin.
+        const auto &ability_shuffle = session.slot_data()["ability_shuffle"];
+        const bool move_shuffle = ability_shuffle.isIntegral() && ability_shuffle.asInt64() > 0;
+        unsigned owned_moves = 0;
+        for (const auto &item : tick.items)
+            for (unsigned i = 0; i < 4; ++i)
+                if (item.first == ingame::move_item(i))
+                    owned_moves |= 1u << i;
+        box_markers->configure(seed->movement_styles, death_link, move_shuffle, owned_moves);
         auto collectible_checked = tick.checked;
         collectible_checked.insert(pending.begin(), pending.end());
         // relic_requirement: 0 any tier, 1 gold or platinum, 2 platinum only. older seeds omit it.

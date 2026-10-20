@@ -30,6 +30,11 @@ namespace
         for (unsigned game = 1; game <= 3; ++game)
             for (unsigned area = 2; area <= (game == 1 ? 3u : 5u); ++area)
                 result.insert(hub_access_item(game, area));
+        // abilities and basic moves can be required by relic tiers and Ability Shuffle
+        for (unsigned i = 0; i < 6; ++i)
+            result.insert(0xCB0000 + 2100 + i);
+        for (unsigned i = 0; i < 4; ++i)
+            result.insert(0xCB0000 + 2400 + i);
         return result;
     }
 } // namespace

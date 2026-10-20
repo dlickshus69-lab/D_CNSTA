@@ -298,10 +298,13 @@ void BoxMarkers::progress(const CheckProgress &counts, const std::map<std::strin
     ++shared_->revision;
     unlock();
 }
-void BoxMarkers::configure(const std::map<std::string, unsigned> &styles, bool death_link)
+void BoxMarkers::configure(const std::map<std::string, unsigned> &styles, bool death_link, bool move_shuffle,
+                           unsigned owned_moves)
 {
     lock();
     shared_->death_link = death_link;
+    shared_->move_shuffle = move_shuffle;
+    shared_->owned_moves = owned_moves & 15;
     for (unsigned i = 0; i < shared_->level_count; ++i)
     {
         const auto found = styles.find(shared_->levels[i].key);

@@ -265,6 +265,15 @@ namespace ingame
         std::mutex movement_mutex;
         std::map<std::string, unsigned> movement_styles;
         std::atomic_bool vanilla_movement{false};
+        // Ability Shuffle state copied from the shared block every gameplay update
+        std::atomic_bool move_shuffle{false};
+        std::atomic_uint owned_moves{MoveAll};
+        std::mutex move_log_mutex;
+        std::set<std::string> logged_attacks;
+        bool crouch_locked()
+        {
+            return move_blocked(MoveCrouch, move_shuffle, vanilla_movement, owned_moves);
+        }
         FunctionHook movement_check_hook, movement_input_hook, movement_attack_hook, movement_skill_hook;
         Address missing_crouch_actor = 0, movement_input_code = 0;
         std::atomic<Address> blocked_crouch_controller{0};
@@ -293,12 +302,29 @@ namespace ingame
             if (selected < 4)
             {
                 const auto style = effective_movement();
+                const bool moves = move_shuffle && !vanilla_movement;
                 const auto actor = value<Address>(component + 24);
-                if (style == 1 && typed(component, 0x1427ae0) && actor && actor == player() && typed(value<Address>(actor + 424), 0x1589128))
+                if ((style == 1 || moves) && typed(component, 0x1427ae0) && actor && actor == player() && typed(value<Address>(actor + 424), 0x1589128))
                 {
                     // filter pressed and buffered slides before the attack state or animation changes
                     const auto event = reinterpret_cast<Address (*)(Address, unsigned)>(base() + 0x47cfa0)(component, static_cast<unsigned>(selected));
-                    return movement_attack_selection(static_cast<unsigned>(selected), style, string(event));
+                    const auto action = string(event);
+                    if (moves)
+                    {
+                        const auto move = attack_move(action);
+                        {
+                            // record each attack name once so testers can confirm which one is the spin
+                            std::lock_guard lock(move_log_mutex);
+                            if (logged_attacks.insert(action).second)
+                                std::cout << "Ability Shuffle: attack \"" << action << "\" -> "
+                                          << (move == MoveSpin ? "Spin" : move == MoveSlide ? "Slide" : move == MoveBodySlam ? "Body Slam" : "not shuffled")
+                                          << std::endl;
+                        }
+                        if (move_blocked(move, true, false, owned_moves))
+                            return 4;
+                    }
+                    if (style == 1)
+                        return movement_attack_selection(static_cast<unsigned>(selected), style, action);
                 }
             }
             return selected;
@@ -340,7 +366,8 @@ namespace ingame
             {
                 // OnStart removes crouch in Crash 1. retain it before initialization for either advanced style
                 // retaining it across F10 switches is safe because the input hook blocks Crash 1 crouch
-                const bool matches = crouch ? !movement_needs_crouch(assigned_movement(), scene_campaign())
+                // Ability Shuffle removes crouch and its high jump the same way until Crouch Jump is found
+                const bool matches = crouch ? !movement_needs_crouch(assigned_movement(), scene_campaign()) || crouch_locked()
                                             : effective_movement() == 1;
                 reinterpret_cast<void (*)(Address, Address)>(base() + 0xcb6db0)(context, branches[matches ? 0 : 1]);
                 return;
@@ -1292,9 +1319,10 @@ namespace ingame
         hub_gate_query_hook.attach(0x831da0, {0x48, 0x89, 0x5c, 0x24, 8, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57,
                                             0x48, 0x83, 0xec, 0x20}, reinterpret_cast<Address>(hub_gate_query));
     }
-    void configure_movement(const std::map<std::string, unsigned> &styles)
+    void configure_movement(const std::map<std::string, unsigned> &styles, bool shuffle_moves)
     {
-        if (!styles.empty())
+        // with no Crashsanity style the hooks keep each campaign's own controls, so Ability Shuffle can share them
+        if (!styles.empty() || shuffle_moves)
         {
             // installed at the startup save gate, before the first player runs its graph's OnStart
             if (!code_matches(0xcb6db0, std::array<unsigned char, 10>{0x48, 0x85, 0xd2, 0x74, 0x36, 0x48, 0x89, 0x5c, 0x24, 0x08}))
@@ -1357,6 +1385,8 @@ namespace ingame
         update_tints(state, string(value<Address>(marker_world + 184)));
         const auto actor = player();
         vanilla_movement = state.vanilla_controls != 0;
+        move_shuffle = state.move_shuffle != 0;
+        owned_moves = state.owned_moves;
         const auto world = value<Address>(base() + 0x1a64690);
         const auto key = level_key(string(value<Address>(world + 184)));
         // mixed vehicle levels retain normal controls until their active form is mapped
@@ -1374,7 +1404,7 @@ namespace ingame
                     (value<unsigned>(component + 32) & 1) && !(value<unsigned>(component + 32) & 24) &&
                     string(value<Address>(value<Address>(component + 56) + 16)) == "Scripts.Graph.Crash_CrouchCrawlSlide")
                     crouch = true;
-            if (desired == 1 || crouch)
+            if (desired == 1 || crouch || crouch_locked())
             {
                 missing_crouch_actor = 0;
                 active_style = desired;

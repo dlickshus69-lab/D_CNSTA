@@ -19,7 +19,7 @@ namespace ingame
     unsigned hub_campaign(std::string zone);
     void preserve_shared_ui_audio();
     void configure_hub_access(const std::array<unsigned, 3> &areas);
-    void configure_movement(const std::map<std::string, unsigned> &styles);
+    void configure_movement(const std::map<std::string, unsigned> &styles, bool move_shuffle = false);
     void update_gameplay(Shared &state);
     unsigned take_observed_deaths();
     void restore_gameplay(bool game_thread = false);

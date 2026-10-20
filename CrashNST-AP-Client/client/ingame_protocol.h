@@ -98,6 +98,8 @@ namespace ingame
         unsigned collectible_observation_count = 0;
         // minimum relic rank that counts for relic checks: 1 sapphire, 2 gold, 3 platinum
         unsigned relic_min_rank = 1;
+        // Ability Shuffle: whether basic moves are items, and the owned Move* bits
+        unsigned move_shuffle = 0, owned_moves = 0;
         unsigned c3_buttons_ready = 0;
         std::uint64_t c3_buttons_active = 0;
         float box_half_size = 50;
@@ -170,7 +172,7 @@ namespace ingame
     inline bool valid(const Shared &s)
     {
         if (!(s.version == protocol && s.bytes == sizeof(Shared) && s.box_count <= max_boxes &&
-              s.marker_mode <= MarkersTint && s.level_count <= max_levels && s.entrance_count <= max_levels && s.line_count <= max_lines && s.line_begin < max_lines && s.line_write >= s.line_count && s.collectible_count <= max_levels && s.collectible_observation_count <= max_levels && s.relic_min_rank >= 1 && s.relic_min_rank <= 3 && s.c3_buttons_ready <= 1 && !(s.c3_buttons_active >> 36) &&
+              s.marker_mode <= MarkersTint && s.level_count <= max_levels && s.entrance_count <= max_levels && s.line_count <= max_lines && s.line_begin < max_lines && s.line_write >= s.line_count && s.collectible_count <= max_levels && s.collectible_observation_count <= max_levels && s.relic_min_rank >= 1 && s.relic_min_rank <= 3 && s.move_shuffle <= 1 && s.owned_moves <= 15 && s.c3_buttons_ready <= 1 && !(s.c3_buttons_active >> 36) &&
               s.completion_bytes <= sizeof(s.completion) && s.item_start <= s.location_start &&
               s.location_start <= s.completion_bytes && s.command_write - s.command_read <= max_commands &&
               std::isfinite(s.box_half_size) && s.box_half_size >= 10 && s.box_half_size <= 250 &&
