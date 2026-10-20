@@ -33,6 +33,7 @@ from .data import (
     TOKEN,
     validate_victory_goal,
     SECRET_SOURCES,
+    C3_VEHICLE_LEVELS,
     lock_requirements,
     hub_area,
     valid_requirement_counts,
@@ -89,20 +90,36 @@ class CrashWorld(World):
     def lock_requirements(self, names):
         return lock_requirements(names, self.level_placements, self.hub_area_locks, self.level_access_locks)
 
+    def relic_requirements(self, level, event):
+        """Extra tools logic expects before a gold or platinum relic. Vehicle stages and Crash 1 have none."""
+        if event != "relic" or not self.relic_tier:
+            return ()
+        if level.campaign == 2:
+            return ("Crash 2 - Speed Shoes",)
+        if level.campaign == 3 and level.key not in C3_VEHICLE_LEVELS:
+            # platinum expects the full Crash 3 moveset, gold only the Speed Shoes
+            return ABILITIES[1:] if self.relic_tier == 2 else ("Crash 3 - Speed Shoes",)
+        return ()
+
     def requirements(self, level, event):
-        return self.lock_requirements(requirements(level, event))
+        return self.lock_requirements((*requirements(level, event), *self.relic_requirements(level, event)))
 
     def box_requirements(self, level, event="box:"):
         return self.requirements(level, event)
 
     def check_requirements(self, level, event):
-        return self.lock_requirements(check_requirements(level, event, self.active_levels))
+        return self.lock_requirements(
+            (*check_requirements(level, event, self.active_levels), *self.relic_requirements(level, event))
+        )
 
     def _load_tracker_slot(self):
         """Rebuild tracker state from the server slot without rerolling the seed."""
         slot = self.tracker_slot
         if slot.get("protocol") != PROTOCOL:
             raise ValueError("Unsupported NST tracker slot protocol")
+        self.relic_tier = slot.get("relic_requirement", 0)
+        if type(self.relic_tier) is not int or not 0 <= self.relic_tier <= 2:
+            raise ValueError("Invalid NST tracker relic requirement")
         for name in ("hub_area_locks", "level_access_locks"):
             if type(slot.get(name)) is not bool:
                 raise ValueError("Invalid NST tracker lock settings")
@@ -220,6 +237,7 @@ class CrashWorld(World):
             return
         self.hub_area_locks = bool(self.options.hub_area_locks.value)
         self.level_access_locks = bool(self.options.level_access_locks.value)
+        self.relic_tier = self.options.relic_requirement.value
         rewards = self.options.collectible_rewards.modes()
         self.vanilla_collectibles = {
             key: mode == "vanilla" for key, mode in rewards.items()
@@ -421,12 +439,7 @@ class CrashWorld(World):
         self.active_crates = [pool[key] for key in sample]
         self.active_checks.update(crate["id"] for crate in self.active_crates)
 
-    def relic_progression_blocked(self):
-        """Gold/platinum relics may be out of reach for a player, so keep progression off relic checks."""
-        return self.tracker_slot is None and self.options.relic_requirement.value > 0
-
     def create_regions(self):
-        relics_blocked = self.relic_progression_blocked()
         menu = Region("Menu", self.player, self.multiworld)
         self.multiworld.regions.append(menu)
         entrances = {
@@ -482,9 +495,6 @@ class CrashWorld(World):
                 location.access_rule = lambda state, needed=Counter(needed): state.has_all_counts(
                     needed, self.player
                 )
-                if relics_blocked and check_category(level, event) == "relic":
-                    # relics stay in logic, but no player's progression item may be placed here
-                    location.item_rule = lambda item: not item.advancement
                 region.locations.append(location)
                 category = {
                     "crystal": "power_crystals",
@@ -635,22 +645,6 @@ class CrashWorld(World):
             self.create_item(self.get_filler_item_name())
             for _ in range(capacity - len(pool))
         )
-        if self.relic_progression_blocked():
-            relic_slots = sum(
-                event == "relic"
-                and address in self.active_checks
-                and address not in self.locked_collectibles
-                for level in self.active_levels
-                for event, _, address in checks(level)
-            )
-            progression = sum(item.advancement for item in pool)
-            if progression > capacity - relic_slots:
-                raise ValueError(
-                    f"Relic Requirement keeps important items off relic checks, leaving "
-                    f"{capacity - relic_slots} checks for {progression} important items. "
-                    "Enable more box checks, lower Relic Checks Percent, "
-                    "or set Relic Requirement to any."
-                )
         self.multiworld.itempool.extend(pool)
 
     def set_rules(self):

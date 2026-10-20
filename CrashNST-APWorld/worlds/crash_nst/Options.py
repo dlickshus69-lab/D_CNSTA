@@ -200,8 +200,10 @@ class RelicRequirement(Choice):
     gold_or_platinum: gold or platinum.
     platinum: platinum only.
 
-    Above any, relic checks stay in logic but never hold important (progression) items,
-    so a relic you cannot earn never blocks the seed.
+    Relic checks stay in logic and can hold important items. Above any, logic expects the
+    tools first: Crash 2 relics need Crash 2 Speed Shoes, Crash 3 on-foot relics need
+    Crash 3 Speed Shoes (gold) or every Crash 3 power (platinum). Crash 1 and vehicle stages
+    have no extra requirement.
     """
 
     display_name = "Relic Requirement"
