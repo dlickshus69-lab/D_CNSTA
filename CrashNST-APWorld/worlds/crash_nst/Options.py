@@ -290,7 +290,7 @@ class DarknessTrapWeight(Range):
 
 class NitroTrapWeight(Range):
     """How often Nitro Traps appear compared to other traps. The game spawns a real Nitro crate about
-    2-3 crates ahead of Crash in the direction he is running. It only happens in levels that have Nitro crates (it
+    2 crates ahead of Crash in the direction he is running. It only happens in levels that have Nitro crates (it
     borrows one of their spawners) and never in gimmick levels; until then it waits without holding up
     other traps."""
 
@@ -321,7 +321,7 @@ class ReverseControlsTrapWeight(Range):
 
 
 class FreezeTrapWeight(Range):
-    """How often Freeze Traps appear compared to other traps. All input stops for 3 seconds."""
+    """How often Freeze Traps appear compared to other traps. All input stops for 6 seconds."""
 
     display_name = "Freeze Trap Weight"
     range_start = 0

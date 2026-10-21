@@ -34,7 +34,7 @@ namespace ingame
     {
         return item >= trap_item(0) && item < trap_item(TrapCount) ? static_cast<int>(item - trap_item(0)) : -1;
     }
-    inline constexpr unsigned freeze_trap_ms = 3000;
+    inline constexpr unsigned freeze_trap_ms = 6000;
     // queued traps fire one at a time, this far apart
     inline constexpr unsigned trap_gap_ms = 10000;
 
