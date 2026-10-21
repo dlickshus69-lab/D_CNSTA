@@ -68,6 +68,11 @@ namespace
 std::string LevelProgress::detail_text() const
 {
     auto result = found_line("Checks", *this);
+    if (clear.total)
+        result += "\nLevel Clear: " + std::string(clear.done >= clear.total ? "done"
+                                                 : !clear.logic_known       ? "not yet"
+                                                 : clear.available          ? "not yet, available now"
+                                                                            : "not yet, not available yet");
     const char *names[]{"Gems", "Power Crystal", "Relic"};
     for (unsigned i = 0; i < collectibles.size(); ++i)
         if (collectibles[i].total)
@@ -206,19 +211,26 @@ CheckProgress check_progress(const CheckRules &rules, const std::vector<std::pai
                             : event == "crystal"                     ? &count.collectibles[1]
                             : event == "relic"                       ? &count.collectibles[2]
                                                                      : nullptr;
+        auto *clear = event == "clear" ? &count.clear : nullptr;
         count.title = rule.title;
         ++count.total;
         if (collectible)
             ++collectible->total;
+        if (clear)
+            ++clear->total;
         const bool done = checked.count(id) || pending.count(id);
         if (done)
             ++count.done;
         if (done && collectible)
             ++collectible->done;
+        if (done && clear)
+            ++clear->done;
         if (!known)
             count.logic_known = false;
         if (!known && collectible)
             collectible->logic_known = false;
+        if (!known && clear)
+            clear->logic_known = false;
         if (!known && result.error.empty())
             result.error = "Unknown check requirements. Affected reachable markers hidden";
         if (known && std::all_of(required.begin(), required.end(), [&](const auto &item) { return owned[item.first] >= item.second; }))
@@ -232,6 +244,8 @@ CheckProgress check_progress(const CheckRules &rules, const std::vector<std::pai
                 ++count.available;
                 if (collectible)
                     ++collectible->available;
+                if (clear)
+                    ++clear->available;
             }
         }
     }

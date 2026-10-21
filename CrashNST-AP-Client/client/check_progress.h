@@ -19,6 +19,7 @@ struct LevelProgress : CheckCounts
 {
     std::string title;
     std::array<CheckCounts, 3> collectibles{};
+    CheckCounts clear{}; // the level's clear check
     std::string collectible_text() const;
     // the level panel in the top-left corner: one spelled-out line for all checks, then one per collectible type
     std::string detail_text() const;

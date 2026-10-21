@@ -452,18 +452,6 @@ void ClientRuntime::handle_commands()
                 else
                     print_console("Ice watch needs the in-game adapter. Load into a level first.");
             }
-            else if (command == "/ice_force")
-            {
-                if (box_markers)
-                {
-                    const bool on = argument != "off";
-                    box_markers->ice_force(on);
-                    print_console(on ? "Ice force on (test): the game's ice switches are held on. Walk on normal ground and see if Crash slides, then /ice_force off."
-                                     : "Ice force off.");
-                }
-                else
-                    print_console("Ice force needs the in-game adapter. Load into a level first.");
-            }
             else if (command == "/ice_probe")
             {
                 if (box_markers)

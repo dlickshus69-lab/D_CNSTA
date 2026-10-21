@@ -2419,97 +2419,6 @@ namespace ingame
                 ice_side_sample(actor, (surface->second.bits & 0xff) != 0);
             std::cout << std::flush;
         }
-        // /ice_force on (test): holds on everything /ice_watch saw switch on for ice, to see whether the game's own ice
-        // then works on any ground: Crash_IceSlide's two ice flags, Crash_SlideSpin's ice flag, three flag words in
-        // objects Crash's movement controller points to (13 -> 15, 0 -> 257), and a pointer the controller only holds
-        // on ice (the one from the last time Crash stood on ice in this level, while that object is still there)
-        struct IcePointer
-        {
-            Address object = 0, type = 0;
-            std::string level;
-        } ice_pointer;
-        int field_offset(Address meta, const char *name, unsigned size)
-        {
-            const auto count = value<unsigned>(meta + 24);
-            const auto fields = value<Address>(meta + 40);
-            if (!fields || count > 512)
-                return -1;
-            for (unsigned i = 0; i < count; ++i)
-            {
-                const auto field = value<Address>(fields + i * 8);
-                if (string(value<Address>(field + 48)) == name)
-                    return value<std::uint16_t>(field + 22) == size ? int(value<std::uint16_t>(field + 24)) : -1;
-            }
-            return -1;
-        }
-        void update_ice_force(bool on)
-        {
-            static bool announced = false;
-            const auto actor = player();
-            const auto controller = actor ? value<Address>(actor + 424) : 0;
-            const bool moving = typed(controller, 0x1589128);
-            const auto level = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
-            // remember the ice-only pointer whenever Crash is on ice
-            const auto holder = moving ? value<Address>(controller + 0x48) : 0;
-            if (holder && readable(holder + 0x98, 8))
-                if (const auto object = value<Address>(holder + 0x98); object && readable(object, 8))
-                    ice_pointer = {object, value<Address>(object), level};
-            if (!on)
-            {
-                if (announced)
-                    std::cout << "Ice force: off\n" << std::flush;
-                announced = false;
-                return;
-            }
-            const auto c = actor ? crash_script(actor, "Scripts.Graph.Crash_IceSlide") : 0;
-            const auto meta = c ? value<Address>(c + 56) : 0;
-            if (!c || !field_at(meta, "Bool_id_bxsqi703", 0x68, 1) || !field_at(meta, "Bool_id_17gxyac6", 0x78, 1))
-            {
-                if (!announced)
-                    std::cout << "Ice force: Crash_IceSlide not found here\n" << std::flush;
-                announced = true;
-                return;
-            }
-            std::vector<std::string> held{"IceSlide flags"};
-            write(c + 0x68, static_cast<unsigned char>(1));
-            write(c + 0x78, static_cast<unsigned char>(1));
-            if (const auto slide = crash_script(actor, "Scripts.Graph.Crash_SlideSpin"))
-                if (const auto at = field_offset(value<Address>(slide + 56), "Bool_id_s5hclfhw", 1); at >= 0)
-                    write(slide + at, static_cast<unsigned char>(1)), held.push_back("SlideSpin flag");
-            if (moving)
-            {
-                // flag words: only switched from the value they had on normal ground
-                const auto flags = [&](Address object, unsigned offset, std::uint32_t ground, std::uint32_t ice, const char *label)
-                {
-                    if (!object || !readable(object + offset, 4))
-                        return;
-                    const auto now = value<std::uint32_t>(object + offset);
-                    if (now == ground && write(object + offset, ice))
-                        held.push_back(label);
-                    else if (now == ice)
-                        held.push_back(label);
-                };
-                const auto states = value<Address>(controller + 0x6f0);
-                flags(states, 0x100, 0, 257, "controller +0x6f0 +0x100");
-                flags(states, 0x148, 13, 15, "controller +0x6f0 +0x148");
-                flags(states, 0x170, 13, 15, "controller +0x6f0 +0x170");
-                flags(value<Address>(controller + 0x2c0), 0x138, 0, 257, "controller +0x2c0 +0x138");
-                if (holder && readable(holder + 0x98, 8) && !value<Address>(holder + 0x98) && ice_pointer.object &&
-                    ice_pointer.level == level && readable(ice_pointer.object, 8) && value<Address>(ice_pointer.object) == ice_pointer.type)
-                    write(holder + 0x98, ice_pointer.object), held.push_back("ice pointer");
-            }
-            static std::size_t last_count = 0;
-            if (!announced || held.size() != last_count)
-            {
-                std::cout << "Ice force: holding";
-                for (const auto &h : held)
-                    std::cout << " [" << h << "]";
-                std::cout << (ice_pointer.object && ice_pointer.level == level ? "" : " (no ice pointer yet: step on real ice once in this level)") << "\n"
-                          << std::flush;
-            }
-            last_count = held.size();
-            announced = true;
-        }
         void update_c3_buttons(Shared &state, const std::string &zone)
         {
             static std::uint64_t next = 0, pending_triggers = 0;
@@ -2750,7 +2659,6 @@ namespace ingame
         }
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         update_ice_watch(state.ice_watch != 0);
-        update_ice_force(state.ice_force != 0);
         if (state.ice_probe_request != state.ice_probe_ack)
         {
             state.ice_probe_ack = state.ice_probe_request;

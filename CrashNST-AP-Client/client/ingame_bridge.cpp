@@ -474,12 +474,6 @@ void BoxMarkers::ice_watch(bool on)
     shared_->ice_watch = on ? 1u : 0u;
     unlock();
 }
-void BoxMarkers::ice_force(bool on)
-{
-    lock();
-    shared_->ice_force = on ? 1u : 0u;
-    unlock();
-}
 void BoxMarkers::request_ice_probe()
 {
     lock();
