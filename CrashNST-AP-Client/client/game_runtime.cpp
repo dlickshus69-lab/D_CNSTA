@@ -3066,6 +3066,275 @@ namespace ingame
             }
             ice_note(text.str());
         }
+        //  kick: the prototype Ice Trap. /ice_test which showed that a floor type's +0x28 (its "Ice"/"Snow"/... movement
+        //        kind, type +0x13ea438) decides whether Crash slides, and the IceSurface exists in every level. But the
+        //        game only looks at it when Crash's floor piece changes: Crash_IceSlide gets the new piece in
+        //        Collision_Material s2qfleo5 and the old one in kuddrvja. Kick gives the floor type Crash stands on the
+        //        Ice kind, then looks through Crash's objects for where the game keeps the piece he stands on and
+        //        tries putting another piece there, one place at a time, until the ice script runs (his ice flag turns
+        //        on). Turning it off puts the floor's kind back and kicks the same place again so he stops at once.
+        struct IceKickHit
+        {
+            Address at = 0;
+            std::string path;
+        };
+        struct IceKick
+        {
+            enum Stage { Idle, WaitIce, Searching, Trying, Holding, Stopping } stage = Idle;
+            std::string level;
+            Address script = 0, piece = 0, other = 0, surface = 0, kind = 0;
+            unsigned kudd = 0, flag = 0;
+            std::uint64_t surface_old = 0;
+            bool applied = false;
+            std::vector<IceKickHit> hits;
+            std::size_t trial = 0;
+            Address trial_at = 0;
+            std::uint64_t trial_time = 0, kudd_before = 0;
+            IceKickHit worked;
+            std::uint64_t stop_time = 0;
+        } ice_kick;
+        std::mutex ice_kick_mutex;
+        std::atomic_bool ice_kick_search_done{false};
+        std::vector<IceKickHit> ice_kick_found;
+        Address ice_kick_found_other = 0;
+        void ice_kick_search(Address actor, Address piece, Address script, Address script_end)
+        {
+            ice_kick_search_done = false;
+            std::thread([actor, piece, script, script_end]
+                        {
+                struct Node
+                {
+                    Address at;
+                    unsigned size;
+                    int depth;
+                    std::string path;
+                };
+                const auto controller = value<Address>(actor + 424);
+                std::deque<Node> queue{{actor, 0x800, 0, "crash"}, {controller, 0x1000, 0, "controller"}};
+                std::set<Address> seen{actor, controller};
+                std::vector<IceKickHit> hits;
+                Address other = 0;
+                const auto lo = base(), hi = module_end();
+                while (!queue.empty() && seen.size() < 6000 && hits.size() < 40)
+                {
+                    const auto node = queue.front();
+                    queue.pop_front();
+                    std::vector<std::uint64_t> words(node.size / 8);
+                    if (!read(node.at, words))
+                    {
+                        words.resize(0x100 / 8);
+                        if (!read(node.at, words))
+                            continue;
+                    }
+                    for (std::size_t i = 0; i < words.size(); ++i)
+                    {
+                        const auto w = static_cast<Address>(words[i]);
+                        const Address where = node.at + i * 8;
+                        std::ostringstream label;
+                        label << node.path << " +0x" << std::hex << i * 8;
+                        if (w == piece)
+                        {
+                            if (where < script || where >= script_end)
+                                hits.push_back({where, label.str()});
+                            continue;
+                        }
+                        if (w < 0x10000 || w > 0x7ffffffeffffULL || (w & 7) || (w >= lo && w < hi))
+                            continue;
+                        if (!other && typed(w, 0x13ea4d8) && readable(value<Address>(w + 0x18), 16))
+                            other = w;
+                        if (node.depth < 3 && seen.insert(w).second)
+                            queue.push_back({w, 0x400, node.depth + 1, label.str() + " ->"});
+                    }
+                }
+                {
+                    std::lock_guard lock(ice_kick_mutex);
+                    ice_kick_found = std::move(hits), ice_kick_found_other = other;
+                }
+                std::cout << "Ice test: kick: looked through " << seen.size() << " of Crash's objects\n" << std::flush;
+                ice_kick_search_done = true; })
+                .detach();
+        }
+        void ice_kick_restore_kind()
+        {
+            auto &k = ice_kick;
+            if (k.applied && readable(k.surface + 0x28, 8) && value<Address>(k.surface + 0x28) == k.kind)
+                write(k.surface + 0x28, k.surface_old);
+            k.applied = false;
+        }
+        void update_ice_kick(bool on, Address actor, const std::string &level)
+        {
+            auto &k = ice_kick;
+            const auto now = GetTickCount64();
+            if (!on && k.stage != IceKick::Idle && k.stage != IceKick::Stopping)
+            {
+                // turning it off: put the floor's kind back, then kick the place that worked so he stops at once
+                ice_kick_restore_kind();
+                if (k.worked.at && level == k.level && actor && k.script && readable(k.worked.at, 8))
+                {
+                    const auto piece = value<Address>(k.script + 0x60);
+                    const auto other = value<Address>(k.script + k.kudd);
+                    if (piece && other && other != piece && value<Address>(k.worked.at) == piece && write(k.worked.at, other))
+                    {
+                        k.stage = IceKick::Stopping, k.stop_time = now, k.trial_at = k.worked.at, k.piece = piece, k.other = other;
+                        ice_note("kick off: the floor is back to normal. Crash should stop sliding now.");
+                        return;
+                    }
+                }
+                k.stage = IceKick::Idle;
+                ice_note("kick off: the floor is back to normal (he stops after stepping onto another piece of floor).");
+                return;
+            }
+            if (k.stage == IceKick::Stopping)
+            {
+                if (now - k.stop_time < 300)
+                    return;
+                if (readable(k.trial_at, 8) && value<Address>(k.trial_at) == k.other)
+                    write(k.trial_at, k.piece);
+                const bool flag = k.script && k.flag && value<std::uint8_t>(k.script + k.flag);
+                std::cout << "Ice test: kick off: the ice flag is now " << flag << "\n" << std::flush;
+                k.stage = IceKick::Idle;
+                return;
+            }
+            if (!on)
+                return;
+            if (k.stage != IceKick::Idle && level != k.level)
+            {
+                ice_kick_restore_kind();
+                k.stage = IceKick::Idle;
+                ice_note("kick: stopped (left the level). Type /ice_test off.");
+                return;
+            }
+            if (!actor)
+                return;
+            const auto script = crash_script(actor, "Scripts.Graph.Crash_IceSlide");
+            if (!script)
+                return;
+            if (k.stage == IceKick::Idle)
+            {
+                k = {};
+                k.level = level, k.stage = IceKick::WaitIce, k.script = script;
+                k.kudd = ice_slide_field(script, "Collision_Material_id_kuddrvja").first;
+                k.flag = ice_slide_field(script, "Bool_id_bxsqi703").first;
+                if (!(ice_surface_seen.level == level && ice_surface_valid()))
+                    ice_surface_by_name(level);
+                ice_note("kick: getting ready. Stand still on normal ground.");
+                return;
+            }
+            if (k.stage == IceKick::WaitIce)
+            {
+                if (!(ice_surface_seen.level == level && ice_surface_valid()))
+                {
+                    if (!ice_name_search_running && ice_name_searched_level == level)
+                    {
+                        k.stage = IceKick::Holding;
+                        ice_note("kick: no IceSurface found in this level. Type /ice_test off and send me the log.");
+                    }
+                    return; // the search by name is still running
+                }
+                const auto info = crash_floor_info(actor);
+                const auto surface = info ? value<Address>(info + 0x18) : 0;
+                const auto kind = value<Address>(ice_surface_seen.surface + 0x28);
+                if (!typed(kind, 0x13ea438) || string(value<Address>(kind + 0x10), 16) != "Ice")
+                {
+                    k.stage = IceKick::Holding;
+                    ice_note("kick: the IceSurface doesn't look right here. Type /ice_test off and send me the log.");
+                    return;
+                }
+                if (!surface || surface == ice_surface_seen.surface || !readable(surface + 0x28, 8))
+                    return; // on real ice, or in the air: wait for normal ground
+                k.surface = surface, k.kind = kind, k.surface_old = value<std::uint64_t>(surface + 0x28);
+                k.applied = write(surface + 0x28, kind);
+                k.script = script, k.piece = value<Address>(script + 0x60);
+                const auto size = unsigned(value<std::uint16_t>(value<Address>(script + 56) + 90));
+                std::cout << "Ice test: kick: " << string(value<Address>(surface + 8), 48) << " now has the Ice kind (was "
+                          << string(value<Address>(static_cast<Address>(k.surface_old) + 0x10), 32) << ")\n" << std::flush;
+                ice_kick_search(actor, k.piece, script, script + size);
+                k.stage = IceKick::Searching;
+                ice_note("kick: " + string(value<Address>(surface + 8), 48) + " is now ice. IceKick::Searching (stand still).");
+                return;
+            }
+            if (k.stage == IceKick::Searching)
+            {
+                if (!ice_kick_search_done)
+                    return;
+                {
+                    std::lock_guard lock(ice_kick_mutex);
+                    k.hits = ice_kick_found;
+                    if (ice_kick_found_other && ice_kick_found_other != k.piece)
+                        k.other = ice_kick_found_other;
+                }
+                const auto kudd = value<Address>(script + k.kudd);
+                if (kudd && kudd != k.piece && typed(kudd, 0x13ea4d8))
+                    k.other = kudd; // the floor piece he stood on before: always a real one
+                k.hits.push_back({script + 0x60, "Crash_IceSlide's own floor setting"});
+                std::ostringstream out;
+                out << "Ice test: kick: the floor piece 0x" << std::hex << k.piece << " is kept in " << std::dec << k.hits.size() << " places:\n";
+                for (const auto &h : k.hits)
+                    out << "Ice test:   " << h.path << "\n";
+                std::cout << out.str() << std::flush;
+                if (!k.other)
+                {
+                    k.stage = IceKick::Holding;
+                    ice_note("kick: no other floor piece to try with. Walk around a bit, then /ice_test off and /ice_test kick again.");
+                    return;
+                }
+                k.stage = IceKick::Trying, k.trial = 0, k.trial_at = 0;
+                ice_note("kick: trying " + std::to_string(k.hits.size()) + " places (stand still, a few seconds).");
+                return;
+            }
+            if (k.stage != IceKick::Trying)
+                return;
+            const bool flag = k.flag && value<std::uint8_t>(script + k.flag);
+            if (k.trial_at)
+            {
+                const auto kudd = value<Address>(script + k.kudd);
+                const bool fired = flag || kudd != k.kudd_before;
+                if (!fired && now - k.trial_time < 350)
+                    return;
+                if (readable(k.trial_at, 8) && value<Address>(k.trial_at) == k.other)
+                    write(k.trial_at, k.piece);
+                const auto &hit = k.hits[k.trial];
+                std::cout << "Ice test: kick: try " << (k.trial + 1) << " (" << hit.path << "): "
+                          << (flag ? "the ice script ran, ICE ON" : fired ? "the floor changed, but no ice" : "nothing") << "\n" << std::flush;
+                k.trial_at = 0;
+                if (flag)
+                {
+                    k.worked = hit, k.stage = IceKick::Holding;
+                    ice_note("kick: it worked (try " + std::to_string(k.trial + 1) + ")! Crash should slide now. /ice_test off to stop it.");
+                    return;
+                }
+                ++k.trial;
+            }
+            if (flag)
+            {
+                k.stage = IceKick::Holding;
+                ice_note("kick: Crash is already on ice. /ice_test off, stand on normal ground, then /ice_test kick again.");
+                return;
+            }
+            if (value<Address>(script + 0x60) != k.piece)
+            {
+                k.stage = IceKick::Holding;
+                ice_note("kick: Crash moved to another piece of floor during the test. /ice_test off and try again standing still.");
+                return;
+            }
+            if (k.trial >= k.hits.size())
+            {
+                k.stage = IceKick::Holding;
+                ice_note("kick: none of them worked. Walk onto another piece of floor to start sliding. Send me the log.");
+                return;
+            }
+            const auto at = k.hits[k.trial].at;
+            if (!readable(at, 8) || value<Address>(at) != k.piece)
+            {
+                ++k.trial;
+                return;
+            }
+            k.kudd_before = value<Address>(script + k.kudd);
+            if (write(at, k.other))
+                k.trial_at = at, k.trial_time = now;
+            else
+                ++k.trial;
+        }
         void update_ice_test(unsigned mode)
         {
             static unsigned announced = 0;
@@ -3106,6 +3375,7 @@ namespace ingame
                               : mode == 7 ? "Ice test: name on.\n"
                               : mode == 8 ? "Ice test: copyall on.\n"
                               : mode == 9 ? "Ice test: which on.\n"
+                              : mode == 10 ? "Ice test: kick on.\n"
                                           : "Ice test: off\n")
                           << std::flush;
                 announced = mode;
@@ -3117,6 +3387,7 @@ namespace ingame
                 std::lock_guard lock(ice_swap_mutex);
                 ice_swapped.clear(), ice_swap_surfaces.clear(), swap_level = level;
             }
+            update_ice_kick(mode == 10, actor, level);
             if (previous == 3 && mode != 3)
                 ice_swap_restore();
             if (previous == 5 && mode != 5)
@@ -3619,7 +3890,7 @@ namespace ingame
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         update_ice_watch(state.ice_watch != 0);
         update_move_probe(state.move_probe != 0);
-        update_ice_test(state.ice_test <= 9 ? state.ice_test : 0);
+        update_ice_test(state.ice_test <= 10 ? state.ice_test : 0);
         if (!ice_note_text.empty())
         {
             copy(state.ice_note, ice_note_text);

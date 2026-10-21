@@ -468,9 +468,9 @@ void ClientRuntime::handle_commands()
             {
                 if (box_markers)
                 {
-                    const unsigned mode = argument == "slide" ? 1u : argument == "floor" ? 2u : argument == "swap" ? 3u : argument == "push" ? 4u : argument == "const" ? 5u : argument == "copy" ? 6u : argument == "name" ? 7u : argument == "copyall" ? 8u : argument == "which" ? 9u : 0u;
+                    const unsigned mode = argument == "slide" ? 1u : argument == "floor" ? 2u : argument == "swap" ? 3u : argument == "push" ? 4u : argument == "const" ? 5u : argument == "copy" ? 6u : argument == "name" ? 7u : argument == "copyall" ? 8u : argument == "which" ? 9u : argument == "kick" ? 10u : 0u;
                     if (!mode && argument != "off")
-                        print_console("Use /ice_test which, copyall, swap, name, const, copy, push, slide, floor or off.");
+                        print_console("Use /ice_test kick, which, copyall, swap, name, const, copy, push, slide, floor or off.");
                     box_markers->ice_test(mode);
                     print_console(mode == 1 ? "Ice test: slide on. Close the console and run, turn and stop on normal ground. /ice_test off when done."
                                   : mode == 2 ? "Ice test: floor on. Close the console and run, turn and stop on normal ground. /ice_test off when done."
@@ -481,6 +481,7 @@ void ClientRuntime::handle_commands()
                                   : mode == 7 ? "Ice test: name on. Walk from the ice onto the snow and back a few times. /ice_test off when done."
                                   : mode == 8 ? "Ice test: copyall on. Walk from the ice onto the snow and back a few times. /ice_test off when done."
                                   : mode == 9 ? "Ice test: which on. Walk ice -> snow -> ice -> snow ... and follow the messages. /ice_test off when done."
+                                  : mode == 10 ? "Ice test: kick on. Stand still on normal ground and follow the messages. /ice_test off when done."
                                               : "Ice test off.");
                 }
                 else
