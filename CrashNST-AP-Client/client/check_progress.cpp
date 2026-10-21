@@ -69,10 +69,10 @@ std::string LevelProgress::detail_text() const
 {
     auto result = found_line("Checks", *this);
     if (clear.total)
-        result += "\nLevel Clear: " + std::string(clear.done >= clear.total ? "done"
-                                                 : !clear.logic_known       ? "not yet"
-                                                 : clear.available          ? "not yet, available now"
-                                                                            : "not yet, not available yet");
+        result += "\nLevel: " + std::string(clear.done >= clear.total ? "Cleared"
+                                           : !clear.logic_known       ? "Not Cleared"
+                                           : clear.available          ? "Not Cleared, available now"
+                                                                      : "Not Cleared, not available yet");
     const char *names[]{"Gems", "Power Crystal", "Relic"};
     for (unsigned i = 0; i < collectibles.size(); ++i)
         if (collectibles[i].total)
@@ -95,12 +95,10 @@ std::string LevelProgress::collectible_text() const
 }
 std::string LevelProgress::label_text() const
 {
-    // found/total, then how many more the current items reach
+    // found/total, then how many more the current items reach (cleared or not goes on the level-name line)
     auto result = "Checks: " + std::to_string(done) + "/" + std::to_string(total);
     if (done < total && logic_known)
         result += available ? " (" + std::to_string(available) + " available)" : " (none available)";
-    if (clear.total)
-        result += clear.done >= clear.total ? "   Level Cleared" : "   Not Finished";
     return result;
 }
 std::array<LevelProgress, 3> campaign_progress(const CheckProgress &progress,

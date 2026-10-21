@@ -1393,10 +1393,12 @@ namespace
                         continue;
                     const float center = x;
                     y += 12;
-                    // game and level; checks found/total and cleared or not; then C crystal / G gems / R relic
+                    // game and level with (Cleared) or (Not Cleared); checks found/total and available; then C crystal / G gems / R relic
                     const bool extra = target->collectible_counts[0];
+                    const std::string status = target->cleared == 2 ? " (Cleared)" : target->cleared == 1 ? " (Not Cleared)" : "";
+                    const float title_width = r.text_width(target->title);
                     const float label_height = extra ? 68 : 46;
-                    const float label_width = std::min<float>(std::max({r.text_width(target->title), r.text_width(target->counts), r.text_width(target->collectible_counts)}) + 12, 480);
+                    const float label_width = std::min<float>(std::max({title_width + r.text_width(status), r.text_width(target->counts), r.text_width(target->collectible_counts)}) + 12, 480);
                     for (const auto &previous : labels)
                         if (std::abs(previous[0] - center) < (previous[3] + label_width) / 2 &&
                             y < previous[1] + previous[2] + 2 && y + label_height > previous[1] - 2)
@@ -1407,6 +1409,8 @@ namespace
                         continue;
                     r.quad(x, y, label_width, label_height, 0xbb181818);
                     r.text(x + 6, y, target->title, 0xff20d8ff);
+                    if (!status.empty())
+                        r.text(x + 6 + title_width, y, status, target->cleared == 2 ? 0xff40e040 : 0xffbbbbbb);
                     r.text(x + 6, y + 22, target->counts, 0xff20d8ff);
                     if (extra)
                         r.text(x + 6, y + 44, target->collectible_counts, 0xff20d8ff);

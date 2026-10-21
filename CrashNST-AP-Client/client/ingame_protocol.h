@@ -69,6 +69,7 @@ namespace ingame
     {
         char key[5]{}, title[160]{}, counts[64]{}, collectible_counts[128]{};
         char detail[256]{}; // the top-left level panel: spelled-out lines separated by \n
+        unsigned char cleared = 0; // hub label after the level name: 0 no clear check, 1 not cleared, 2 cleared
         unsigned style = 0;
     };
     struct Entrance
