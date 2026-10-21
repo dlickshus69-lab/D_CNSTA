@@ -1,8 +1,9 @@
 # Builds the client DLLs on a GitHub Windows machine with the toolchain from the client README
 # (MSYS2 MINGW64, CMake, liblzma, APCpp at its pinned revision) and packages the apworld.
 # Every build is kept under the run's "Artifacts". Builds of main also refresh the latest release
-# on the Releases page, named "Dlickshus Crash Bandicoot N. Sane Trilogy Archipelago V<major.minor>.<build>":
-# major.minor comes from the VERSION file, the last number is the build (run) number.
+# on the Releases page, named "Dlickshus Crash Bandicoot N. Sane Trilogy Archipelago V<major.minor>.<build>"
+# (tag v<major.minor>.<build>): major.minor comes from the VERSION file, the last number is the build (run)
+# number. The five newest builds are kept.
 name: Build client
 
 on:
@@ -99,14 +100,23 @@ jobs:
 
           **Archipelago:** put crash_nst.apworld in Archipelago's custom_worlds folder.
           "@
-          $existing = gh release list --json tagName --jq '.[].tagName'
-          if ($existing -contains "latest-build") { gh release delete latest-build --cleanup-tag --yes }
-          # GitHub can take a moment to drop the old tag: retry so a hiccup never leaves the Releases page empty
-          for ($attempt = 1; $attempt -le 5; $attempt++) {
-            gh release create latest-build CrashNST-AP-Client-x64.zip CrashNST-APWorld/dist/crash_nst.apworld `
-              --title "Dlickshus Crash Bandicoot N. Sane Trilogy Archipelago V$version" --notes $notes --target $env:GITHUB_SHA --latest
-            if ($LASTEXITCODE -eq 0) { exit 0 }
-            Write-Host "Release attempt $attempt failed; retrying in 20 seconds"
+          # every build gets its own tag: GitHub may refuse to reuse a deleted release's tag
+          $tag = "v$version"
+          if ([int]$env:GITHUB_RUN_ATTEMPT -gt 1) { $tag = "$tag-$env:GITHUB_RUN_ATTEMPT" }
+          $created = $false
+          for ($attempt = 1; $attempt -le 3 -and -not $created; $attempt++) {
+            $out = (gh release create $tag CrashNST-AP-Client-x64.zip CrashNST-APWorld/dist/crash_nst.apworld `
+              --title "Dlickshus Crash Bandicoot N. Sane Trilogy Archipelago V$version" --notes $notes --target $env:GITHUB_SHA --latest 2>&1) | Out-String
+            if ($LASTEXITCODE -eq 0) { $created = $true; break }
+            # an annotation, so the error can be read from the API without the full log
+            Write-Host "::warning::Release attempt $attempt failed: $($out.Trim())"
             Start-Sleep -Seconds 20
           }
-          exit 1
+          if (-not $created) { Write-Host "::error::Could not create release $tag"; exit 1 }
+          # keep the five newest builds; older ones (and the old latest-build) are cleaned up
+          $old = gh release list --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[5:] | .[].tagName'
+          foreach ($t in $old) {
+            gh release delete $t --cleanup-tag --yes
+            if ($LASTEXITCODE -ne 0) { Write-Host "::warning::Could not remove old release $t" }
+          }
+          exit 0
