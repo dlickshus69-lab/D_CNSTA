@@ -1590,10 +1590,17 @@ namespace ingame
         // full) up to four levels deep, and list every place holding one of the targets
         // The search is bounded by every object it tries (also ones it can't read: a heap full of stale pointers
         // once made it run for millions of steps and freeze the game) and by the objects it queues.
-        std::vector<ScanHit> position_scan(const NitroPick &pick, const std::vector<std::array<float, 3>> &targets,
+        // Targets near the origin are refused: a crate created this frame still has an empty (0,0,0) display
+        // position, and "matching" every zero in memory is what froze the game in V1.1.57 and V1.1.58.
+        bool heap_page(Address at, std::size_t size);
+        std::vector<ScanHit> position_scan(const NitroPick &pick, const std::vector<std::array<float, 3>> &all_targets,
                                            std::vector<unsigned> &which, unsigned &visited, unsigned max_objects = 60000,
-                                           unsigned max_depth = 4)
+                                           unsigned max_depth = 4, unsigned max_hits = 400, bool heap_only = false)
         {
+            std::vector<std::array<float, 3>> targets;
+            for (const auto &t : all_targets)
+                if (std::abs(t[0]) + std::abs(t[1]) > 1 && std::isfinite(t[0]) && std::isfinite(t[1]) && std::isfinite(t[2]))
+                    targets.push_back(t);
             struct Node
             {
                 Address at;
@@ -1632,7 +1639,8 @@ namespace ingame
                 SIZE_T got = 0;
                 unsigned size = 0;
                 for (const unsigned attempt : {node.span, 512u, 64u})
-                    if (attempt <= node.span && readable(node.at, attempt) && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(node.at), bytes.data(), attempt, &got) && got == attempt)
+                    if (attempt <= node.span && (heap_only ? heap_page(node.at, attempt) : readable(node.at, attempt)) &&
+                        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(node.at), bytes.data(), attempt, &got) && got == attempt)
                     {
                         size = attempt;
                         break;
@@ -1654,6 +1662,8 @@ namespace ingame
                                     std::memcpy(&w, bytes.data() + o + 12, sizeof(w));
                                 hits.push_back({node.at + o, node.path + " " + hex(o) + (w == 1.0f ? " (w 1)" : "")});
                                 which.push_back(t);
+                                if (hits.size() >= max_hits)
+                                    return hits;
                             }
                             break;
                         }
@@ -2430,7 +2440,27 @@ namespace ingame
                 std::cout << "Nitro drop: the Nitro is at " << triple(high) << ", " << static_cast<int>(d.drop) << " above the spot\n" << std::flush;
                 // every copy, kept with where it ends up (its own offset from the crate, on the ground)
                 d.copies.clear();
-                for (const auto &[at, v] : nitro_copies(d.entity, crate_model(d.entity), high))
+                auto found = nitro_copies(d.entity, crate_model(d.entity), high);
+                if (found.size() < 4 && std::abs(high[0]) + std::abs(high[1]) > 1)
+                {
+                    // the known paths found little: search near the crate, heap pages only, for its real position (and its
+                    // centre, a crate's height up), at most 64 places
+                    NitroPick pick{0, d.entity, crate_model(d.entity), 0, "drop"};
+                    std::vector<unsigned> which;
+                    unsigned visited = 0;
+                    const auto started = GetTickCount64();
+                    const auto hits = position_scan(pick, {high, {high[0], high[1], high[2] + 76}}, which, visited, 4000, 3, 64, true);
+                    std::ostringstream names;
+                    for (const auto &hit : hits)
+                    {
+                        std::array<float, 3> v{};
+                        if (std::none_of(found.begin(), found.end(), [&](const auto &f) { return f.first == hit.at; }) && read(hit.at, v))
+                            found.push_back({hit.at, v}), names << " [" << hit.path << "]";
+                    }
+                    std::cout << "Nitro drop: search found " << hits.size() << " places in " << (GetTickCount64() - started) << " ms ("
+                              << visited << " objects):" << names.str() << "\n" << std::flush;
+                }
+                for (const auto &[at, v] : found)
                     d.copies.push_back({at, std::array<float, 3>{v[0], v[1], v[2] - d.drop}});
                 d.stage = NitroDropTrap::Falling, d.fall_start = now;
                 std::cout << "Nitro drop: " << d.copies.size() << " copies; falling onto " << triple(d.spot) << "\n" << std::flush;
