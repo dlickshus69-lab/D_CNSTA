@@ -55,6 +55,12 @@ std::string CheckCounts::text() const
 }
 namespace
 {
+    // text color marker: \x01 red (not all found and your current items reach none of the rest), \x02 green (your
+    // current items reach at least one more); nothing when all are found or the logic is unknown
+    std::string mark(const CheckCounts &c)
+    {
+        return !c.total || c.done >= c.total || !c.logic_known ? "" : c.available ? "\x02" : "\x01";
+    }
     std::string found_line(const std::string &name, const CheckCounts &c)
     {
         auto line = name + ": " + std::to_string(c.done) + " of " + std::to_string(c.total) + " found";
@@ -67,30 +73,36 @@ namespace
 } // namespace
 std::string LevelProgress::detail_text() const
 {
-    auto result = found_line("Checks", *this);
+    // each line green when your current items reach more of it, red when they reach none of the rest
+    auto result = mark(*this) + found_line("Checks", *this);
     if (clear.total)
-        result += "\nLevel Clear: " + std::string(clear.done >= clear.total ? "done"
+        result += std::string("\n") + mark(clear) + "Level Clear: " + std::string(clear.done >= clear.total ? "done"
                                                  : !clear.logic_known       ? "not yet"
                                                  : clear.available          ? "not yet, available now"
                                                                             : "not yet, not available yet");
     const char *names[]{"Gems", "Power Crystal", "Relic"};
     for (unsigned i = 0; i < collectibles.size(); ++i)
         if (collectibles[i].total)
-            result += "\n" + found_line(names[i], collectibles[i]);
+            result += std::string("\n") + mark(collectibles[i]) + found_line(names[i], collectibles[i]);
     return result;
 }
 std::string LevelProgress::collectible_text() const
 {
-    // the level clear, then C power crystal, G gems, R relic
-    std::string result = clear.total ? "Clear: " + std::to_string(clear.done) + "/" + std::to_string(clear.total) : "";
-    const std::pair<unsigned, const char *> order[]{{1, "C"}, {0, "G"}, {2, "R"}};
-    for (const auto &[i, label] : order)
-        if (collectibles[i].total)
-        {
-            if (!result.empty())
-                result += "   ";
-            result += std::string(label) + ": " + std::to_string(collectibles[i].done) + "/" + std::to_string(collectibles[i].total);
-        }
+    // the level clear, then C power crystal, G gems, R relic, as tab-separated pieces, each marked green or red
+    // like the top-left panel's lines
+    std::string result;
+    const auto piece = [&](const char *label, const CheckCounts &c)
+    {
+        if (!c.total)
+            return;
+        if (!result.empty())
+            result += "\t";
+        result += mark(c) + label + ": " + std::to_string(c.done) + "/" + std::to_string(c.total);
+    };
+    piece("Level Clear", clear);
+    piece("C", collectibles[1]);
+    piece("G", collectibles[0]);
+    piece("R", collectibles[2]);
     return result;
 }
 std::string LevelProgress::label_text() const

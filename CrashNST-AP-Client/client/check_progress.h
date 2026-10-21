@@ -20,6 +20,7 @@ struct LevelProgress : CheckCounts
     std::string title;
     std::array<CheckCounts, 3> collectibles{};
     CheckCounts clear{}; // the level's clear check
+    // hub label line: Level Clear, C, G, R as tab-separated pieces; a leading \x01 marks red, \x02 green
     std::string collectible_text() const;
     // hub label line: checks found out of the level's total and how many are available now
     std::string label_text() const;

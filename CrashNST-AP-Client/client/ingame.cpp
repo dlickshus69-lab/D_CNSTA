@@ -1370,7 +1370,12 @@ namespace
                     r.text(22, 20, current->title, 0xffeeeeee);
                     float y = 42;
                     for (const auto &line : lines)
-                        r.text(22, y, line, 0xff20d8ff), y += 22;
+                    {
+                        // a leading \x01: you cannot get it with your current items (red); \x02: you can now (green)
+                        const char mark = line.empty() ? 0 : line[0];
+                        const bool marked = mark == '\x01' || mark == '\x02';
+                        r.text(22, y, marked ? line.substr(1) : line, mark == '\x01' ? 0xff4040ff : mark == '\x02' ? 0xff40e040 : 0xff20d8ff), y += 22;
+                    }
                     if (!crashsanity.empty())
                         r.text(22, y, crashsanity, 0xffeeeeee);
                 }
@@ -1396,10 +1401,28 @@ namespace
                     // game and level, (All Done) once every check is found; checks found/total and available; then the
                     // level clear, C crystal, G gems, R relic
                     const bool extra = target->collectible_counts[0];
+                    // line three: tab-separated pieces, red (\x01) when you cannot get it yet, green (\x02) when you can
+                    std::vector<std::pair<std::string, unsigned>> pieces;
+                    std::string plain;
+                    {
+                        const std::string all = target->collectible_counts;
+                        for (std::size_t start = 0; start < all.size();)
+                        {
+                            const auto end = std::min(all.find('\t', start), all.size());
+                            auto piece = all.substr(start, end - start);
+                            const char mark = piece.empty() ? 0 : piece[0];
+                            const unsigned color = mark == '\x01' ? 0xff4040ff : mark == '\x02' ? 0xff40e040 : 0xff20d8ff;
+                            if (mark == '\x01' || mark == '\x02')
+                                piece.erase(0, 1);
+                            plain += (plain.empty() ? "" : "   ") + piece;
+                            pieces.push_back({piece, color});
+                            start = end + 1;
+                        }
+                    }
                     const std::string status = target->all_done ? " (All Done)" : "";
                     const float title_width = r.text_width(target->title);
                     const float label_height = extra ? 68 : 46;
-                    const float label_width = std::min<float>(std::max({title_width + r.text_width(status), r.text_width(target->counts), r.text_width(target->collectible_counts)}) + 12, 480);
+                    const float label_width = std::min<float>(std::max({title_width + r.text_width(status), r.text_width(target->counts), r.text_width(plain)}) + 12, 480);
                     for (const auto &previous : labels)
                         if (std::abs(previous[0] - center) < (previous[3] + label_width) / 2 &&
                             y < previous[1] + previous[2] + 2 && y + label_height > previous[1] - 2)
@@ -1414,7 +1437,14 @@ namespace
                         r.text(x + 6 + title_width, y, status, 0xff40e040);
                     r.text(x + 6, y + 22, target->counts, 0xff20d8ff);
                     if (extra)
-                        r.text(x + 6, y + 44, target->collectible_counts, 0xff20d8ff);
+                    {
+                        float piece_x = x + 6;
+                        for (const auto &[piece, color] : pieces)
+                        {
+                            r.text(piece_x, y + 44, piece, color);
+                            piece_x += r.text_width(piece) + r.text_width("   ");
+                        }
+                    }
                 }
             }
         }
