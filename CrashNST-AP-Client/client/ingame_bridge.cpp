@@ -493,6 +493,19 @@ void BoxMarkers::request_ice_find()
     ++shared_->ice_find_request;
     unlock();
 }
+std::string BoxMarkers::take_ice_note()
+{
+    std::string note;
+    lock();
+    if (shared_->ice_note_id != ice_note_seen_)
+    {
+        ice_note_seen_ = shared_->ice_note_id;
+        shared_->ice_note[sizeof(shared_->ice_note) - 1] = 0;
+        note = shared_->ice_note;
+    }
+    unlock();
+    return note;
+}
 void BoxMarkers::request_ice_probe()
 {
     lock();

@@ -43,6 +43,7 @@ public:
     void move_probe(bool on);
     void ice_test(unsigned mode);
     void request_ice_find();
+    std::string take_ice_note(); // a new console message from the game thread, or empty
     void request_nitro_spawn();
     bool nitro_ready();
     void pause_traps(bool paused, std::uint64_t elapsed_ms);
@@ -73,6 +74,7 @@ private:
     HANDLE mapping_ = nullptr, mutex_ = nullptr;
     ingame::Shared *shared_ = nullptr;
     std::uintptr_t tick_ = 0;
+    unsigned ice_note_seen_ = 0;
     std::uintptr_t double_jump_filter_ = 0;
     std::uintptr_t crate_identity_ = 0;
     bool owned_ = false;

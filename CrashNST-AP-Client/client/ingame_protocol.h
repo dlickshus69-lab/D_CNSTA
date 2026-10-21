@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 20, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 21, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -133,6 +133,9 @@ namespace ingame
         unsigned ice_test = 0;
         // /ice_find (research): search memory for references to the IceSurface
         unsigned ice_find_request = 0, ice_find_ack = 0;
+        // set by the game thread: a short message for the console (the ice tests' step by step instructions)
+        unsigned ice_note_id = 0;
+        char ice_note[200]{};
         // /nitro_spawn (experimental): the game spawns a Nitro next to Crash
         unsigned nitro_spawn_request = 0, nitro_spawn_ack = 0;
         // set by the game thread: a Nitro Trap can spawn here now (level with a ready Nitro spawner, not a

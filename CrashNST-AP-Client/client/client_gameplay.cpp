@@ -468,6 +468,9 @@ void ClientRuntime::update_ownership(ClientTick &tick)
         {
             last_pause_tick = 0;
         }
+    if (box_markers)
+        if (const auto note = box_markers->take_ice_note(); !note.empty())
+            print_console(note, true);
     // the in-game tuner found a better Slow tilt: keep it as /slow_tilt so the next session starts there
     if (box_markers)
         try

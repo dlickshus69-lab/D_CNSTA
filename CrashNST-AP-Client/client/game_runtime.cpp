@@ -2898,6 +2898,174 @@ namespace ingame
                 std::cout << "Ice test: copy undone: " << ice_copied.size() << " values put back\n" << std::flush;
             ice_copied.clear();
         }
+        // a message for the in-game console (copied into the shared state once per tick)
+        std::string ice_note_text;
+        void ice_note(const std::string &text)
+        {
+            std::cout << "Ice test: " << text << "\n" << std::flush;
+            ice_note_text = text;
+        }
+        // a Crash_IceSlide setting by name: its offset and size, or {0, 0}
+        std::pair<unsigned, unsigned> ice_slide_field(Address script, const char *name)
+        {
+            const auto meta = value<Address>(script + 56);
+            const auto count = value<unsigned>(meta + 24);
+            const auto fields = value<Address>(meta + 40);
+            if (!fields || count > 512)
+                return {0, 0};
+            for (unsigned i = 0; i < count; ++i)
+            {
+                const auto field = value<Address>(fields + i * 8);
+                if (string(value<Address>(field + 48)) == name)
+                    return {value<std::uint16_t>(field + 24), value<std::uint16_t>(field + 22)};
+            }
+            return {0, 0};
+        }
+        //  which: copyall made the snow slippery, so this finds which one of the IceSurface's values does it. Each round
+        //         gives the snow one of them while Crash stands on the ice; when he then walks onto the snow, it reads
+        //         whether the game now treats it as ice (Crash_IceSlide's ice flag and the floor's grip), logs it and
+        //         puts the value back. Walking ice -> snow -> ice ... runs the rounds one by one.
+        struct IceWhich
+        {
+            bool active = false, applied = false, finished = false;
+            std::string level;
+            Address ice = 0, snow = 0;
+            std::vector<unsigned> offsets;
+            std::size_t round = 0;
+            std::uint64_t original = 0, snow_since = 0;
+            std::array<float, 2> ice_grip{}, snow_grip{};
+            bool have_ice_grip = false, have_snow_grip = false;
+            std::vector<unsigned> worked;
+        } ice_which;
+        void ice_which_restore()
+        {
+            auto &w = ice_which;
+            if (w.applied && readable(w.snow + w.offsets[w.round], 8))
+                write(w.snow + w.offsets[w.round], w.original);
+            w.applied = false;
+        }
+        void ice_which_start(const std::string &level)
+        {
+            auto &w = ice_which;
+            w = {};
+            w.ice = ice_surface_seen.surface, w.snow = ice_other_surface, w.level = level;
+            std::ostringstream out;
+            out << "Ice test: which: " << string(value<Address>(w.snow + 8), 48) << " and the IceSurface differ in:\n";
+            for (unsigned off = 0x10; off < 0x100; off += 8)
+            {
+                const auto snow = value<std::uint64_t>(w.snow + off), ice = value<std::uint64_t>(w.ice + off);
+                if (snow == ice)
+                    continue;
+                const bool pointers = pointer_like(snow) || pointer_like(ice);
+                out << "Ice test:   +0x" << std::hex << off << ": snow 0x" << snow << ", ice 0x" << ice << std::dec;
+                if (pointer_like(ice))
+                    out << " -> " << (ice == w.ice ? std::string("(the IceSurface itself)") : describe_object(static_cast<Address>(ice)));
+                out << "\n";
+                if (pointers) // the plain numbers were ruled out by /ice_test copy
+                    w.offsets.push_back(off);
+            }
+            std::cout << out.str() << std::flush;
+            if (w.offsets.empty())
+            {
+                ice_note("which: nothing left to try here. Type /ice_test off.");
+                return;
+            }
+            w.active = true;
+            ice_note("which: " + std::to_string(w.offsets.size()) + " rounds, testing on " + string(value<Address>(w.snow + 8), 48) +
+                     ". Stand on the ice to start round 1.");
+        }
+        void update_ice_which(Address actor, const std::string &level)
+        {
+            auto &w = ice_which;
+            if (!w.active || w.finished)
+                return;
+            if (level != w.level || !readable(w.snow, 0x100) || !readable(w.ice, 0x100))
+            {
+                w.applied = false, w.active = false;
+                ice_note("which: stopped (left the level). Type /ice_test off.");
+                return;
+            }
+            const auto info = actor ? crash_floor_info(actor) : 0;
+            if (!info)
+                return;
+            const auto script = crash_script(actor, "Scripts.Graph.Crash_IceSlide");
+            const auto [flag_at, flag_size] = script ? ice_slide_field(script, "Bool_id_bxsqi703") : std::pair<unsigned, unsigned>{0, 0};
+            const bool flag = flag_at && flag_size && (value<std::uint8_t>(script + flag_at) != 0);
+            const auto surface = value<Address>(info + 0x18);
+            const auto grip = value<std::array<float, 2>>(info + 0x20);
+            const auto now = GetTickCount64();
+            if (surface == w.ice)
+            {
+                w.snow_since = 0;
+                if (!w.have_ice_grip)
+                {
+                    w.ice_grip = grip, w.have_ice_grip = true;
+                    std::cout << "Ice test: which: on the real ice the ice flag is " << flag << ", grip " << grip[0] << "/" << grip[1] << "\n" << std::flush;
+                }
+                if (!w.applied)
+                {
+                    const auto off = w.offsets[w.round];
+                    w.original = value<std::uint64_t>(w.snow + off);
+                    if (write(w.snow + off, value<std::uint64_t>(w.ice + off)))
+                    {
+                        w.applied = true;
+                        std::ostringstream text;
+                        text << "which: round " << (w.round + 1) << " of " << w.offsets.size() << " ready (+0x" << std::hex << off
+                             << "). Walk onto the snow.";
+                        ice_note(text.str());
+                    }
+                }
+                return;
+            }
+            if (surface != w.snow)
+            {
+                w.snow_since = 0;
+                return;
+            }
+            if (!w.applied)
+            {
+                if (!w.have_snow_grip)
+                {
+                    w.snow_grip = grip, w.have_snow_grip = true;
+                    std::cout << "Ice test: which: on the plain snow the ice flag is " << flag << ", grip " << grip[0] << "/" << grip[1] << "\n" << std::flush;
+                }
+                return;
+            }
+            if (!w.snow_since)
+                w.snow_since = now;
+            if (now - w.snow_since < 800)
+                return;
+            // on the snow for a moment with this round's value: did the game take it as ice?
+            const auto off = w.offsets[w.round];
+            const bool icy_grip = w.have_ice_grip && std::fabs(grip[0] - w.ice_grip[0]) < 0.02f &&
+                                  (!w.have_snow_grip || std::fabs(grip[0] - w.snow_grip[0]) > 0.02f);
+            const bool slippery = flag || icy_grip;
+            std::cout << "Ice test: which: round " << (w.round + 1) << " (+0x" << std::hex << off << std::dec << "): on the snow the ice flag is "
+                      << flag << ", grip " << grip[0] << "/" << grip[1] << (slippery ? " -> ICE" : " -> normal") << "\n" << std::flush;
+            if (slippery)
+                w.worked.push_back(off);
+            ice_which_restore();
+            ++w.round;
+            std::ostringstream text;
+            text << "which: round " << w.round << (slippery ? " looks like ICE." : " looks normal.");
+            if (w.round < w.offsets.size())
+                text << " Walk back onto the ice for round " << (w.round + 1) << ".";
+            else
+            {
+                w.finished = true;
+                text << " All done";
+                if (w.worked.empty())
+                    text << ", none of them alone. Type /ice_test off and send me the log.";
+                else
+                {
+                    text << ": it's";
+                    for (const auto o : w.worked)
+                        text << " +0x" << std::hex << o << std::dec;
+                    text << ". Type /ice_test off and send me the log.";
+                }
+            }
+            ice_note(text.str());
+        }
         void update_ice_test(unsigned mode)
         {
             static unsigned announced = 0;
@@ -2911,8 +3079,8 @@ namespace ingame
             static std::chrono::steady_clock::time_point last{};
             const auto actor = player();
             const auto level = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
-            // remember the IceSurface whenever Crash stands on it (not while name/copyall dress the snow up as ice)
-            if (actor && mode != 7 && mode != 8)
+            // remember the IceSurface whenever Crash stands on it (not while name/copyall/which dress the snow up as ice)
+            if (actor && mode != 7 && mode != 8 && mode != 9)
                 if (const auto info = crash_floor_info(actor))
                 {
                     const auto surface = value<Address>(info + 0x18);
@@ -2937,6 +3105,7 @@ namespace ingame
                               : mode == 6 ? "Ice test: copy on.\n"
                               : mode == 7 ? "Ice test: name on.\n"
                               : mode == 8 ? "Ice test: copyall on.\n"
+                              : mode == 9 ? "Ice test: which on.\n"
                                           : "Ice test: off\n")
                           << std::flush;
                 announced = mode;
@@ -2954,6 +3123,17 @@ namespace ingame
                 ice_const_restore();
             if ((previous == 6 || previous == 7 || previous == 8) && mode != previous)
                 ice_copy_restore();
+            if (previous == 9 && mode != 9)
+                ice_which_restore(), ice_which.active = false;
+            if (mode == 9 && previous != 9)
+            {
+                if (!(ice_surface_seen.level == level && ice_surface_valid()) || !ice_other_surface)
+                    ice_note("stand on the ice and on the snow once in this level first, then type /ice_test which again");
+                else
+                    ice_which_start(level);
+            }
+            if (mode == 9)
+                update_ice_which(actor, level);
             if (mode >= 5 && mode <= 8 && previous != mode)
             {
                 if (!(ice_surface_seen.level == level && ice_surface_valid()) || !ice_other_surface)
@@ -3108,6 +3288,9 @@ namespace ingame
             const auto slide = actor ? crash_script(actor, "Scripts.Graph.Crash_IceSlide") : 0;
             const Address slide_end = slide ? slide + value<std::uint16_t>(value<Address>(slide + 56) + 90) : 0;
             const auto slide_data = slide ? value<Address>(slide + 0x10) : 0, slide_meta = slide ? value<Address>(slide + 56) : 0;
+            // a level without ice seen: also look for the IceSurface by its name
+            if (!(ice_surface_seen.level == level && ice_surface_valid()))
+                ice_surface_by_name(level);
             if (targets.empty())
             {
                 std::cout << "Ice find: stand on real ice once in this level (or stand anywhere in a level), then try again\n" << std::flush;
@@ -3436,7 +3619,13 @@ namespace ingame
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         update_ice_watch(state.ice_watch != 0);
         update_move_probe(state.move_probe != 0);
-        update_ice_test(state.ice_test <= 8 ? state.ice_test : 0);
+        update_ice_test(state.ice_test <= 9 ? state.ice_test : 0);
+        if (!ice_note_text.empty())
+        {
+            copy(state.ice_note, ice_note_text);
+            ++state.ice_note_id;
+            ice_note_text.clear();
+        }
         if (state.ice_find_request != state.ice_find_ack)
         {
             state.ice_find_ack = state.ice_find_request;
