@@ -2615,43 +2615,71 @@ namespace ingame
         //         on are swapped too. /ice_test off puts them all back.
         //  push:  Crash's position (actor +0x20) moves with momentum: each frame his movement is replaced by a velocity
         //         that follows the game's at the ice rate.
+        // The swap searches all of the game's memory for a surface pointer, so everything it keeps itself is stored
+        // scrambled (xor ice_mask) and its own scan buffer and every thread's stack are skipped: otherwise it finds
+        // and overwrites its own notes and can no longer put the floors back.
+        constexpr Address ice_mask = 0x5a3c96e1f00dbeefULL;
         std::mutex ice_swap_mutex;
-        std::vector<std::pair<Address, Address>> ice_swapped; // reference, original surface
-        std::set<Address> ice_swap_surfaces;                   // surfaces already swapped (or being searched)
+        std::vector<std::pair<Address, Address>> ice_swapped;         // reference, original surface ^ ice_mask
+        std::map<Address, std::uint64_t> ice_swap_surfaces;           // surface ^ ice_mask -> when last searched
         std::atomic_uint ice_swap_running{0};
-        void ice_swap_surface(Address surface, Address ice, std::string name)
+        // every 8-byte value equal to `wanted` in the game's writable private memory, skipping thread stacks and the
+        // buffer this search reads into
+        template <class Match>
+        void ice_scan(Match match)
+        {
+            std::vector<std::uint64_t> chunk(1 << 17);
+            const Address own_lo = reinterpret_cast<Address>(chunk.data()), own_hi = own_lo + chunk.size() * 8;
+            std::set<Address> stacks; // allocations that contain a guard page: thread stacks
+            MEMORY_BASIC_INFORMATION info{};
+            for (Address at = 0x10000; at < 0x7ffffffe0000ULL && VirtualQuery(reinterpret_cast<void *>(at), &info, sizeof(info));
+                 at = reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize)
+            {
+                const auto allocation = reinterpret_cast<Address>(info.AllocationBase);
+                if (info.State == MEM_COMMIT && (info.Protect & PAGE_GUARD))
+                    stacks.insert(allocation);
+                if (info.State != MEM_COMMIT || info.Type != MEM_PRIVATE || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+                    !(info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)) || stacks.count(allocation))
+                    continue;
+                const Address start = reinterpret_cast<Address>(info.BaseAddress), end = start + info.RegionSize;
+                for (Address p = start; p < end; p += chunk.size() * 8)
+                {
+                    const auto bytes = std::min<std::uint64_t>(chunk.size() * 8, end - p);
+                    SIZE_T got = 0;
+                    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(p), chunk.data(), bytes, &got))
+                        continue;
+                    for (std::size_t i = 0; i < got / 8; ++i)
+                    {
+                        const Address where = p + i * 8;
+                        if ((where < own_lo || where >= own_hi) && match(chunk[i]))
+                            if (!match.add(where))
+                                return;
+                    }
+                }
+            }
+        }
+        struct ValueHits
+        {
+            Address wanted;
+            std::vector<Address> *hits;
+            bool operator()(std::uint64_t v) const { return v == wanted; }
+            bool add(Address where) const { return hits->push_back(where), hits->size() < 50000; }
+        };
+        void ice_swap_surface(Address surface_masked, Address ice_masked, std::string name)
         {
             ++ice_swap_running;
             std::cout << "Ice test: swap: looking for every reference to " << name << " (a few seconds)\n" << std::flush;
-            std::thread([surface, ice, name]
+            std::thread([surface_masked, ice_masked, name]
                         {
+                const Address surface = surface_masked ^ ice_mask, ice = ice_masked ^ ice_mask;
                 std::vector<Address> hits;
-                std::vector<std::uint64_t> chunk(1 << 17);
-                MEMORY_BASIC_INFORMATION info{};
-                for (Address at = 0x10000; at < 0x7ffffffe0000ULL && VirtualQuery(reinterpret_cast<void *>(at), &info, sizeof(info));
-                     at = reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize)
-                {
-                    if (info.State != MEM_COMMIT || info.Type != MEM_PRIVATE || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
-                        !(info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)))
-                        continue;
-                    const Address start = reinterpret_cast<Address>(info.BaseAddress), end = start + info.RegionSize;
-                    for (Address p = start; p < end; p += chunk.size() * 8)
-                    {
-                        const auto bytes = std::min<std::uint64_t>(chunk.size() * 8, end - p);
-                        SIZE_T got = 0;
-                        if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(p), chunk.data(), bytes, &got))
-                            continue;
-                        for (std::size_t i = 0; i < got / 8; ++i)
-                            if (chunk[i] == surface && hits.size() < 20000)
-                                hits.push_back(p + i * 8);
-                    }
-                }
+                ice_scan(ValueHits{surface, &hits});
                 unsigned swapped = 0;
                 {
                     std::lock_guard lock(ice_swap_mutex);
                     for (const auto at : hits)
                         if (value<Address>(at) == surface && write(at, ice))
-                            ice_swapped.push_back({at, surface}), ++swapped;
+                            ice_swapped.push_back({at, surface ^ ice_mask}), ++swapped;
                 }
                 std::cout << "Ice test: swap: " << name << " was referenced in " << hits.size() << " places; " << swapped
                           << " now point at the IceSurface\n"
@@ -2662,13 +2690,90 @@ namespace ingame
         void ice_swap_restore()
         {
             std::lock_guard lock(ice_swap_mutex);
-            unsigned restored = 0;
+            const auto ice = ice_surface_seen.surface;
+            unsigned restored = 0, changed = 0;
             for (auto it = ice_swapped.rbegin(); it != ice_swapped.rend(); ++it)
-                if (readable(it->first, 8) && value<Address>(it->first) == ice_surface_seen.surface && write(it->first, it->second))
+            {
+                if (!readable(it->first, 8))
+                    continue;
+                if (value<Address>(it->first) == ice && write(it->first, it->second ^ ice_mask))
                     ++restored;
+                else
+                    ++changed; // the game reused that memory since: leave it alone
+            }
             if (!ice_swapped.empty())
-                std::cout << "Ice test: swap undone: " << restored << " of " << ice_swapped.size() << " floor references put back\n" << std::flush;
+                std::cout << "Ice test: swap undone: " << restored << " floor references put back (" << changed
+                          << " had already been replaced by the game)\n"
+                          << std::flush;
             ice_swapped.clear(), ice_swap_surfaces.clear();
+        }
+        // levels without ice: find the IceSurface by its name ("IceSurface" at +8, "CollisionMaterials" at +0x18)
+        std::atomic_bool ice_name_search_running{false};
+        std::string ice_name_searched_level;
+        void ice_surface_by_name(const std::string &level)
+        {
+            if (ice_name_search_running.exchange(true))
+                return;
+            ice_name_searched_level = level;
+            std::cout << "Ice test: looking for the IceSurface in this level's memory (a few seconds)\n" << std::flush;
+            std::thread([level]
+                        {
+                // pass 1: where the text "IceSurface" sits; pass 2: objects whose name pointer (+8) points at it
+                struct TextHits
+                {
+                    std::vector<Address> *hits;
+                    // names may sit at any byte: a word holding "Surf" anywhere is checked around it
+                    bool operator()(std::uint64_t v) const
+                    {
+                        char text[8];
+                        std::memcpy(text, &v, 8);
+                        for (int k = 0; k <= 4; ++k)
+                            if (std::memcmp(text + k, "Surf", 4) == 0)
+                                return true;
+                        return false;
+                    }
+                    bool add(Address where) const
+                    {
+                        for (Address start = where - 8; start < where + 8; ++start)
+                            if (string(start, 16) == "IceSurface" &&
+                                std::find(hits->begin(), hits->end(), start) == hits->end())
+                                hits->push_back(start);
+                        return hits->size() < 2000;
+                    }
+                };
+                std::vector<Address> texts;
+                ice_scan(TextHits{&texts});
+                std::set<Address> wanted(texts.begin(), texts.end());
+                struct NameHits
+                {
+                    const std::set<Address> *wanted;
+                    std::vector<Address> *hits;
+                    bool operator()(std::uint64_t v) const { return wanted->count(v) != 0; }
+                    bool add(Address where) const { return hits->push_back(where), hits->size() < 2000; }
+                };
+                std::vector<Address> names;
+                if (!wanted.empty())
+                    ice_scan(NameHits{&wanted, &names});
+                Address found = 0;
+                for (const auto at : names)
+                {
+                    const auto object = at - 8;
+                    if (readable(object, 0x20) && string(value<Address>(object + 0x18), 32) == "CollisionMaterials")
+                    {
+                        found = object;
+                        break;
+                    }
+                }
+                if (found)
+                {
+                    std::lock_guard lock(ice_swap_mutex);
+                    ice_surface_seen = {found, value<Address>(found), level};
+                }
+                std::cout << (found ? "Ice test: found the IceSurface in this level's memory\n"
+                                    : "Ice test: this level has no IceSurface loaded (the swap only works where it exists)\n")
+                          << std::flush;
+                ice_name_search_running = false; })
+                .detach();
         }
         void update_ice_test(unsigned mode)
         {
@@ -2698,7 +2803,7 @@ namespace ingame
                               : mode == 2 ? (have_ice ? "Ice test: floor on. The floor under Crash gets ice grip and the IceSurface.\n"
                                                       : "Ice test: floor on. The floor under Crash gets ice grip (no IceSurface yet: stand on real ice once in this level).\n")
                               : mode == 3 ? (have_ice ? "Ice test: swap on. Floors Crash steps on are switched to the IceSurface (each takes a few seconds to find).\n"
-                                                      : "Ice test: swap needs the IceSurface: stand on real ice once in this level, then /ice_test swap again.\n")
+                                                      : "Ice test: swap on. No IceSurface seen in this level yet: looking for it by name.\n")
                               : mode == 4 ? "Ice test: push on. Crash's position now moves with momentum.\n"
                                           : "Ice test: off\n")
                           << std::flush;
@@ -2714,22 +2819,31 @@ namespace ingame
             if (previous == 3 && mode != 3)
                 ice_swap_restore();
             previous = mode;
+            if (mode == 3 && actor && (ice_surface_seen.level != level || !ice_surface_valid()) && ice_name_searched_level != level)
+                ice_surface_by_name(level);
             if (mode == 3 && actor && ice_surface_seen.level == level && ice_surface_valid())
                 if (const auto info = crash_floor_info(actor))
                 {
                     const auto surface = value<Address>(info + 0x18);
+                    const auto now = GetTickCount64();
                     bool fresh = false;
+                    if (surface && surface != ice_surface_seen.surface && readable(surface, 16))
                     {
+                        // a floor is searched again after 5 seconds, in case the game made new references to it since
                         std::lock_guard lock(ice_swap_mutex);
-                        fresh = surface && surface != ice_surface_seen.surface && readable(surface, 16) && ice_swap_surfaces.insert(surface).second;
+                        auto &last = ice_swap_surfaces[surface ^ ice_mask];
+                        if (!last || now - last > 5000)
+                            fresh = true, last = now;
                     }
                     if (fresh && ice_swap_running < 2)
-                        ice_swap_surface(surface, ice_surface_seen.surface, string(value<Address>(surface + 8), 48));
+                        ice_swap_surface(surface ^ ice_mask, ice_surface_seen.surface ^ ice_mask, string(value<Address>(surface + 8), 48));
                     else if (fresh)
                     {
                         std::lock_guard lock(ice_swap_mutex);
-                        ice_swap_surfaces.erase(surface); // try again once a search finishes
+                        ice_swap_surfaces[surface ^ ice_mask] = 0; // try again once a search finishes
                     }
+                    if (surface && surface != ice_surface_seen.surface)
+                        write(info + 0x18, ice_surface_seen.surface); // the floor he is on right now, too
                 }
             if (mode == 4 && actor)
             {
