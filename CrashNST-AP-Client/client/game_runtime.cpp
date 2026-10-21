@@ -2842,8 +2842,12 @@ namespace ingame
                         std::lock_guard lock(ice_swap_mutex);
                         ice_swap_surfaces[surface ^ ice_mask] = 0; // try again once a search finishes
                     }
-                    if (surface && surface != ice_surface_seen.surface)
-                        write(info + 0x18, ice_surface_seen.surface); // the floor he is on right now, too
+                    // the floor he is on right now, too (remembered so turning it off puts it back at once)
+                    if (surface && surface != ice_surface_seen.surface && write(info + 0x18, ice_surface_seen.surface))
+                    {
+                        std::lock_guard lock(ice_swap_mutex);
+                        ice_swapped.push_back({info + 0x18, surface ^ ice_mask});
+                    }
                 }
             if (mode == 4 && actor)
             {
