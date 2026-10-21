@@ -192,7 +192,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /slow_test | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /trap_test name | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -341,18 +341,27 @@ void ClientRuntime::handle_commands()
                 }
                 print_console("Slow Trap stick tilt: " + std::to_string(static_cast<int>(slow_tilt * 100 + 0.5f)) +
                               "% of a full push. Slow tunes this itself while you play (stood still: higher, ran: lower) and saves it. "
-                              "/slow_tilt 0.2..1 sets where it starts. /slow_test tries Slow for 30 seconds.");
+                              "/slow_tilt 0.2..1 sets where it starts. /trap_test slow tries Slow for 30 seconds.");
             }
-            else if (command == "/slow_test")
+            else if (command == "/slow_test" || command == "/trap_test")
             {
-                if (box_markers)
-                {
-                    box_markers->apply_trap(ingame::TrapSlow, 30);
-                    print_console("Slow test: 30 seconds of Slow (stick tilt " + std::to_string(static_cast<int>(slow_tilt * 100 + 0.5f)) +
-                                  "%). Not sent to AP. Crash should walk; adjust with /slow_tilt.");
-                }
+                // local trap preview: nothing is sent to AP
+                static const std::pair<const char *, unsigned> kinds[]{{"slow", ingame::TrapSlow}, {"slippery", ingame::TrapSlippery},
+                                                                        {"darkness", ingame::TrapDarkness}, {"reverse", ingame::TrapReverse},
+                                                                        {"freeze", ingame::TrapFreeze}, {"movelock", ingame::TrapMoveLock}};
+                std::string name = command == "/slow_test" ? "slow" : argument;
+                std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                const auto kind = std::find_if(std::begin(kinds), std::end(kinds), [&](const auto &k) { return name == k.first; });
+                if (kind == std::end(kinds))
+                    print_console("Use /trap_test slow, slippery, darkness, reverse, freeze or movelock. Close the console (F1) to play.");
+                else if (!box_markers)
+                    print_console("Trap test needs the in-game adapter. Load into a level first.");
                 else
-                    print_console("Slow test needs the in-game adapter. Load into a level first.");
+                {
+                    box_markers->apply_trap(kind->second, 30);
+                    print_console(std::string(ingame::trap_names[kind->second]) + " test" + (ingame::timed_trap(kind->second) ? " for 30 seconds" : "") +
+                                  ". Not sent to AP. Close the console (F1) to play; it ignores the controller while open.");
+                }
             }
             else if (command == "/hubdistance" || command == "/hubdistance_c1" || command == "/hubdistance_c2" || command == "/hubdistance_c3")
             {

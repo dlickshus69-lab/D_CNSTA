@@ -334,6 +334,8 @@ namespace
         if (!query)
             return ERROR_DEVICE_NOT_CONNECTED;
         const auto result = query(index, state);
+        if (!active || console_open || frozen())
+            neutral_at = GetTickCount64(); // the game gets no movement from the pad now
         if (active && (console_open || frozen()) && result == ERROR_SUCCESS && state)
             std::memset(&state->Gamepad, 0, sizeof(state->Gamepad));
         else if (result == ERROR_SUCCESS && state)

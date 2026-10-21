@@ -37,7 +37,7 @@ namespace ingame
     inline bool valid_tint_opacity(float opacity) { return std::isfinite(opacity) && opacity >= 0 && opacity <= 1; }
     // Slow Trap stick tilt: share of a full push. The game ignores small tilts on the ground, so this has to sit
     // above its dead zone and below running. /slow_tilt tunes it per computer.
-    constexpr float default_slow_tilt = 0.6f;
+    constexpr float default_slow_tilt = 0.71f;
     inline bool valid_slow_tilt(float tilt) { return std::isfinite(tilt) && tilt >= 0.2f && tilt <= 1; }
     inline std::array<float, 4> tint_blend(unsigned color, float opacity)
     {

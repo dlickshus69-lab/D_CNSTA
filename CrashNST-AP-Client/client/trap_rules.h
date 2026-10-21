@@ -120,41 +120,61 @@ namespace ingame
         y = static_cast<std::int16_t>(std::lround(fy * scale));
     }
 
-    // Slow Trap tuner: the game ignores small stick tilts on the ground and runs at large ones, and where the walk
-    // band lies is not known in advance. While Slow is on and you push, every 250 ms window of Crash's ground speed
-    // decides: standing still raises the tilt, running lowers it, walking keeps it. Steps halve whenever the
-    // direction flips, so the tilt settles inside the walk band. Running speed is learned from play without Slow.
+    // Slow Trap tuner: the game ignores small stick tilts on the ground and runs at large ones (measured: walking
+    // about 71-75% of a full push, running above ~76%), and controllers differ. While Slow is on and you push, each
+    // 250 ms window of Crash's ground speed decides: running lowers the tilt at once and marks that tilt as too
+    // high for the rest of the session; standing still for three windows in a row (not a turn or a bump) raises
+    // it, but never back up to a tilt that ran. Walking keeps it. Steps halve when the direction flips.
     struct WalkTuner
     {
-        float tilt = 0.6f, step = 0.08f;
-        int last = 0;        // last change: +1 raised, -1 lowered
-        float run_speed = 0; // fastest ground speed seen without Slow, units per second
+        float tilt = 0.71f, step = 0.04f;
+        int last = 0;          // last change: +1 raised, -1 lowered
+        float run_speed = 0;   // fastest ground speed seen without Slow, units per second
+        float run_floor = 1;   // lowest tilt at which Crash ran this session
+        unsigned stuck = 0;    // consecutive standing-still windows
         void restart(float start)
         {
-            tilt = start, step = 0.08f, last = 0;
+            tilt = start, step = 0.04f, last = 0, stuck = 0, run_floor = 1;
         }
         // one window of Crash's movement; returns +1 (raised), -1 (lowered) or 0
         int window(float ground_speed, float climb_speed, bool pushing, bool slowed)
         {
             // idle, jumping, falling, or a respawn jump: says nothing about the stick
             if (!pushing || climb_speed > 150 || ground_speed > 4000)
+            {
+                stuck = 0;
                 return 0;
+            }
             if (!slowed)
             {
                 run_speed = std::max(run_speed, ground_speed);
                 return 0;
             }
-            const float stuck = std::max(40.0f, run_speed * 0.08f);
+            const float running = run_speed > 0 ? run_speed * 0.6f : 350, still = std::max(40.0f, run_speed * 0.08f);
             int change = 0;
-            if (ground_speed < stuck && tilt < 0.95f)
-                change = 1;
-            else if (run_speed > 0 && ground_speed > run_speed * 0.7f && tilt > 0.25f)
+            if (ground_speed > running)
+            {
+                run_floor = std::min(run_floor, tilt);
                 change = -1;
-            if (!change)
+            }
+            else if (ground_speed < still && ++stuck >= 3 && tilt + 0.01f < run_floor - 0.015f)
+                change = 1;
+            else
+            {
+                if (ground_speed >= still)
+                    stuck = 0;
                 return 0;
+            }
+            stuck = 0;
             if (last && change != last)
                 step = std::max(step / 2, 0.01f);
-            tilt = std::min(0.95f, std::max(0.25f, tilt + change * step));
+            float next = tilt + change * step;
+            if (change > 0)
+                next = std::min(next, run_floor - 0.02f);
+            next = std::min(0.95f, std::max(0.25f, next));
+            if (std::abs(next - tilt) < 0.001f)
+                return 0;
+            tilt = next;
             last = change;
             return change;
         }
