@@ -120,6 +120,46 @@ namespace ingame
         y = static_cast<std::int16_t>(std::lround(fy * scale));
     }
 
+    // Slow Trap tuner: the game ignores small stick tilts on the ground and runs at large ones, and where the walk
+    // band lies is not known in advance. While Slow is on and you push, every 250 ms window of Crash's ground speed
+    // decides: standing still raises the tilt, running lowers it, walking keeps it. Steps halve whenever the
+    // direction flips, so the tilt settles inside the walk band. Running speed is learned from play without Slow.
+    struct WalkTuner
+    {
+        float tilt = 0.6f, step = 0.08f;
+        int last = 0;        // last change: +1 raised, -1 lowered
+        float run_speed = 0; // fastest ground speed seen without Slow, units per second
+        void restart(float start)
+        {
+            tilt = start, step = 0.08f, last = 0;
+        }
+        // one window of Crash's movement; returns +1 (raised), -1 (lowered) or 0
+        int window(float ground_speed, float climb_speed, bool pushing, bool slowed)
+        {
+            // idle, jumping, falling, or a respawn jump: says nothing about the stick
+            if (!pushing || climb_speed > 150 || ground_speed > 4000)
+                return 0;
+            if (!slowed)
+            {
+                run_speed = std::max(run_speed, ground_speed);
+                return 0;
+            }
+            const float stuck = std::max(40.0f, run_speed * 0.08f);
+            int change = 0;
+            if (ground_speed < stuck && tilt < 0.95f)
+                change = 1;
+            else if (run_speed > 0 && ground_speed > run_speed * 0.7f && tilt > 0.25f)
+                change = -1;
+            if (!change)
+                return 0;
+            if (last && change != last)
+                step = std::max(step / 2, 0.01f);
+            tilt = std::min(0.95f, std::max(0.25f, tilt + change * step));
+            last = change;
+            return change;
+        }
+    };
+
     // Slippery Trap: ice. Crash follows a velocity that your input only slowly steers. While it is above a small
     // floor he keeps running at full speed in its direction, so he slides on after you let go, drifts wide
     // through turns and skids before reversing. The d-pad steers the same velocity. Movement keys keep

@@ -28,5 +28,7 @@ namespace ingame
     unsigned movement_double_jump(unsigned owned);
     // gimmick stages (vanilla controls) and chase stages, where walking would be certain death
     bool slow_trap_exempt();
+    // Crash's position (x, y horizontal, z up) when he is loaded
+    bool crash_position(std::array<float, 3> &at);
     std::uintptr_t crate_identity_owner(std::uintptr_t owner, const char **name);
 }

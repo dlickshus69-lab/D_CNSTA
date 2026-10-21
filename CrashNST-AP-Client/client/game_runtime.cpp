@@ -1823,6 +1823,11 @@ namespace ingame
         const auto desired = active_style.load();
         return desired ? desired : reinterpret_cast<unsigned (*)(Address)>(base() + 0x131400)(manager);
     }
+    bool crash_position(std::array<float, 3> &at)
+    {
+        const auto actor = player();
+        return actor && read(actor + 32, at);
+    }
     bool slow_trap_exempt()
     {
         static const std::set<std::string> chases{"L104", "L113", "L304", "L311"}; // Boulders, Boulder Dash, Bone Yard, Dino Might!

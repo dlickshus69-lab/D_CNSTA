@@ -281,14 +281,51 @@ namespace
         }
         return state;
     }
-    DWORD WINAPI controller_state(DWORD index, XINPUT_STATE *state)
+    // last controller poll with no movement input, and the latest pad values for the Slow log
+    std::atomic<std::uint64_t> neutral_at{0};
+    std::atomic<int> pad_in_x{0}, pad_in_y{0}, pad_in_buttons{0}, pad_out_x{0}, pad_out_y{0};
+    void apply_pad_traps(DWORD index, XINPUT_STATE *state)
+    {
+        auto &pad = state->Gamepad;
+        const auto now = GetTickCount64();
+        if (std::hypot(float(pad.sThumbLX), float(pad.sThumbLY)) <= stick_deadzone && !(pad.wButtons & 0xF))
+            neutral_at = now;
+        pad_in_x = pad.sThumbLX, pad_in_y = pad.sThumbLY, pad_in_buttons = pad.wButtons;
+        if (reversed())
+        {
+            pad.sThumbLX = reverse_axis(pad.sThumbLX);
+            pad.sThumbLY = reverse_axis(pad.sThumbLY);
+            pad.wButtons = reverse_dpad(pad.wButtons);
+        }
+        if (index < 4)
+        {
+            std::lock_guard<std::mutex> guard(momentum_mutex);
+            if (slippery())
+            {
+                std::uint16_t buttons = pad.wButtons;
+                stick_momentum[index].apply(pad.sThumbLX, pad.sThumbLY, buttons, now);
+                pad.wButtons = buttons;
+            }
+            else
+                stick_momentum[index].primed = false;
+        }
+        if (slowed())
+        {
+            std::uint16_t buttons = pad.wButtons;
+            walk_stick(pad.sThumbLX, pad.sThumbLY, buttons, walk_tilt);
+            pad.wButtons = buttons;
+        }
+        pad_out_x = pad.sThumbLX, pad_out_y = pad.sThumbLY;
+    }
+    template <DWORD(WINAPI *Self)(DWORD, XINPUT_STATE *)>
+    DWORD pad_query(DWORD index, XINPUT_STATE *state)
     {
         using Query = DWORD(WINAPI *)(DWORD, XINPUT_STATE *);
         Query query = nullptr;
         {
             std::lock_guard<std::mutex> guard(input_mutex);
             for (const auto &hook : input_hooks)
-                if (hook.replacement == reinterpret_cast<void *>(controller_state))
+                if (hook.replacement == reinterpret_cast<void *>(Self))
                 {
                     query = reinterpret_cast<Query>(hook.original);
                     break;
@@ -300,36 +337,14 @@ namespace
         if (active && (console_open || frozen()) && result == ERROR_SUCCESS && state)
             std::memset(&state->Gamepad, 0, sizeof(state->Gamepad));
         else if (result == ERROR_SUCCESS && state)
-        {
-            auto &pad = state->Gamepad;
-            if (reversed())
-            {
-                pad.sThumbLX = reverse_axis(pad.sThumbLX);
-                pad.sThumbLY = reverse_axis(pad.sThumbLY);
-                pad.wButtons = reverse_dpad(pad.wButtons);
-            }
-            const auto now = GetTickCount64();
-            if (index < 4)
-            {
-                std::lock_guard<std::mutex> guard(momentum_mutex);
-                if (slippery())
-                {
-                    std::uint16_t buttons = pad.wButtons;
-                    stick_momentum[index].apply(pad.sThumbLX, pad.sThumbLY, buttons, now);
-                    pad.wButtons = buttons;
-                }
-                else
-                    stick_momentum[index].primed = false;
-            }
-            if (slowed())
-            {
-                std::uint16_t buttons = pad.wButtons;
-                walk_stick(pad.sThumbLX, pad.sThumbLY, buttons, walk_tilt);
-                pad.wButtons = buttons;
-            }
-        }
+            apply_pad_traps(index, state);
         return result;
     }
+    DWORD WINAPI controller_state(DWORD index, XINPUT_STATE *state);
+    // XInputGetStateEx (xinput ordinal 100) returns the same state plus the guide button
+    DWORD WINAPI controller_state_ex(DWORD index, XINPUT_STATE *state);
+    DWORD WINAPI controller_state(DWORD index, XINPUT_STATE *state) { return pad_query<controller_state>(index, state); }
+    DWORD WINAPI controller_state_ex(DWORD index, XINPUT_STATE *state) { return pad_query<controller_state_ex>(index, state); }
     void add_input_hook(void **slot, void *replacement)
     {
         std::lock_guard<std::mutex> guard(input_mutex);
@@ -386,23 +401,40 @@ namespace
         if (!directory.VirtualAddress || directory.VirtualAddress + directory.Size > pe->OptionalHeader.SizeOfImage)
             return;
         const auto imports = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR *>(base + directory.VirtualAddress);
+        std::string hooked;
         for (unsigned i = 0; i < directory.Size / sizeof(*imports) && imports[i].Name; ++i)
         {
             if (!imports[i].OriginalFirstThunk || !imports[i].FirstThunk)
                 continue;
+            std::string library = reinterpret_cast<const char *>(base + imports[i].Name);
+            std::transform(library.begin(), library.end(), library.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             auto names = reinterpret_cast<IMAGE_THUNK_DATA64 *>(base + imports[i].OriginalFirstThunk);
             auto addresses = reinterpret_cast<IMAGE_THUNK_DATA64 *>(base + imports[i].FirstThunk);
             for (unsigned j = 0; j < 4096 && names[j].u1.AddressOfData; ++j)
             {
+                const auto slot = reinterpret_cast<void **>(&addresses[j].u1.Function);
                 if (IMAGE_SNAP_BY_ORDINAL64(names[j].u1.Ordinal))
+                {
+                    if (library.rfind("xinput", 0) == 0 && IMAGE_ORDINAL64(names[j].u1.Ordinal) == 100)
+                    {
+                        add_input_hook(slot, reinterpret_cast<void *>(controller_state_ex));
+                        hooked += " XInputGetStateEx(" + library + ")";
+                    }
                     continue;
+                }
                 const auto name = reinterpret_cast<IMAGE_IMPORT_BY_NAME *>(base + names[j].u1.AddressOfData)->Name;
                 if (!std::strcmp(name, "GetAsyncKeyState"))
-                    add_input_hook(reinterpret_cast<void **>(&addresses[j].u1.Function), reinterpret_cast<void *>(async_key));
-                if (!std::strcmp(name, "XInputGetState"))
-                    add_input_hook(reinterpret_cast<void **>(&addresses[j].u1.Function), reinterpret_cast<void *>(controller_state));
+                    add_input_hook(slot, reinterpret_cast<void *>(async_key));
+                if (!std::strcmp(name, "XInputGetState") || !std::strcmp(name, "XInputGetStateEx"))
+                {
+                    add_input_hook(slot, reinterpret_cast<void *>(std::strcmp(name, "XInputGetState") ? controller_state_ex : controller_state));
+                    hooked += std::string(" ") + name + "(" + library + ")";
+                }
+                if (library.rfind("xinput", 0) == 0 && std::strcmp(name, "XInputGetState") && std::strcmp(name, "XInputGetStateEx"))
+                    hooked += std::string(" [not hooked: ") + name + "]";
             }
         }
+        std::cout << "Controller input hooks:" << (hooked.empty() ? " none found" : hooked) << "\n" << std::flush;
     }
 
     bool bridge_lock(DWORD wait = 0)
@@ -1786,6 +1818,76 @@ extern "C" __declspec(dllexport) DWORD WINAPI NST_Start(void *startup)
         return 0;
     }
 }
+namespace
+{
+    // Slow Trap walk tuner, fed every game frame. Positions are sampled at 250 ms window edges only.
+    WalkTuner walk_tuner;
+    float walk_setting = -1;
+    struct WalkWindow
+    {
+        std::array<float, 3> start{};
+        std::uint64_t at = 0;
+        bool any_slow = false, all_slow = true;
+    } walk_window;
+    std::uint64_t walk_log_at = 0;
+    float logged_run_speed = 0;
+    int percent(float tilt) { return static_cast<int>(tilt * 100 + 0.5f); }
+    void update_walk_tuner(Shared &state)
+    {
+        // /slow_tilt (or the last tuned value the client saved) is where tuning starts
+        if (std::abs(state.slow_tilt - walk_setting) > 0.001f)
+        {
+            walk_setting = state.slow_tilt;
+            if (std::abs(walk_tuner.tilt - walk_setting) > 0.001f)
+                walk_tuner.restart(walk_setting);
+        }
+        walk_tilt = walk_tuner.tilt;
+        const auto now = GetTickCount64();
+        const bool slow_now = slowed();
+        if (walk_window.at && now - walk_window.at < 250)
+        {
+            walk_window.any_slow = walk_window.any_slow || slow_now;
+            walk_window.all_slow = walk_window.all_slow && slow_now;
+            return;
+        }
+        std::array<float, 3> at{};
+        if (!crash_position(at))
+        {
+            walk_window.at = 0;
+            return;
+        }
+        if (walk_window.at)
+        {
+            const float seconds = (now - walk_window.at) / 1000.0f;
+            const float ground = std::hypot(at[0] - walk_window.start[0], at[1] - walk_window.start[1]) / seconds;
+            const float climb = std::abs(at[2] - walk_window.start[2]) / seconds;
+            const bool pushing = neutral_at.load() < walk_window.at;
+            const bool all_slow = walk_window.all_slow && slow_now, any_slow = walk_window.any_slow || slow_now;
+            const float before = walk_tuner.tilt;
+            const int change = all_slow == any_slow ? walk_tuner.window(ground, climb, pushing, all_slow) : 0;
+            if (walk_tuner.run_speed > logged_run_speed * 1.2f)
+            {
+                logged_run_speed = walk_tuner.run_speed;
+                std::cout << "Slow tuner: normal running speed " << static_cast<int>(logged_run_speed) << " units/s\n" << std::flush;
+            }
+            if (change)
+            {
+                std::cout << "Slow tuner: Crash " << (change > 0 ? "stood still" : "ran") << " (" << static_cast<int>(ground)
+                          << " units/s) at " << percent(before) << "% tilt, trying " << percent(walk_tuner.tilt) << "%\n" << std::flush;
+                state.slow_tilt_tuned = walk_tuner.tilt;
+            }
+            if (all_slow && pushing && now - walk_log_at >= 2000)
+            {
+                walk_log_at = now;
+                std::cout << "Slow: pad stick " << pad_in_x.load() << "," << pad_in_y.load() << " d-pad " << (pad_in_buttons.load() & 0xF)
+                          << " -> game stick " << pad_out_x.load() << "," << pad_out_y.load() << " (" << percent(walk_tuner.tilt)
+                          << "%); Crash ground speed " << static_cast<int>(ground) << ", climb " << static_cast<int>(climb) << " units/s\n"
+                          << std::flush;
+            }
+        }
+        walk_window = {at, now, slow_now, slow_now};
+    }
+}
 extern "C" __declspec(dllexport) void NST_Tick()
 {
     if (!shared)
@@ -1805,7 +1907,7 @@ extern "C" __declspec(dllexport) void NST_Tick()
                 slippery_until = paused ? 0 : shared->slippery_until;
                 // Slow has no effect in gimmick and chase levels
                 slow_until = paused || slow_trap_exempt() ? 0 : shared->slow_until;
-                walk_tilt = shared->slow_tilt;
+                update_walk_tuner(*shared);
                 update_gameplay(*shared);
             }
             else

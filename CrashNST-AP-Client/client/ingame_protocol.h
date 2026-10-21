@@ -124,6 +124,8 @@ namespace ingame
         std::array<unsigned, 3> hub_label_distances = default_hub_distances;
         float tint_opacity = default_tint_opacity;
         float slow_tilt = default_slow_tilt;
+        // the in-game tuner's current Slow tilt (0 until it runs); the client saves it as the new /slow_tilt
+        float slow_tilt_tuned = 0;
         unsigned command_read = 0, command_write = 0;
         char status[256]{}, binding[256]{}, error[256]{};
         char campaign_counts[3][48]{};

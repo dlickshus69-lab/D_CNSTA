@@ -45,7 +45,7 @@ Useful local commands:
 Markers normally show unchecked selected crates that are in logic. `/outoflogic on` also shows out-of-logic crates. 
 `/tint_opacity` shows the current tint strength.  
 Set it from 0 (no tint) to 1 (full tint), for example `/tint_opacity 0.5` for 50%. The default is 0.75.
-`/slow_tilt` sets how far the Slow Trap pushes the stick (0.2 to 1, default 0.6): raise it if Crash will not walk, lower it if he runs. `/slow_test` turns on Slow for 30 seconds without AP so you can try it. The setting is saved on this computer.
+`/slow_tilt` sets how far the Slow Trap pushes the stick (0.2 to 1, default 0.6). While Slow is on, the client tunes it itself: if Crash stands still while you push it goes up, if he runs it goes down, and the result is saved. Each change is logged as `Slow tuner: ...`. `/slow_test` turns on Slow for 30 seconds without AP so you can try it. The setting is saved on this computer.
 `box_item_spoilers` in the yaml can color markers by item category. Chat and `!` commands go to the AP server.
 
 When item spoilers are enabled, the client scouts selected locations on connection without creating hints. Item flags are cached per seed and slot for offline play. Boxes use the normal marker color until their flags arrive.

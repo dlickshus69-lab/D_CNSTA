@@ -461,6 +461,25 @@ void ClientRuntime::update_ownership(ClientTick &tick)
         {
             last_pause_tick = 0;
         }
+    // the in-game tuner found a better Slow tilt: keep it as /slow_tilt so the next session starts there
+    if (box_markers)
+        try
+        {
+            const auto tuned = box_markers->tuned_slow_tilt();
+            if (ingame::valid_slow_tilt(tuned) && std::abs(tuned - slow_tilt) > 0.004f)
+            {
+                slow_tilt = tuned;
+                auto config = std::filesystem::exists(display_file) ? read_state_json(display_file) : Json::Value(Json::objectValue);
+                config["slow_tilt"] = tuned;
+                std::filesystem::create_directories(display_file.parent_path());
+                write_state_json(display_file, config);
+                box_markers->slow_tilt(tuned);
+            }
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Slow tilt save: " << e.what() << std::endl;
+        }
     // traps fire one at a time, in any level (not hubs or menus) with the camera active, trap_gap_ms apart.
     // unlike 1-Ups they do not wait for an AP-unlocked level.
     // each is saved as applied before it starts, so reconnecting never replays it.

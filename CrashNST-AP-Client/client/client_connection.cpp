@@ -340,8 +340,8 @@ void ClientRuntime::handle_commands()
                         box_markers->slow_tilt(tilt);
                 }
                 print_console("Slow Trap stick tilt: " + std::to_string(static_cast<int>(slow_tilt * 100 + 0.5f)) +
-                              "% of a full push. Use /slow_tilt 0.2..1 (default 0.6): higher if Crash will not walk, "
-                              "lower if he runs. /slow_test tries it for 30 seconds.");
+                              "% of a full push. Slow tunes this itself while you play (stood still: higher, ran: lower) and saves it. "
+                              "/slow_tilt 0.2..1 sets where it starts. /slow_test tries Slow for 30 seconds.");
             }
             else if (command == "/slow_test")
             {

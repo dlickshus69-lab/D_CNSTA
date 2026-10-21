@@ -56,6 +56,7 @@ public:
     void hub_distance(const std::array<unsigned, 3> &distances);
     void tint_opacity(float opacity);
     void slow_tilt(float tilt);
+    float tuned_slow_tilt();
     bool toggle(const std::string &target, const std::string &value);
     void stop(bool handover = false);
 

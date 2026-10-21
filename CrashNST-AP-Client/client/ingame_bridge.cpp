@@ -504,6 +504,13 @@ void BoxMarkers::slow_tilt(float tilt)
     shared_->slow_tilt = tilt;
     unlock();
 }
+float BoxMarkers::tuned_slow_tilt()
+{
+    lock();
+    const auto tilt = shared_->slow_tilt_tuned;
+    unlock();
+    return tilt;
+}
 void BoxMarkers::tint_opacity(float opacity)
 {
     if (!ingame::valid_tint_opacity(opacity))
