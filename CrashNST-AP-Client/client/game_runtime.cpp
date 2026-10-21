@@ -24,6 +24,8 @@
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
+#include <tlhelp32.h>
+#include <cstdio>
 
 namespace ingame
 {
@@ -427,13 +429,47 @@ namespace ingame
             if (!remote_death.exchange(false))
                 ++observed_deaths;
         }
+        // death watch (research: DeathLink in bonus rounds). The game variables Crash_DamageManager uses, by name, and
+        // every change of a yes/no game variable while in a level go to the log, so a bonus-round death shows which
+        // one the game sets instead of PlayerDied.
+        struct WatchedVariable
+        {
+            std::atomic<Address> variable{0};
+            char name[48]{};
+        };
+        WatchedVariable death_watch[32];
+        std::atomic_uint death_watch_count{0}, death_watch_unknown{0};
+        void death_watch_log(Address variable, bool before, bool after)
+        {
+            const auto count = std::min<unsigned>(death_watch_count.load(), 32);
+            for (unsigned i = 0; i < count; ++i)
+                if (death_watch[i].variable.load() == variable)
+                {
+                    std::cout << "Death watch: " << death_watch[i].name << ": " << before << " -> " << after << "\n" << std::flush;
+                    return;
+                }
+            if (death_watch_unknown.fetch_add(1) >= 400)
+                return;
+            std::ostringstream out;
+            out << "Death watch: game variable 0x" << std::hex << variable << " (type +0x" << (value<Address>(variable) - base()) << std::dec;
+            for (unsigned off = 8; off <= 48; off += 8)
+                if (const auto text = string(value<Address>(variable + off), 48);
+                    text.size() >= 3 && std::all_of(text.begin(), text.end(), [](unsigned char c) { return c >= 32 && c < 127; }))
+                    out << ", +" << off << " \"" << text << "\"";
+            out << "): " << before << " -> " << after << "\n";
+            std::cout << out.str() << std::flush;
+        }
         void player_died_set(Address variable, unsigned char requested)
         {
-            const bool tracked = variable && variable == bound_player_died() &&
-                                 !level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))).empty();
+            const bool in_level = !level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))).empty();
+            const bool tracked = variable && variable == bound_player_died() && in_level;
             const auto getter = reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60);
-            const bool before = tracked && getter(variable);
+            const bool watched = variable && in_level;
+            const bool before = watched && getter(variable);
             reinterpret_cast<void (*)(Address, unsigned char)>(death_hook.original)(variable, requested);
+            if (watched)
+                if (const bool after = getter(variable) != 0; after != before)
+                    death_watch_log(variable, before, after);
             if (tracked && variable == bound_player_died())
                 record_death_change(before, getter(variable) != 0);
         }
@@ -763,6 +799,7 @@ namespace ingame
             {
                 last_actor = actor;
                 remote_death = false;
+                death_watch_unknown = 0; // a fresh log allowance for each Crash (new level, bonus round)
             }
             death_handle = 0;
             for (const auto c : list(value<Address>(actor + 24), 128))
@@ -783,6 +820,34 @@ namespace ingame
                 }
                 if (!code_matches(0x4e5c60, std::array<unsigned char, 5>{0xe9, 0xab, 0xe9, 0xff, 0xff}))
                     throw std::runtime_error("Game PlayerDied getter differs");
+                // the death watch names: every game variable this DamageManager holds a handle to
+                {
+                    const auto count = value<unsigned>(dm + 24);
+                    const auto fields = value<Address>(dm + 40);
+                    std::ostringstream names;
+                    unsigned found = 0;
+                    for (unsigned i = 0; fields && count <= 256 && i < count && found < 32; ++i)
+                    {
+                        const auto field = value<Address>(fields + i * 8);
+                        const unsigned offset = value<std::uint16_t>(field + 24), size = value<std::uint16_t>(field + 22);
+                        if (size != 8)
+                            continue;
+                        const auto handle = value<Address>(data + offset);
+                        if ((value<unsigned>(handle) & 0xf0000000) != 0x40000000 || string(value<Address>(handle + 24)) != "gamevariables")
+                            continue;
+                        const auto variable = resolve(handle);
+                        if (!variable)
+                            continue;
+                        auto &slot = death_watch[found++];
+                        const auto name = string(value<Address>(handle + 8), 47);
+                        std::snprintf(slot.name, sizeof(slot.name), "%s", name.c_str());
+                        slot.variable = variable;
+                        names << " " << name;
+                    }
+                    if (found != death_watch_count.load())
+                        std::cout << "Death watch: Crash_DamageManager uses" << names.str() << "\n" << std::flush;
+                    death_watch_count = found;
+                }
                 death_hook.attach(0x502000, {0x48, 0x89, 0x5c, 0x24, 8, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x40}, reinterpret_cast<Address>(player_died_set));
                 return;
             }
@@ -3619,6 +3684,314 @@ namespace ingame
             else
                 ++t.trial;
         }
+        //  who / whopage (research): catch the game code that writes Crash_IceSlide's floor setting (s2qfleo5) when
+        //  Crash walks onto a different kind of floor, with the chain of calls that led there and each frame's saved
+        //  registers, then dump those functions' code to the log. That shows where the game notices the floor
+        //  change and what it compares, so the Ice Trap can make it re-check the floor at once.
+        //  who:     a hardware write watch (debug register 0) on that setting, in every thread of the game.
+        //  whopage: if the hardware watch is refused, the page holding it is guarded instead (slower).
+        struct WhoFrame
+        {
+            std::uint64_t rip, rsp, rbx, rbp, rsi, rdi, r12, r13, r14, r15;
+        };
+        struct WhoCapture
+        {
+            std::uint64_t value = 0;
+            unsigned count = 0;
+            DWORD thread = 0;
+            WhoFrame frames[20]{};
+        };
+        WhoCapture who_captures[6];
+        std::atomic_uint who_count{0}, who_hits{0};
+        std::atomic<std::uint64_t> who_target{0}, who_last{0}, who_arm_address{0}, who_page{0};
+        std::atomic_bool who_armed{false};
+        PVOID who_handler_cookie = nullptr;
+        constexpr DWORD who_arm_code = 0xE0C0FFEE; // raised by us: sets this thread's debug registers
+        void who_capture(const CONTEXT &context)
+        {
+            const auto target = who_target.load();
+            if (!target)
+                return;
+            ++who_hits;
+            const auto v = *reinterpret_cast<volatile std::uint64_t *>(target);
+            if (v == who_last.load())
+                return;
+            who_last = v;
+            const auto i = who_count.load();
+            if (i >= std::size(who_captures))
+                return;
+            auto &cap = who_captures[i];
+            cap.value = v, cap.thread = GetCurrentThreadId();
+            CONTEXT c = context;
+            unsigned n = 0;
+            for (; n < 20 && c.Rip >= 0x10000 && c.Rsp; ++n)
+            {
+                cap.frames[n] = {c.Rip, c.Rsp, c.Rbx, c.Rbp, c.Rsi, c.Rdi, c.R12, c.R13, c.R14, c.R15};
+                DWORD64 image = 0;
+                const auto entry = RtlLookupFunctionEntry(c.Rip, &image, nullptr);
+                if (!entry)
+                {
+                    c.Rip = *reinterpret_cast<const std::uint64_t *>(c.Rsp);
+                    c.Rsp += 8;
+                }
+                else
+                {
+                    PVOID data = nullptr;
+                    DWORD64 frame = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, c.Rip, entry, &c, &data, &frame, nullptr);
+                }
+            }
+            cap.count = n;
+            who_count = i + 1;
+        }
+        LONG CALLBACK who_handler(EXCEPTION_POINTERS *e)
+        {
+            auto *record = e->ExceptionRecord;
+            auto *context = e->ContextRecord;
+            if (record->ExceptionCode == who_arm_code)
+            {
+                const auto at = who_arm_address.load();
+                if (at)
+                    context->Dr0 = at, context->Dr7 = (context->Dr7 & ~0xF0003ULL) | 1ULL | (1ULL << 16) | (2ULL << 18);
+                else
+                    context->Dr0 = 0, context->Dr7 &= ~0xF0003ULL;
+                context->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            const auto page = who_page.load();
+            if (record->ExceptionCode == STATUS_GUARD_PAGE_VIOLATION)
+            {
+                if (!page || (record->ExceptionInformation[1] & ~0xFFFULL) != page)
+                    return EXCEPTION_CONTINUE_SEARCH;
+                context->EFlags |= 0x100; // step over this access, then guard the page again
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            if (record->ExceptionCode != EXCEPTION_SINGLE_STEP)
+                return EXCEPTION_CONTINUE_SEARCH;
+            if (context->Dr6 & 1) // the hardware watch
+            {
+                context->Dr6 &= ~0xFULL;
+                if (who_armed)
+                    who_capture(*context);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            if (page && (context->Dr6 & 0x4000)) // the step after a guarded access
+            {
+                if (who_armed)
+                {
+                    who_capture(*context);
+                    DWORD old = 0;
+                    VirtualProtect(reinterpret_cast<void *>(page), 1, PAGE_READWRITE | PAGE_GUARD, &old);
+                }
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        // the hardware watch on (at != 0) or off in every thread; returns how many threads took it
+        unsigned who_debug_registers(std::uint64_t at)
+        {
+            if (!who_handler_cookie)
+                who_handler_cookie = AddVectoredExceptionHandler(1, who_handler);
+            who_arm_address = at;
+            const DWORD self = GetCurrentThreadId(), process = GetCurrentProcessId();
+            unsigned done = 0;
+            const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if (snapshot != INVALID_HANDLE_VALUE)
+            {
+                THREADENTRY32 entry{};
+                entry.dwSize = sizeof(entry);
+                for (BOOL ok = Thread32First(snapshot, &entry); ok; ok = Thread32Next(snapshot, &entry))
+                {
+                    if (entry.th32OwnerProcessID != process || entry.th32ThreadID == self)
+                        continue;
+                    const HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, entry.th32ThreadID);
+                    if (!thread)
+                        continue;
+                    if (SuspendThread(thread) != static_cast<DWORD>(-1))
+                    {
+                        CONTEXT c{};
+                        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                        if (GetThreadContext(thread, &c))
+                        {
+                            if (at)
+                                c.Dr0 = at, c.Dr7 = (c.Dr7 & ~0xF0003ULL) | 1ULL | (1ULL << 16) | (2ULL << 18);
+                            else
+                                c.Dr0 = 0, c.Dr7 &= ~0xF0003ULL;
+                            if (SetThreadContext(thread, &c))
+                                ++done;
+                        }
+                        ResumeThread(thread);
+                    }
+                    CloseHandle(thread);
+                }
+                CloseHandle(snapshot);
+            }
+            RaiseException(who_arm_code, 0, 0, nullptr); // this thread, through the handler
+            return done + 1;
+        }
+        struct WhoState
+        {
+            unsigned mode = 0, reported = 0;
+            std::uint64_t started = 0;
+            DWORD page_protect = 0;
+            bool finished = false;
+            std::set<std::uint64_t> dumped;
+        } who_state;
+        void who_stop()
+        {
+            auto &w = who_state;
+            if (!w.mode)
+                return;
+            who_armed = false;
+            if (w.mode == 12)
+                who_debug_registers(0);
+            if (const auto page = who_page.exchange(0))
+            {
+                DWORD old = 0;
+                VirtualProtect(reinterpret_cast<void *>(page), 1, w.page_protect ? w.page_protect : PAGE_READWRITE, &old);
+            }
+            who_target = 0;
+            std::cout << "Ice test: who: watch off (" << who_hits.load() << " writes seen)\n" << std::flush;
+            w.mode = 0;
+        }
+        std::string who_register(std::uint64_t v)
+        {
+            std::ostringstream out;
+            out << "0x" << std::hex << v;
+            if (v >= 0x10000 && v < 0x7ffffffeffffULL && readable(static_cast<Address>(v), 8))
+                if (const auto type = value<Address>(static_cast<Address>(v)); type >= base() && type < module_end())
+                    out << "(type +0x" << (type - base()) << ")";
+            return out.str();
+        }
+        void who_report()
+        {
+            auto &w = who_state;
+            const auto count = who_count.load();
+            for (; w.reported < count; ++w.reported)
+            {
+                const auto &cap = who_captures[w.reported];
+                std::ostringstream out;
+                out << "Who: write " << (w.reported + 1) << " (thread " << cap.thread << "): the floor setting became 0x" << std::hex
+                    << cap.value << std::dec;
+                if (typed(static_cast<Address>(cap.value), 0x13ea4d8))
+                    out << " (" << string(value<Address>(value<Address>(static_cast<Address>(cap.value) + 0x18) + 8), 48) << ")";
+                out << "\n";
+                for (unsigned k = 0; k < cap.count; ++k)
+                {
+                    const auto &f = cap.frames[k];
+                    out << "Who:   #" << k << " ";
+                    if (f.rip >= base() && f.rip < module_end())
+                        out << "+0x" << std::hex << (f.rip - base());
+                    else
+                        out << "0x" << std::hex << f.rip;
+                    out << std::dec << " rsp=0x" << std::hex << f.rsp << std::dec << " rbx=" << who_register(f.rbx)
+                        << " rbp=" << who_register(f.rbp) << " rsi=" << who_register(f.rsi) << " rdi=" << who_register(f.rdi)
+                        << " r12=" << who_register(f.r12) << " r13=" << who_register(f.r13) << " r14=" << who_register(f.r14)
+                        << " r15=" << who_register(f.r15) << "\n";
+                }
+                std::cout << out.str() << std::flush;
+                // the code of every function in the chain, once
+                for (unsigned k = 0; k < cap.count && k < 14; ++k)
+                {
+                    const auto rip = cap.frames[k].rip;
+                    DWORD64 image = 0;
+                    const auto entry = RtlLookupFunctionEntry(rip, &image, nullptr);
+                    if (!entry || image != base())
+                        continue;
+                    const std::uint64_t begin = image + entry->BeginAddress, end = image + entry->EndAddress;
+                    if (!w.dumped.insert(begin).second)
+                        continue;
+                    const auto stop = std::min<std::uint64_t>(end, begin + 4096);
+                    std::ostringstream code;
+                    code << "Who: code +0x" << std::hex << (begin - base()) << "..+0x" << (end - base()) << "\n";
+                    for (std::uint64_t at = begin; at < stop; at += 64)
+                    {
+                        std::array<unsigned char, 64> bytes{};
+                        const auto n = static_cast<unsigned>(std::min<std::uint64_t>(64, stop - at));
+                        SIZE_T got = 0;
+                        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(at), bytes.data(), n, &got);
+                        code << "Who: +0x" << (at - base()) << " ";
+                        for (unsigned b = 0; b < got; ++b)
+                            code << std::setw(2) << std::setfill('0') << unsigned(bytes[b]);
+                        code << "\n";
+                    }
+                    std::cout << code.str() << std::flush;
+                }
+            }
+        }
+        void update_ice_who(unsigned mode, Address actor)
+        {
+            auto &w = who_state;
+            const auto now = GetTickCount64();
+            if (w.mode && mode != w.mode)
+            {
+                who_report();
+                who_stop();
+            }
+            if (mode != 12 && mode != 13)
+            {
+                w.finished = false;
+                return;
+            }
+            if (w.finished)
+                return;
+            if (!w.mode)
+            {
+                const auto script = actor ? crash_script(actor, "Scripts.Graph.Crash_IceSlide") : 0;
+                if (!script || !field_at(value<Address>(script + 56), "Collision_Material_id_s2qfleo5", 0x60, 8))
+                    return;
+                for (auto &cap : who_captures)
+                    cap = {};
+                who_count = 0, who_hits = 0;
+                w = {};
+                w.mode = mode, w.started = now;
+                const auto target = script + 0x60;
+                who_last = value<std::uint64_t>(target);
+                who_target = target;
+                who_armed = true;
+                if (mode == 12)
+                {
+                    const auto threads = who_debug_registers(target);
+                    std::cout << "Ice test: who: hardware watch on in " << threads << " threads\n" << std::flush;
+                }
+                else
+                {
+                    if (!who_handler_cookie)
+                        who_handler_cookie = AddVectoredExceptionHandler(1, who_handler);
+                    MEMORY_BASIC_INFORMATION info{};
+                    VirtualQuery(reinterpret_cast<void *>(target), &info, sizeof(info));
+                    w.page_protect = info.Protect;
+                    const auto page = target & ~0xFFFULL;
+                    who_page = page;
+                    DWORD old = 0;
+                    VirtualProtect(reinterpret_cast<void *>(page), 1, PAGE_READWRITE | PAGE_GUARD, &old);
+                    std::cout << "Ice test: whopage: page 0x" << std::hex << page << std::dec << " guarded\n" << std::flush;
+                }
+                ice_note("who: watching. Walk onto the ice, then back onto the snow.");
+                return;
+            }
+            if (w.mode == 13)
+                if (const auto page = who_page.load())
+                {
+                    DWORD old = 0; // our own reads of that page take the guard off: put it back
+                    VirtualProtect(reinterpret_cast<void *>(page), 1, PAGE_READWRITE | PAGE_GUARD, &old);
+                }
+            who_report();
+            if (who_count.load() >= 3 || who_count.load() >= std::size(who_captures))
+            {
+                who_stop();
+                w.finished = true;
+                ice_note("who: caught it. Type /ice_test off and send me the log.");
+            }
+            else if (now - w.started > 30000)
+            {
+                const auto caught = who_count.load();
+                who_stop();
+                w.finished = true;
+                ice_note(caught ? "who: caught " + std::to_string(caught) + ". Type /ice_test off and send me the log."
+                                : "who: nothing caught in 30 seconds. Type /ice_test off and send me the log.");
+            }
+        }
         void update_ice_test(unsigned mode)
         {
             static unsigned announced = 0;
@@ -3661,6 +4034,8 @@ namespace ingame
                               : mode == 9 ? "Ice test: which on.\n"
                               : mode == 10 ? "Ice test: kick on.\n"
                               : mode == 11 ? "Ice test: track on.\n"
+                              : mode == 12 ? "Ice test: who on.\n"
+                              : mode == 13 ? "Ice test: whopage on.\n"
                                           : "Ice test: off\n")
                           << std::flush;
                 announced = mode;
@@ -3674,6 +4049,7 @@ namespace ingame
             }
             update_ice_kick(mode == 10, actor, level);
             update_ice_track(mode == 11, actor, level);
+            update_ice_who(mode, actor);
             if (previous == 3 && mode != 3)
                 ice_swap_restore();
             if (previous == 5 && mode != 5)
@@ -4176,7 +4552,7 @@ namespace ingame
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         update_ice_watch(state.ice_watch != 0);
         update_move_probe(state.move_probe != 0);
-        update_ice_test(state.ice_test <= 11 ? state.ice_test : 0);
+        update_ice_test(state.ice_test <= 13 ? state.ice_test : 0);
         if (!ice_note_text.empty())
         {
             copy(state.ice_note, ice_note_text);
