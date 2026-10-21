@@ -2441,15 +2441,15 @@ namespace ingame
                 // every copy, kept with where it ends up (its own offset from the crate, on the ground)
                 d.copies.clear();
                 auto found = nitro_copies(d.entity, crate_model(d.entity), high);
-                if (found.size() < 4 && std::abs(high[0]) + std::abs(high[1]) > 1)
+                if (std::abs(high[0]) + std::abs(high[1]) > 1)
                 {
-                    // the known paths found little: search near the crate, heap pages only, for its real position (and its
-                    // centre, a crate's height up), at most 64 places
+                    // the known paths miss the copies the crate is drawn from: search near the crate as well, heap pages
+                    // only, for its real position (and its centre, a crate's height up), at most 64 places
                     NitroPick pick{0, d.entity, crate_model(d.entity), 0, "drop"};
                     std::vector<unsigned> which;
                     unsigned visited = 0;
                     const auto started = GetTickCount64();
-                    const auto hits = position_scan(pick, {high, {high[0], high[1], high[2] + 76}}, which, visited, 4000, 3, 64, true);
+                    const auto hits = position_scan(pick, {high, {high[0], high[1], high[2] + 76}}, which, visited, 8000, 4, 64, true);
                     std::ostringstream names;
                     for (const auto &hit : hits)
                     {
