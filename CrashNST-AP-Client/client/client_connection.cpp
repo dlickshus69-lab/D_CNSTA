@@ -452,6 +452,18 @@ void ClientRuntime::handle_commands()
                 else
                     print_console("Ice watch needs the in-game adapter. Load into a level first.");
             }
+            else if (command == "/move_probe")
+            {
+                if (box_markers)
+                {
+                    const bool on = argument != "off";
+                    box_markers->move_probe(on);
+                    print_console(on ? "Move probe on: close the console, run around in all directions for half a minute (turns, stops, starts, jumps), then /move_probe off."
+                                     : "Move probe off. The results are in the log.");
+                }
+                else
+                    print_console("Move probe needs the in-game adapter. Load into a level first.");
+            }
             else if (command == "/ice_probe")
             {
                 if (box_markers)

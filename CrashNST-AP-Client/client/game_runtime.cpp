@@ -2216,6 +2216,7 @@ namespace ingame
         // between the two: the switches the game flips for ice.
         std::map<std::string, IceValue> ice_watch_last;
         unsigned ice_watch_lines = 0;
+        bool was_described_reset = false;
         struct IceSides
         {
             std::vector<std::uint64_t> seen[2]; // [0] normal ground, [1] ice
@@ -2234,7 +2235,21 @@ namespace ingame
         std::string ice_raw_label(std::uint64_t key)
         {
             const auto root = unsigned(key >> 48), pointer = unsigned((key >> 24) & 0xffffff), offset = unsigned(key & 0xffffff);
-            return root == 1 ? "crash " + hex(offset) : root == 2 ? "controller " + hex(offset) : "controller " + hex(pointer) + " -> " + hex(offset);
+            switch (root)
+            {
+            case 1:
+                return "crash " + hex(offset);
+            case 2:
+                return "controller " + hex(offset);
+            case 3:
+                return "controller " + hex(pointer) + " -> " + hex(offset);
+            case 5:
+                return "floor material " + hex(offset);
+            case 6:
+                return "floor material " + hex(pointer) + " -> " + hex(offset);
+            default:
+                return "crash " + hex(pointer) + " -> " + hex(offset);
+            }
         }
         void ice_side_note(IceSides &s, bool ice, std::uint64_t bits, unsigned size)
         {
@@ -2270,6 +2285,8 @@ namespace ingame
             for (const auto &[key, s] : ice_raw_sides)
                 raw.push_back({key, &s});
             std::sort(raw.begin(), raw.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+            // floor material values first: they say what makes a floor ice
+            std::stable_partition(raw.begin(), raw.end(), [](const auto &r) { return (r.first >> 48) == 5 || (r.first >> 48) == 6; });
             for (const auto &[key, s] : raw)
                 all.push_back({ice_raw_label(key), s});
             for (const auto &[key, sides] : all)
@@ -2279,7 +2296,7 @@ namespace ingame
                     continue;
                 const bool disjoint = std::none_of(s.seen[0].begin(), s.seen[0].end(), [&](std::uint64_t b)
                                                    { return std::find(s.seen[1].begin(), s.seen[1].end(), b) != s.seen[1].end(); });
-                if (!s.varies[0] && !s.varies[1] && disjoint && switches < 150)
+                if (!s.varies[0] && !s.varies[1] && disjoint && switches < 200)
                 {
                     ++switches;
                     std::cout << "Ice switch: " << key << ": ground " << ice_side_values(s, false) << " | ice " << ice_side_values(s, true) << "\n";
@@ -2301,7 +2318,7 @@ namespace ingame
                     return c;
             return 0;
         }
-        void ice_side_sample(Address actor, bool ice)
+        void ice_side_sample(Address actor, bool ice, Address material)
         {
             ++ice_side_samples[ice];
             // every script setting on Crash except the ice script itself
@@ -2347,6 +2364,17 @@ namespace ingame
                 return raw;
             };
             words(actor, 256, 1, 0);
+            // the floor material object under Crash (Crash_IceSlide's current material) and what it points to
+            if (material)
+            {
+                const auto raw = words(material, 64, 5, 0);
+                for (unsigned i = 2; i + 1 < raw.size(); i += 2)
+                {
+                    const Address p = raw[i] | (static_cast<Address>(raw[i + 1]) << 32);
+                    if (p >= 0x10000 && p <= 0x7ffffffeffffULL && !(p & 7) && p != material)
+                        words(p, 64, 6, i * 4);
+                }
+            }
             const auto controller = value<Address>(actor + 424);
             if (!typed(controller, 0x1589128))
                 return;
@@ -2374,7 +2402,8 @@ namespace ingame
                 return;
             }
             if (!was_on)
-                ice_sides.clear(), ice_raw_sides.clear(), ice_side_samples[0] = ice_side_samples[1] = 0, ice_watch_lines = 0, was_on = true;
+                ice_sides.clear(), ice_raw_sides.clear(), ice_side_samples[0] = ice_side_samples[1] = 0, ice_watch_lines = 0, was_on = true,
+                was_described_reset = false;
             if (now < next)
                 return;
             next = now + 200;
@@ -2415,9 +2444,143 @@ namespace ingame
             if (first)
                 std::cout << "Ice watch: watching " << ice_watch_last.size() << " Crash_IceSlide settings and comparing everything else on Crash. Walk onto ice and off again.\n";
             const auto surface = ice_watch_last.find("Bool_id_bxsqi703"), mode = ice_watch_last.find("Bool_id_17gxyac6");
+            const auto floor = ice_watch_last.find("Collision_Material_id_s2qfleo5");
+            const Address material = floor == ice_watch_last.end() ? 0 : static_cast<Address>(floor->second.bits);
+            static Address last_material = 0;
+            const bool steady = material == last_material; // the floor has not just changed, so the ice flag matches it
+            last_material = material;
             if (surface != ice_watch_last.end() && mode != ice_watch_last.end() && (surface->second.bits & 0xff) == (mode->second.bits & 0xff))
-                ice_side_sample(actor, (surface->second.bits & 0xff) != 0);
+            {
+                const bool ice = (surface->second.bits & 0xff) != 0;
+                ice_side_sample(actor, ice, steady && readable(material, 256) ? material : 0);
+                // describe the first ice floor and the first normal floor once: names of what they point to
+                static bool described[2] = {};
+                if (!was_described_reset)
+                    described[0] = described[1] = false, was_described_reset = true;
+                if (steady && material && readable(material, 256) && !described[ice])
+                {
+                    described[ice] = true;
+                    std::cout << "Floor material (" << (ice ? "ice" : "normal ground") << "): 0x" << std::hex << material << std::dec << " "
+                              << describe_object(material) << "\n";
+                    std::vector<Address> inner(32);
+                    if (read(material, inner))
+                        for (unsigned i = 1; i < inner.size(); ++i)
+                            if (inner[i] > 0x10000 && inner[i] < 0x7ffffffeffffULL && !(inner[i] & 7) && readable(inner[i], 72))
+                                std::cout << "Floor material (" << (ice ? "ice" : "normal ground") << ")   " << hex(i * 8) << " -> "
+                                          << describe_object(inner[i]) << "\n";
+                }
+            }
             std::cout << std::flush;
+        }
+        // /move_probe: finds where the game keeps the speed Crash is moving at. Every 50 ms it measures how Crash really
+        // moved and checks every pair of floats in Crash, his movement controller and the objects they point to for
+        // one pointing the same way. /move_probe off lists the ones that matched most often, with their size compared
+        // to his real speed: a value whose size stays a steady multiple of it is his velocity.
+        struct MoveMatch
+        {
+            unsigned aligned = 0;
+            double ratio = 0, ratio_sq = 0, size = 0, size_sq = 0;
+        };
+        std::unordered_map<std::uint64_t, MoveMatch> move_matches;
+        unsigned move_samples = 0;
+        float move_fastest = 0;
+        void move_probe_scan(Address at, unsigned bytes, unsigned root, unsigned pointer, float vx, float vy, float speed)
+        {
+            std::vector<float> raw(bytes / 4);
+            SIZE_T got = 0;
+            if (!readable(at, bytes) || !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(at), raw.data(), bytes, &got) || got != bytes)
+                return;
+            for (unsigned i = 2; i + 1 < raw.size(); ++i)
+            {
+                const float x = raw[i], y = raw[i + 1];
+                if (!std::isfinite(x) || !std::isfinite(y))
+                    continue;
+                const float size = std::hypot(x, y);
+                if (size < 1e-3f || size > 1e6f || (x * vx + y * vy) / (size * speed) < 0.97f)
+                    continue;
+                auto &match = move_matches[ice_raw_key(root, pointer, i * 4)];
+                const double ratio = size / speed;
+                ++match.aligned, match.ratio += ratio, match.ratio_sq += ratio * ratio, match.size += size, match.size_sq += double(size) * size;
+            }
+        }
+        // an object's pointers to other objects, by their offset
+        void move_probe_pointees(Address at, unsigned qwords, unsigned root, Address skip, float vx, float vy, float speed)
+        {
+            std::vector<std::uint64_t> words(qwords);
+            if (!read(at, words))
+                return;
+            for (unsigned i = 1; i < words.size(); ++i)
+            {
+                const auto p = static_cast<Address>(words[i]);
+                if (p >= 0x10000 && p <= 0x7ffffffeffffULL && !(p & 7) && p != at && p != skip)
+                    move_probe_scan(p, 384, root, i * 8, vx, vy, speed);
+            }
+        }
+        void update_move_probe(bool on)
+        {
+            static bool was_on = false;
+            static std::uint64_t next = 0, last_time = 0;
+            static std::array<float, 3> last_pos{};
+            static Address last_actor = 0;
+            const auto now = GetTickCount64();
+            if (!on)
+            {
+                if (was_on)
+                {
+                    std::vector<std::pair<std::uint64_t, const MoveMatch *>> best;
+                    for (const auto &[key, match] : move_matches)
+                        if (move_samples && match.aligned * 2 >= move_samples)
+                            best.push_back({key, &match});
+                    std::sort(best.begin(), best.end(), [](const auto &a, const auto &b) { return a.second->aligned > b.second->aligned; });
+                    std::cout << "Move probe: " << move_samples << " samples while Crash moved (fastest " << static_cast<int>(move_fastest)
+                              << " units/s); " << best.size() << " values pointed his way at least half the time\n";
+                    for (std::size_t i = 0; i < best.size() && i < 25; ++i)
+                    {
+                        const auto &m = *best[i].second;
+                        const double n = m.aligned, ratio = m.ratio / n, size = m.size / n;
+                        const double ratio_sd = std::sqrt(std::max(0.0, m.ratio_sq / n - ratio * ratio));
+                        const double size_sd = std::sqrt(std::max(0.0, m.size_sq / n - size * size));
+                        std::cout << "Move probe: " << ice_raw_label(best[i].first) << ": his way in " << static_cast<int>(100 * n / move_samples)
+                                  << "% of samples, " << ratio << "x his speed (spread " << ratio_sd << "), size " << size << " (spread " << size_sd << ")\n";
+                    }
+                    std::cout << std::flush;
+                }
+                was_on = false;
+                return;
+            }
+            if (!was_on)
+            {
+                move_matches.clear(), move_samples = 0, move_fastest = 0, was_on = true, last_actor = 0;
+                std::cout << "Move probe on: run around in all directions (turns, stops, starts), then /move_probe off.\n" << std::flush;
+            }
+            if (now < next)
+                return;
+            next = now + 50;
+            const auto actor = player();
+            std::array<float, 3> pos{};
+            if (!actor || !read(actor + 32, pos))
+            {
+                last_actor = 0;
+                return;
+            }
+            if (actor != last_actor || now - last_time > 200)
+            {
+                last_actor = actor, last_time = now, last_pos = pos;
+                return;
+            }
+            const float dt = static_cast<float>(now - last_time) / 1000;
+            const float vx = (pos[0] - last_pos[0]) / dt, vy = (pos[1] - last_pos[1]) / dt, speed = std::hypot(vx, vy);
+            last_time = now, last_pos = pos;
+            if (dt <= 0 || speed < 150 || speed > 3000)
+                return;
+            ++move_samples, move_fastest = std::max(move_fastest, speed);
+            const auto controller = value<Address>(actor + 424);
+            move_probe_scan(actor, 1024, 1, 0, vx, vy, speed);
+            move_probe_pointees(actor, 128, 4, controller, vx, vy, speed);
+            if (!typed(controller, 0x1589128))
+                return;
+            move_probe_scan(controller, 2048, 2, 0, vx, vy, speed);
+            move_probe_pointees(controller, 256, 3, actor, vx, vy, speed);
         }
         void update_c3_buttons(Shared &state, const std::string &zone)
         {
@@ -2659,6 +2822,7 @@ namespace ingame
         }
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         update_ice_watch(state.ice_watch != 0);
+        update_move_probe(state.move_probe != 0);
         if (state.ice_probe_request != state.ice_probe_ack)
         {
             state.ice_probe_ack = state.ice_probe_request;
