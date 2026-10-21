@@ -487,6 +487,23 @@ namespace ingame
             if (tracked && variable == bound_player_died())
                 record_death_change(before, getter(variable) != 0);
         }
+        // Crash can move: in control, not in a level intro, a cutscene, a death or a respawn. Traps wait for it and
+        // their timers pause without it. Riding something (vehicle levels) only needs the camera and no death.
+        bool player_can_move(Address actor, bool camera_active)
+        {
+            if (!camera_active || !typed(actor, 0x1592220))
+                return false;
+            if (const auto died = bound_player_died(); died && reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60)(died))
+                return false;
+            if (!(value<unsigned>(actor + 56) & 0x100) || value<unsigned char>(actor + 341) != 1 || value<unsigned char>(actor + 342) ||
+                (value<unsigned>(actor + 336) & 0x30) || !value<unsigned char>(actor + 568))
+                return false;
+            const auto input = value<Address>(actor + 424);
+            if (!typed(input, 0x1589128))
+                return true;
+            const auto controls = value<Address>(input + 88);
+            return typed(controls, 0x13eb4b8) && value<int>(controls + 16) == 0;
+        }
         bool death_controls_ready(Address actor, bool camera_active)
         {
             // require an active, controllable player. skip transition/control-lock and invulnerability states.
@@ -2006,12 +2023,6 @@ namespace ingame
             s = {};
         }
         void nitro_spawn_followup();
-        // a dropped Nitro (/nitro_drop): its height is logged for 3 seconds, to see whether a crate in the air falls
-        struct NitroDrop
-        {
-            std::uint64_t started = 0, next = 0;
-            float start_z = 0;
-        } nitro_drop;
         // starts a spawn (ahead of Crash, or at `forced`); false with a reason when it cannot right now
         bool nitro_spawn(std::string &why, const std::array<float, 3> *forced = nullptr)
         {
@@ -2073,48 +2084,206 @@ namespace ingame
             else if (elapsed > 2000)
                 finish_nitro_spawn("nothing spawned within 2 seconds");
         }
+        // Nitro Trap, falling: a countdown ("NITRO INCOMING 3, 2, 1" on screen, a tick each second like a TNT crate),
+        // then at "1" a Nitro appears high above the spot where Crash stands and falls onto it over a second, so moving
+        // away dodges it. The game creates the crate on the ground there (a crate the game creates itself works fully),
+        // then every copy of its position (found the way /nitro_scan finds them) is lifted and lowered back a little
+        // each frame. A crate's first hop comes after more than a second, so the fall is over before the game moves it.
+        static constexpr std::uint64_t drop_countdown_ms = 3000, drop_fall_ms = 1000;
+        static constexpr float drop_height = 420;
+        struct NitroDropTrap
+        {
+            enum Stage { Idle, Countdown, Spawning, Falling } stage = Idle;
+            std::uint64_t start = 0, spawned = 0, fall_start = 0;
+            int ticks = 0;
+            std::string level;
+            std::array<float, 3> spot{};
+            Address entity = 0;
+            std::vector<std::pair<Address, std::array<float, 3>>> copies; // a position copy and its value on the ground
+        } nitro_drop;
+        // a short tick, made once: 22050 Hz mono 16-bit, a fading square-ish tone
+        const std::vector<unsigned char> &tick_sound()
+        {
+            static const std::vector<unsigned char> wav = []
+            {
+                constexpr unsigned rate = 22050, samples = rate * 12 / 100;
+                std::vector<unsigned char> out(44 + samples * 2);
+                const auto put32 = [&](std::size_t at, std::uint32_t v) { std::memcpy(&out[at], &v, 4); };
+                const auto put16 = [&](std::size_t at, std::uint16_t v) { std::memcpy(&out[at], &v, 2); };
+                std::memcpy(&out[0], "RIFF", 4), put32(4, static_cast<std::uint32_t>(out.size() - 8)), std::memcpy(&out[8], "WAVE", 4);
+                std::memcpy(&out[12], "fmt ", 4), put32(16, 16), put16(20, 1), put16(22, 1), put32(24, rate), put32(28, rate * 2);
+                put16(32, 2), put16(34, 16), std::memcpy(&out[36], "data", 4), put32(40, samples * 2);
+                for (unsigned i = 0; i < samples; ++i)
+                {
+                    const float t = static_cast<float>(i) / rate, fade = 1.0f - static_cast<float>(i) / samples;
+                    const float wave = std::sin(6.2831853f * 1480 * t) + 0.35f * std::sin(6.2831853f * 2960 * t);
+                    const auto v = static_cast<std::int16_t>(std::clamp(wave * fade * fade * 9000.0f, -32000.0f, 32000.0f));
+                    put16(44 + i * 2, static_cast<std::uint16_t>(v));
+                }
+                return out;
+            }();
+            return wav;
+        }
+        void play_tick()
+        {
+            PlaySoundA(reinterpret_cast<LPCSTR>(tick_sound().data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+        }
+        void stop_nitro_drop(Shared &state, const char *why)
+        {
+            auto &d = nitro_drop;
+            if (d.stage == NitroDropTrap::Falling)
+                for (const auto &[at, ground] : d.copies)
+                    if (readable(at, 12))
+                        write(at, ground);
+            if (d.stage != NitroDropTrap::Idle && why)
+                std::cout << "Nitro drop: " << why << "\n" << std::flush;
+            d = {};
+            state.nitro_countdown_end = 0;
+        }
+        // where the Nitro lands: under Crash, at the lowest height he was at in the last second (the ground, even if
+        // he is in the middle of a jump)
+        std::array<float, 3> drop_spot()
+        {
+            std::array<float, 3> at{};
+            crash_position(at);
+            const auto now = GetTickCount64();
+            for (const auto &p : crash_path)
+                if (now - p.time <= 1000 && std::hypot(p.at[0] - at[0], p.at[1] - at[1]) < 400)
+                    at[2] = std::min(at[2], p.at[2]);
+            return at;
+        }
+        void update_nitro_drop(Shared &state, const std::string &level)
+        {
+            auto &d = nitro_drop;
+            const auto now = GetTickCount64();
+            if (state.nitro_drop_request != state.nitro_drop_ack)
+            {
+                state.nitro_drop_ack = state.nitro_drop_request;
+                if (d.stage != NitroDropTrap::Idle)
+                    std::cout << "Nitro drop: one is already falling\n" << std::flush;
+                else if (level.empty() || gimmick_stage())
+                    std::cout << "Nitro drop: not in a level with Nitros\n" << std::flush;
+                else
+                {
+                    d = {};
+                    d.stage = NitroDropTrap::Countdown, d.start = now, d.level = level;
+                    state.nitro_countdown_end = now + drop_countdown_ms;
+                    std::cout << "Nitro drop: countdown\n" << std::flush;
+                }
+            }
+            static std::uint64_t last_tick = 0;
+            const auto dt = last_tick && now > last_tick ? std::min<std::uint64_t>(now - last_tick, 1000) : 0;
+            last_tick = now;
+            if (d.stage == NitroDropTrap::Idle)
+                return;
+            // the pause menu stops the countdown and the fall where they are
+            if (state.menu_paused)
+            {
+                d.start += dt, d.spawned += dt, d.fall_start += dt;
+                if (state.nitro_countdown_end)
+                    state.nitro_countdown_end += dt;
+                return;
+            }
+            if (level != d.level)
+            {
+                d.copies.clear(); // the level is gone, and its memory with it
+                stop_nitro_drop(state, "the level changed");
+                return;
+            }
+            const auto elapsed = now - d.start;
+            if (d.stage == NitroDropTrap::Countdown)
+            {
+                // Crash died or lost control (a death, a cutscene): the drop is called off
+                if (!state.player_ready)
+                {
+                    stop_nitro_drop(state, "called off: Crash can't move");
+                    return;
+                }
+                if (d.ticks < 3 && elapsed >= static_cast<std::uint64_t>(d.ticks) * 1000)
+                    ++d.ticks, play_tick();
+                if (elapsed < drop_countdown_ms - drop_fall_ms)
+                    return;
+                d.spot = drop_spot();
+                std::string why;
+                if (!nitro_spawn(why, &d.spot))
+                {
+                    stop_nitro_drop(state, ("no Nitro: " + why).c_str());
+                    return;
+                }
+                d.stage = NitroDropTrap::Spawning, d.spawned = now;
+            }
+            if (d.stage == NitroDropTrap::Spawning)
+            {
+                // the crate usually appears inside the spawn call; trap_nitro is the one that just appeared
+                if (!trap_nitro.entity || trap_nitro.appeared < d.spawned)
+                {
+                    if (now - d.spawned > 1500)
+                        stop_nitro_drop(state, "the Nitro did not appear");
+                    return;
+                }
+                d.entity = trap_nitro.entity;
+                std::array<float, 3> ground{};
+                read(d.entity + 32, ground);
+                NitroPick pick{0, d.entity, crate_model(d.entity), 0, "drop"};
+                std::vector<std::array<float, 3>> targets{ground, {ground[0], ground[1], ground[2] + 76}};
+                Matrix matrix{};
+                if (pick.model && read(pick.model + 48, matrix) && !same_place(&matrix[12], ground, 0.05f))
+                    targets.push_back({matrix[12], matrix[13], matrix[14]});
+                std::vector<unsigned> which;
+                unsigned visited = 0;
+                const auto hits = position_scan(pick, targets, which, visited);
+                for (const auto &hit : hits)
+                {
+                    std::array<float, 3> at{};
+                    if (read(hit.at, at))
+                        d.copies.push_back({hit.at, at});
+                }
+                for (const auto &[at, g] : d.copies)
+                    write(at, std::array<float, 3>{g[0], g[1], g[2] + drop_height});
+                d.stage = NitroDropTrap::Falling, d.fall_start = now;
+                std::cout << "Nitro drop: falling onto " << triple(ground) << " (" << d.copies.size() << " copies, searched " << visited
+                          << " objects)\n" << std::flush;
+                return;
+            }
+            // falling: speeding up like a dropped crate, landing a second later
+            const float p = std::min(1.0f, static_cast<float>(now - d.fall_start) / drop_fall_ms);
+            const float height = drop_height * (1 - p * p);
+            if (!live_crate(d.entity))
+            {
+                d.copies.clear(); // it exploded (or the game removed it): nothing left to move
+                stop_nitro_drop(state, "the Nitro went off while falling");
+                return;
+            }
+            for (const auto &[at, g] : d.copies)
+            {
+                std::array<float, 3> now_at{};
+                // only a copy that still holds this crate (the game may reuse memory)
+                if (read(at, now_at) && std::abs(now_at[0] - g[0]) < 0.05f && std::abs(now_at[1] - g[1]) < 0.05f)
+                    write(at, std::array<float, 3>{g[0], g[1], g[2] + height});
+            }
+            if (p >= 1)
+            {
+                d.copies.clear(); // already on the ground
+                stop_nitro_drop(state, "landed");
+            }
+        }
         // requests from /nitro_spawn and the Nitro Trap; a request waits up to 5 seconds for a spot
         void update_nitro_trap(Shared &state, const std::string &level)
         {
             record_crash_path(level);
             nitro_spawn_followup();
-            if (nitro_drop.started && trap_nitro.entity)
-            {
-                const auto t = GetTickCount64();
-                std::array<float, 3> at{}, crash{};
-                if (t >= nitro_drop.next && read(trap_nitro.entity + 32, at))
-                {
-                    crash_position(crash);
-                    std::cout << "Nitro drop: after " << (t - nitro_drop.started) << " ms it is " << static_cast<int>(at[2] - crash[2])
-                              << " above Crash (fell " << static_cast<int>(nitro_drop.start_z - at[2]) << ")\n" << std::flush;
-                    nitro_drop.next = t + 250;
-                }
-                if (t - nitro_drop.started > 3000)
-                    nitro_drop = {};
-            }
             watch_trap_nitro();
-            if (state.nitro_drop_request != state.nitro_drop_ack)
-            {
-                state.nitro_drop_ack = state.nitro_drop_request;
-                std::array<float, 3> crash{};
-                std::string why;
-                if (crash_position(crash))
-                {
-                    const std::array<float, 3> above{crash[0], crash[1], crash[2] + 350};
-                    if (nitro_spawn(why, &above) && trap_nitro.entity)
-                        nitro_drop = {GetTickCount64(), 0, above[2]};
-                    else
-                        std::cout << "Nitro drop: " << (why.empty() ? std::string("it did not appear at once") : why) << "\n" << std::flush;
-                }
-            }
+            update_nitro_drop(state, level);
             const auto now = GetTickCount64();
             static std::uint64_t next_ready = 0, give_up = 0;
             if (now >= next_ready)
             {
                 next_ready = now + 500;
                 std::array<float, 3> crash{}, spot{};
-                state.nitro_ready = !level.empty() && !gimmick_stage() && !nitro_spawn_state.component && crash_position(crash) &&
-                                    ahead_spot(spot) && nitro_spawner_near(spot).component;
+                const bool can = !level.empty() && !gimmick_stage() && state.player_ready && !nitro_spawn_state.component &&
+                                 nitro_drop.stage == NitroDropTrap::Idle && crash_position(crash);
+                state.nitro_ready = can && ahead_spot(spot) && nitro_spawner_near(spot).component;
+                state.nitro_drop_ready = can && nitro_spawner_near(crash).component;
             }
             if (state.nitro_spawn_request == state.nitro_spawn_ack)
             {
@@ -4870,6 +5039,11 @@ namespace ingame
         update_collectibles(state, string(value<Address>(marker_world + 184)));
         update_tints(state, string(value<Address>(marker_world + 184)));
         const auto actor = player();
+        {
+            const bool in_level = !level_key(string(value<Address>(marker_world + 184))).empty();
+            const bool camera = scene().camera_active;
+            state.player_ready = in_level && (actor ? player_can_move(actor, camera) : camera) ? 1u : 0u;
+        }
         vanilla_movement = state.vanilla_controls != 0;
         move_shuffle = state.move_shuffle != 0;
         owned_moves = state.owned_moves;

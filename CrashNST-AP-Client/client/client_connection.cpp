@@ -445,7 +445,7 @@ void ClientRuntime::handle_commands()
                 if (box_markers)
                 {
                     box_markers->request_nitro_drop();
-                    print_console("Nitro drop test: a Nitro spawns high above Crash. Close the console (F1) and stand still; the log says whether it fell.");
+                    print_console("Nitro drop test: NITRO INCOMING 3, 2, 1, then a Nitro falls onto where Crash stands. Not sent to AP. Close the console (F1) and move!");
                 }
                 else
                     print_console("Nitro drop needs the in-game adapter. Load into a level first.");

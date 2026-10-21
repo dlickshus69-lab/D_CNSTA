@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 22, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 23, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -138,8 +138,16 @@ namespace ingame
         char ice_note[200]{};
         // /nitro_spawn (experimental): the game spawns a Nitro next to Crash
         unsigned nitro_spawn_request = 0, nitro_spawn_ack = 0;
-        // /nitro_drop (experimental): a Nitro spawns high above Crash, to see whether it falls
+        // Nitro Trap, falling: "NITRO INCOMING 3, 2, 1", then a Nitro falls onto where Crash stands
         unsigned nitro_drop_request = 0, nitro_drop_ack = 0;
+        // set by the game thread: a falling Nitro can start now (a level with a Nitro spawner, not a gimmick level,
+        // Crash can move, none running)
+        unsigned nitro_drop_ready = 0;
+        // set by the game thread: when the falling Nitro's countdown reaches 0 (GetTickCount64), 0 when none runs
+        std::uint64_t nitro_countdown_end = 0;
+        // set by the game thread: Crash is in a level and can move (not the level intro, not dying or respawning).
+        // Traps wait for it and running trap timers pause without it.
+        unsigned player_ready = 0;
         // set by the game thread: a Nitro Trap can spawn here now (level with a ready Nitro spawner, not a
         // gimmick stage, and a spot on Crash's recent path)
         unsigned nitro_ready = 0;

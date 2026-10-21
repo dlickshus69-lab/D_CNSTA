@@ -1006,6 +1006,18 @@ namespace
             }
             return x;
         }
+        // text drawn larger (the glyphs are scaled), for warnings in the middle of the screen
+        float big_text(float x, float y, const std::string &value, unsigned color, float scale)
+        {
+            for (const auto c : wide(value))
+            {
+                const auto g = glyph(c);
+                quad(x + g.x * scale, y + g.y * scale, cell * scale, cell * scale, color, g.u, g.v, static_cast<float>(cell) / atlas_size,
+                     static_cast<float>(cell) / atlas_size);
+                x += g.width * scale;
+            }
+            return x;
+        }
         float text_width(const std::string &value)
         {
             float width = 0;
@@ -1284,6 +1296,20 @@ namespace
                                   r.draw.push_back(r.vertex(v->x, v->y, 0.00024f, 0.00024f, v->color));
                           });
         }
+        // the falling Nitro's countdown, near the top middle of the screen (shown even with the HUD hidden)
+        if (!startup_mode && scene.camera_active && snapshot->nitro_countdown_end)
+            if (const auto now = GetTickCount64(); now < snapshot->nitro_countdown_end)
+            {
+                const auto left = static_cast<unsigned>((snapshot->nitro_countdown_end - now + 999) / 1000);
+                const std::string warning = "NITRO INCOMING!  " + std::to_string(left);
+                const float scale = r.height >= 1000 ? 2.0f : 1.6f;
+                const float width = r.text_width(warning) * scale, x = (r.width - width) / 2, y = r.height * 0.16f;
+                r.quad(x - 18 * scale, y - 6 * scale, width + 36 * scale, 34 * scale, 0xbb101010);
+                // Nitro green, blinking brighter on each new second
+                const bool flash = (snapshot->nitro_countdown_end - now) % 1000 > 800;
+                r.big_text(x + 2 * scale, y + 2 * scale, warning, 0xff000000, scale);
+                r.big_text(x, y, warning, flash ? 0xffb0ffb0 : 0xff30ff50, scale);
+            }
         if (snapshot->visible && !startup_mode)
         {
             if (scene.camera_active)
@@ -1902,14 +1928,19 @@ extern "C" __declspec(dllexport) DWORD WINAPI NST_Start(void *startup)
 }
 namespace
 {
-    // Slow Trap walk tuner, fed every game frame. Positions are sampled at 250 ms window edges only.
+    // Slow Trap walk tuner, fed every game frame. Each 250 ms window adds up the distance Crash covers frame by frame
+    // (going back and forth counts in full, so quick direction changes never look like standing still), and a window
+    // in which the pushed direction turned by more than about 45 degrees says nothing to the tuner.
     WalkTuner walk_tuner;
     float walk_setting = -1;
     struct WalkWindow
     {
-        std::array<float, 3> start{};
+        std::array<float, 3> start{}, last{};
         std::uint64_t at = 0;
         bool any_slow = false, all_slow = true;
+        float path = 0;              // horizontal distance covered in this window
+        float dir_x = 0, dir_y = 0;  // the pushed direction when it began
+        bool turned = false;
     } walk_window;
     std::uint64_t walk_log_at = 0;
     float logged_run_speed = 0;
@@ -1926,24 +1957,37 @@ namespace
         walk_tilt = walk_tuner.tilt;
         const auto now = GetTickCount64();
         const bool slow_now = slowed();
-        if (walk_window.at && now - walk_window.at < 250)
-        {
-            walk_window.any_slow = walk_window.any_slow || slow_now;
-            walk_window.all_slow = walk_window.all_slow && slow_now;
-            return;
-        }
         std::array<float, 3> at{};
         if (!crash_position(at))
         {
             walk_window.at = 0;
             return;
         }
+        // the direction pushed now (the stick the game gets)
+        const float px = static_cast<float>(pad_out_x.load()), py = static_cast<float>(pad_out_y.load()), plen = std::hypot(px, py);
+        if (walk_window.at && now - walk_window.at < 250)
+        {
+            walk_window.any_slow = walk_window.any_slow || slow_now;
+            walk_window.all_slow = walk_window.all_slow && slow_now;
+            const float step = std::hypot(at[0] - walk_window.last[0], at[1] - walk_window.last[1]);
+            if (step < 300) // not a respawn or teleport
+                walk_window.path += step;
+            walk_window.last = at;
+            const float dlen = std::hypot(walk_window.dir_x, walk_window.dir_y);
+            if (plen > 4000 && dlen > 4000 && (px * walk_window.dir_x + py * walk_window.dir_y) / (plen * dlen) < 0.7f)
+                walk_window.turned = true;
+            else if (plen > 4000 && dlen <= 4000)
+                walk_window.dir_x = px, walk_window.dir_y = py;
+            return;
+        }
         if (walk_window.at)
         {
             const float seconds = (now - walk_window.at) / 1000.0f;
-            const float ground = std::hypot(at[0] - walk_window.start[0], at[1] - walk_window.start[1]) / seconds;
+            walk_window.path += std::hypot(at[0] - walk_window.last[0], at[1] - walk_window.last[1]);
+            const float ground = walk_window.path / seconds;
             const float climb = std::abs(at[2] - walk_window.start[2]) / seconds;
-            const bool pushing = neutral_at.load() < walk_window.at;
+            // a window with a turn in it is a turn, not a test of the tilt
+            const bool pushing = neutral_at.load() < walk_window.at && !walk_window.turned;
             const bool all_slow = walk_window.all_slow && slow_now, any_slow = walk_window.any_slow || slow_now;
             const float before = walk_tuner.tilt;
             const int change = all_slow == any_slow ? walk_tuner.window(ground, climb, pushing, all_slow) : 0;
@@ -1967,7 +2011,7 @@ namespace
                           << std::flush;
             }
         }
-        walk_window = {at, now, slow_now, slow_now};
+        walk_window = {at, at, now, slow_now, slow_now, 0, plen > 4000 ? px : 0, plen > 4000 ? py : 0, false};
     }
 }
 extern "C" __declspec(dllexport) void NST_Tick()

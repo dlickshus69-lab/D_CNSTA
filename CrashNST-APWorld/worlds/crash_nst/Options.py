@@ -328,10 +328,11 @@ class DarknessTrapWeight(Range):
 
 
 class NitroTrapWeight(Range):
-    """How often Nitro Traps appear compared to other traps. The game spawns a real Nitro crate about
-    1.5 crates ahead of Crash in the direction he is running. It only happens in levels that have Nitro
-    crates (it borrows one of their spawners) and never in gimmick or Crash 2 jet-board levels; until
-    then it waits without holding up other traps."""
+    """How often Nitro Traps appear compared to other traps. Each one is either a real Nitro crate that
+    appears about 1.5 crates ahead of Crash in the direction he is running, or (picked at random) a
+    "NITRO INCOMING 3, 2, 1" countdown, after which a Nitro falls onto the spot where he stands. It only
+    happens in levels that have Nitro crates (it borrows one of their spawners) and never in gimmick or
+    Crash 2 jet-board levels; until then it waits without holding up other traps."""
 
     display_name = "Nitro Trap Weight"
     range_start = 0
@@ -370,7 +371,8 @@ class FreezeTrapWeight(Range):
 
 class TrapDuration(Range):
     """Seconds that Move Lock, Reverse Controls, Slippery, Slow and Darkness Traps last. A new trap of the
-    same kind adds its time."""
+    same kind adds its time. The time only runs while Crash can move: it stops during a level's intro,
+    while he dies and respawns, in the pause menu, hubs and loading screens."""
 
     display_name = "Trap Duration"
     range_start = 10

@@ -446,7 +446,8 @@ void BoxMarkers::pause_traps(bool paused, std::uint64_t elapsed_ms)
 {
     const auto now = GetTickCount64();
     lock();
-    paused = paused || shared_->menu_paused; // the pause menu pauses traps as well
+    // the pause menu pauses traps as well, and so do moments Crash can't move (level intro, dying, respawning)
+    paused = paused || shared_->menu_paused || !shared_->player_ready;
     shared_->traps_paused = paused ? 1u : 0u;
     if (paused && elapsed_ms)
         for (auto *until : {&shared_->move_lock_until, &shared_->reverse_until, &shared_->freeze_until,
@@ -461,10 +462,26 @@ void BoxMarkers::request_nitro_spawn()
     ++shared_->nitro_spawn_request;
     unlock();
 }
+bool BoxMarkers::nitro_drop_ready()
+{
+    lock();
+    const bool ready = shared_->nitro_drop_ready && shared_->nitro_drop_request == shared_->nitro_drop_ack &&
+                       shared_->nitro_spawn_request == shared_->nitro_spawn_ack && !shared_->traps_paused && !shared_->menu_paused;
+    unlock();
+    return ready;
+}
+bool BoxMarkers::player_ready()
+{
+    lock();
+    const bool ready = shared_->player_ready != 0;
+    unlock();
+    return ready;
+}
 bool BoxMarkers::nitro_ready()
 {
     lock();
-    const bool ready = shared_->nitro_ready && shared_->nitro_spawn_request == shared_->nitro_spawn_ack && !shared_->traps_paused &&
+    const bool ready = shared_->nitro_ready && shared_->nitro_spawn_request == shared_->nitro_spawn_ack &&
+                       shared_->nitro_drop_request == shared_->nitro_drop_ack && !shared_->nitro_countdown_end && !shared_->traps_paused &&
                        !shared_->menu_paused;
     unlock();
     return ready;
