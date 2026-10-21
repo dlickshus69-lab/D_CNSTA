@@ -1526,8 +1526,11 @@ namespace ingame
         }
         // follow pointers from the crate's spawner, entity, models and every script on them (each script read in
         // full) up to four levels deep, and list every place holding one of the targets
+        // The search is bounded by every object it tries (also ones it can't read: a heap full of stale pointers
+        // once made it run for millions of steps and freeze the game) and by the objects it queues.
         std::vector<ScanHit> position_scan(const NitroPick &pick, const std::vector<std::array<float, 3>> &targets,
-                                           std::vector<unsigned> &which, unsigned &visited)
+                                           std::vector<unsigned> &which, unsigned &visited, unsigned max_objects = 60000,
+                                           unsigned max_depth = 4)
         {
             struct Node
             {
@@ -1535,7 +1538,7 @@ namespace ingame
                 std::string path;
                 unsigned depth, span;
             };
-            constexpr unsigned max_objects = 60000, max_depth = 4;
+            unsigned tried = 0, queued = 0;
             std::deque<Node> queue;
             std::set<Address> seen, hit_at;
             std::vector<Node> roots{{pick.owner, "owner", 0, 2048}, {pick.entity, "entity", 0, 2048},
@@ -1559,10 +1562,11 @@ namespace ingame
             visited = 0;
             const auto image_start = base(), image_end = module_end();
             std::vector<unsigned char> bytes(8192);
-            while (!queue.empty() && visited < max_objects)
+            while (!queue.empty() && visited < max_objects && tried < max_objects * 2)
             {
                 const auto node = std::move(queue.front());
                 queue.pop_front();
+                ++tried;
                 SIZE_T got = 0;
                 unsigned size = 0;
                 for (const unsigned attempt : {node.span, 512u, 64u})
@@ -1598,9 +1602,10 @@ namespace ingame
                 {
                     Address p = 0;
                     std::memcpy(&p, bytes.data() + o, sizeof(p));
-                    if (visited + queue.size() >= max_objects || p < 0x10000 || p > 0x7ffffffeffffULL || (p & 7) ||
-                        (p >= image_start && p < image_end) || !seen.insert(p).second)
+                    if (queued >= max_objects * 2 || visited + queue.size() >= max_objects || p < 0x10000 || p > 0x7ffffffeffffULL ||
+                        (p & 7) || (p >= image_start && p < image_end) || !seen.insert(p).second)
                         continue;
+                    ++queued;
                     queue.push_back({p, node.path + " " + hex(o) + " ->", node.depth + 1, 512});
                 }
             }
@@ -2231,7 +2236,10 @@ namespace ingame
                     targets.push_back({matrix[12], matrix[13], matrix[14]});
                 std::vector<unsigned> which;
                 unsigned visited = 0;
-                const auto hits = position_scan(pick, targets, which, visited);
+                // every copy /nitro_scan ever found is at most three steps from the crate: a small search does it
+                const auto searched_at = GetTickCount64();
+                const auto hits = position_scan(pick, targets, which, visited, 6000, 3);
+                const auto search_ms = GetTickCount64() - searched_at;
                 for (const auto &hit : hits)
                 {
                     std::array<float, 3> at{};
@@ -2242,7 +2250,7 @@ namespace ingame
                     write(at, std::array<float, 3>{g[0], g[1], g[2] + drop_height});
                 d.stage = NitroDropTrap::Falling, d.fall_start = now;
                 std::cout << "Nitro drop: falling onto " << triple(ground) << " (" << d.copies.size() << " copies, searched " << visited
-                          << " objects)\n" << std::flush;
+                          << " objects in " << search_ms << " ms)\n" << std::flush;
                 return;
             }
             // falling: speeding up like a dropped crate, landing a second later
@@ -5043,6 +5051,24 @@ namespace ingame
             const bool in_level = !level_key(string(value<Address>(marker_world + 184))).empty();
             const bool camera = scene().camera_active;
             state.player_ready = in_level && (actor ? player_can_move(actor, camera) : camera) ? 1u : 0u;
+            // running traps pause every frame Crash can't move (hubs, menus, loading, the pause menu, the level's
+            // intro, dying, respawning): their end times move on by that time, so they pick up again at once
+            static std::uint64_t last_frame = 0;
+            static bool was_paused = false;
+            const auto now = GetTickCount64();
+            const bool paused = !state.player_ready || state.menu_paused;
+            if (last_frame && now > last_frame && (paused || was_paused))
+            {
+                // longer gaps (the game thread stopped, a long load) are covered by the client
+                const auto gap = std::min<std::uint64_t>(now - last_frame, 1500);
+                for (auto *until : {&state.move_lock_until, &state.reverse_until, &state.freeze_until, &state.slippery_until,
+                                    &state.slow_until, &state.darkness_until})
+                    if (*until > last_frame)
+                        *until += gap;
+            }
+            last_frame = now, was_paused = paused;
+            state.traps_paused = paused ? 1u : 0u;
+            state.heartbeat_game = now;
         }
         vanilla_movement = state.vanilla_controls != 0;
         move_shuffle = state.move_shuffle != 0;

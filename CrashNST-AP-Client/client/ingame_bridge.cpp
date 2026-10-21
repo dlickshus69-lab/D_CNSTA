@@ -444,12 +444,12 @@ void BoxMarkers::request_nitro_test()
 }
 void BoxMarkers::pause_traps(bool paused, std::uint64_t elapsed_ms)
 {
+    // the game thread pauses running traps itself, every frame (update_gameplay): this only covers the time the
+    // game thread isn't running at all (a long load), when its frames stop
     const auto now = GetTickCount64();
     lock();
-    // the pause menu pauses traps as well, and so do moments Crash can't move (level intro, dying, respawning)
-    paused = paused || shared_->menu_paused || !shared_->player_ready;
-    shared_->traps_paused = paused ? 1u : 0u;
-    if (paused && elapsed_ms)
+    const bool stalled = now > shared_->heartbeat_game + 1500;
+    if (paused && stalled && elapsed_ms)
         for (auto *until : {&shared_->move_lock_until, &shared_->reverse_until, &shared_->freeze_until,
                             &shared_->slippery_until, &shared_->slow_until, &shared_->darkness_until})
             if (*until > now)

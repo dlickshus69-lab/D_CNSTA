@@ -137,8 +137,9 @@ namespace ingame
         {
             tilt = start, step = 0.04f, last = 0, stuck = 0, run_floor = 1;
         }
-        // one window of Crash's movement; returns +1 (raised), -1 (lowered) or 0
-        int window(float ground_speed, float climb_speed, bool pushing, bool slowed)
+        // one window of Crash's movement; returns +1 (raised), -1 (lowered) or 0. A window in which the pushed
+        // direction turned can lower the tilt (running is running) but never raises it (a turn is not standing still).
+        int window(float ground_speed, float climb_speed, bool pushing, bool slowed, bool turned = false)
         {
             // idle, jumping, falling, or a respawn jump: says nothing about the stick
             if (!pushing || climb_speed > 150 || ground_speed > 4000)
@@ -157,6 +158,11 @@ namespace ingame
             {
                 run_floor = std::min(run_floor, tilt);
                 change = -1;
+            }
+            else if (turned)
+            {
+                stuck = 0;
+                return 0;
             }
             else if (ground_speed < still && ++stuck >= 3 && tilt + 0.01f < run_floor - 0.015f)
                 change = 1;

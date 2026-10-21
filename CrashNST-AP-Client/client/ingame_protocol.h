@@ -148,6 +148,8 @@ namespace ingame
         // set by the game thread: Crash is in a level and can move (not the level intro, not dying or respawning).
         // Traps wait for it and running trap timers pause without it.
         unsigned player_ready = 0;
+        // set by the game thread every frame it runs (GetTickCount64)
+        std::uint64_t heartbeat_game = 0;
         // set by the game thread: a Nitro Trap can spawn here now (level with a ready Nitro spawner, not a
         // gimmick stage, and a spot on Crash's recent path)
         unsigned nitro_ready = 0;

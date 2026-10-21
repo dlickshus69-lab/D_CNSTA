@@ -1986,11 +1986,11 @@ namespace
             walk_window.path += std::hypot(at[0] - walk_window.last[0], at[1] - walk_window.last[1]);
             const float ground = walk_window.path / seconds;
             const float climb = std::abs(at[2] - walk_window.start[2]) / seconds;
-            // a window with a turn in it is a turn, not a test of the tilt
-            const bool pushing = neutral_at.load() < walk_window.at && !walk_window.turned;
+            // a window with a turn in it can show running, but not standing still
+            const bool pushing = neutral_at.load() < walk_window.at;
             const bool all_slow = walk_window.all_slow && slow_now, any_slow = walk_window.any_slow || slow_now;
             const float before = walk_tuner.tilt;
-            const int change = all_slow == any_slow ? walk_tuner.window(ground, climb, pushing, all_slow) : 0;
+            const int change = all_slow == any_slow ? walk_tuner.window(ground, climb, pushing, all_slow, walk_window.turned) : 0;
             if (walk_tuner.run_speed > logged_run_speed * 1.2f)
             {
                 logged_run_speed = walk_tuner.run_speed;
