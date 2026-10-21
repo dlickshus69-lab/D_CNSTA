@@ -1313,7 +1313,7 @@ namespace
                     const std::pair<std::uint64_t, const char *> timers[]{{snapshot->move_lock_until, "Move Lock"},
                                                                           {snapshot->reverse_until, "Reversed"},
                                                                           {snapshot->freeze_until, "Frozen"},
-                                                                          {snapshot->slippery_until, "Slippery"},
+                                                                          {snapshot->slippery_until, slippery_until.load() || snapshot->traps_paused ? "Slippery" : "Slippery (off here)"},
                                                                           // the timer keeps running in gimmick/chase levels, where Slow does nothing
                                                                           {snapshot->slow_until, slow_until.load() || snapshot->traps_paused ? "Slow" : "Slow (off here)"},
                                                                           {snapshot->darkness_until, darkness_exempt && !snapshot->traps_paused ? "Darkness (off here)" : "Darkness"}};
@@ -1929,7 +1929,8 @@ extern "C" __declspec(dllexport) void NST_Tick()
                 const bool paused = shared->traps_paused != 0;
                 reverse_until = paused ? 0 : shared->reverse_until;
                 freeze_until = paused ? 0 : shared->freeze_until;
-                slippery_until = paused ? 0 : shared->slippery_until;
+                // Slippery has no effect in gimmick levels
+                slippery_until = paused || gimmick_stage() ? 0 : shared->slippery_until;
                 // Slow has no effect in gimmick and chase levels
                 slow_until = paused || slow_trap_exempt() ? 0 : shared->slow_until;
                 update_walk_tuner(*shared);
