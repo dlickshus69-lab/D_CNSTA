@@ -180,50 +180,65 @@ namespace ingame
         }
     };
 
-    // Slippery Trap: ice. Crash follows a velocity that your input only slowly steers. While it is above a small
-    // floor he keeps running at full speed in its direction, so he slides on after you let go, drifts wide
-    // through turns and skids before reversing. The d-pad steers the same velocity. Movement keys keep
-    // reporting "held" for a moment after release.
-    inline constexpr float slippery_ease_ms = 650;
-    inline constexpr float slide_floor = 0.2f, slide_speed = 0.9f; // shares of a full push
+    // Slippery Trap: ice. Crash cannot change direction quickly: his heading swings toward your input at a limited
+    // rate, so turns and reversals become wide arcs at speed instead of stops. He builds up from a walk to a run,
+    // and when you let go he keeps sliding, running then walking, before he stops. The d-pad steers the same way.
+    // Movement keys keep reporting "held" for a moment after release.
+    inline constexpr float slippery_turn_rate = 4.2f;  // radians per second, about 240 degrees
+    inline constexpr float slippery_accel = 2.0f;      // share of full speed per second
+    inline constexpr float slippery_decel = 1.1f;
+    inline constexpr float slide_stop = 0.15f, slide_run = 0.6f; // below: stopped, below run: walking
     inline constexpr unsigned slippery_key_hold_ms = 450;
     struct StickMomentum
     {
-        float x = 0, y = 0;
+        float angle = 0, speed = 0;
         std::uint64_t last = 0;
         bool primed = false;
-        void apply(std::int16_t &stick_x, std::int16_t &stick_y, std::uint16_t &buttons, std::uint64_t now)
+        void apply(std::int16_t &stick_x, std::int16_t &stick_y, std::uint16_t &buttons, std::uint64_t now, float walk_tilt)
         {
+            constexpr float pi = 3.14159265358979f;
             float ix = stick_x, iy = stick_y;
             if (std::hypot(ix, iy) <= stick_deadzone)
             {
                 // resting stick: the d-pad steers, otherwise there is no input
                 ix = static_cast<float>(((buttons & 8u) ? 1 : 0) - ((buttons & 4u) ? 1 : 0));
                 iy = static_cast<float>(((buttons & 1u) ? 1 : 0) - ((buttons & 2u) ? 1 : 0));
-                if (const float length = std::hypot(ix, iy); length > 0)
-                    ix *= 32767 / length, iy *= 32767 / length;
             }
             buttons = static_cast<std::uint16_t>(buttons & ~0xFu);
+            const bool pushing = ix != 0 || iy != 0;
+            const float wanted = pushing ? std::atan2(iy, ix) : angle;
             if (!primed || now < last)
-                x = ix, y = iy, primed = true;
+            {
+                // a trap that starts mid-run keeps the run going
+                primed = true, angle = wanted, speed = pushing ? 1.0f : 0.0f;
+            }
             else
             {
-                const auto elapsed = static_cast<float>(now - last > 100 ? 100 : now - last);
-                const auto blend = 1 - std::exp(-elapsed / slippery_ease_ms);
-                x += (ix - x) * blend;
-                y += (iy - y) * blend;
+                const float dt = static_cast<float>(now - last > 100 ? 100 : now - last) / 1000;
+                if (pushing)
+                {
+                    if (speed < slide_stop)
+                        angle = wanted; // from a standstill he sets off the way you push
+                    else
+                    {
+                        float turn = std::remainder(wanted - angle, 2 * pi);
+                        const float most = slippery_turn_rate * dt;
+                        angle += turn > most ? most : turn < -most ? -most : turn;
+                    }
+                    speed = std::min(1.0f, speed + slippery_accel * dt);
+                }
+                else
+                    speed = std::max(0.0f, speed - slippery_decel * dt);
             }
             last = now;
-            const float length = std::hypot(x, y);
-            if (length < slide_floor * 32767)
+            if (speed < slide_stop)
             {
                 stick_x = stick_y = 0;
                 return;
             }
-            const float scale = std::max(length, slide_speed * 32767) / length;
-            const auto clamp = [](float v) { return static_cast<std::int16_t>(std::lround(v < -32768 ? -32768 : v > 32767 ? 32767 : v)); };
-            stick_x = clamp(x * scale);
-            stick_y = clamp(y * scale);
+            const float tilt = (speed < slide_run ? walk_tilt : 1.0f) * 32767;
+            stick_x = static_cast<std::int16_t>(std::lround(std::cos(angle) * tilt));
+            stick_y = static_cast<std::int16_t>(std::lround(std::sin(angle) * tilt));
         }
     };
     struct KeyMomentum

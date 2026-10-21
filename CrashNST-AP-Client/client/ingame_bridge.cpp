@@ -452,6 +452,12 @@ void BoxMarkers::pause_traps(bool paused, std::uint64_t elapsed_ms)
                 *until += elapsed_ms;
     unlock();
 }
+void BoxMarkers::request_ice_probe()
+{
+    lock();
+    ++shared_->ice_probe_request;
+    unlock();
+}
 void BoxMarkers::request_nitro_scan()
 {
     lock();

@@ -254,9 +254,9 @@ class LifeLossTrapWeight(Range):
 
 
 class SlipperyTrapWeight(Range):
-    """How often Slippery Traps appear compared to other traps. Ice for the Trap Duration: Crash keeps
-    sliding after you let go, drifts wide through turns and skids before reversing. Strongest on a
-    controller (stick and d-pad)."""
+    """How often Slippery Traps appear compared to other traps. Ice for the Trap Duration: Crash turns
+    slowly, so turns and reversals become wide drifting arcs, and he keeps sliding after you let go.
+    Strongest on a controller (stick and d-pad)."""
 
     display_name = "Slippery Trap Weight"
     range_start = 0

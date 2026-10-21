@@ -38,6 +38,7 @@ public:
     // research (experimental): move the nearest Nitro crate next to Crash
     void request_nitro_test();
     void request_nitro_scan();
+    void request_ice_probe();
     void pause_traps(bool paused, std::uint64_t elapsed_ms);
     void c3_buttons(bool ready, const std::set<std::string> &allowed = {});
     unsigned collectibles(std::vector<ingame::Collectible> config, unsigned relic_min_rank = 1);

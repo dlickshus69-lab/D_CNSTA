@@ -1401,7 +1401,7 @@ namespace ingame
                     float v[3];
                     std::memcpy(v, bytes.data() + o, sizeof(v));
                     for (const auto &[t, tag] : targets)
-                        if (same_place(v, t, 0.05f))
+                        if (std::abs(v[0] - t[0]) < 0.05f && std::abs(v[1] - t[1]) < 0.05f && std::abs(v[2] - t[2]) < 80)
                         {
                             if (hit_at.insert(node.at + o).second)
                             {
@@ -1484,10 +1484,13 @@ namespace ingame
             unsigned skipped = 0;
             for (const auto &copy : copies)
             {
-                // only overwrite a copy that still holds the crate's position
+                // only overwrite a copy that still holds the crate's position. the crate hops, so a copy may sit
+                // up to a hop higher or lower than the others (the physics copy did)
                 std::array<float, 3> now{};
+                const auto close_by = [](const float *a, const std::array<float, 3> &b)
+                { return std::abs(a[0] - b[0]) < 0.05f && std::abs(a[1] - b[1]) < 0.05f && std::abs(a[2] - b[2]) < 80; };
                 const bool holds = read(copy.at, now) &&
-                                   (same_place(now.data(), before, 0.05f) || (matrix[15] == 1.0f && same_place(now.data(), {matrix[12], matrix[13], matrix[14]}, 0.05f)));
+                                   (close_by(now.data(), before) || (matrix[15] == 1.0f && close_by(now.data(), {matrix[12], matrix[13], matrix[14]})));
                 if (holds && write(copy.at, target))
                     written.push_back(copy);
                 else
@@ -1550,6 +1553,120 @@ namespace ingame
                           << std::flush;
                 t = {};
             }
+        }
+        // /ice_probe research (read-only): every script setting on Crash. Two runs, one standing on normal ground and
+        // one standing on ice, show which settings the game changes on ice; movement-sounding names are always
+        // listed. Raw words of Crash's movement controller (+424) that changed are listed too.
+        struct IceValue
+        {
+            std::uint64_t bits = 0;
+            unsigned size = 0;
+        };
+        std::map<std::string, IceValue> ice_probe_last;
+        std::vector<unsigned> ice_raw_last;
+        std::string ice_format(const IceValue &v)
+        {
+            std::ostringstream out;
+            if (v.size == 1)
+                out << unsigned(v.bits & 0xff);
+            else if (v.size == 4)
+            {
+                float f = 0;
+                const auto word = static_cast<std::uint32_t>(v.bits);
+                std::memcpy(&f, &word, 4);
+                out << static_cast<std::int32_t>(word);
+                if (std::isfinite(f) && std::abs(f) > 1e-6f && std::abs(f) < 1e7f)
+                    out << " (" << f << ")";
+            }
+            else
+                out << "0x" << std::hex << v.bits;
+            return out.str();
+        }
+        void ice_probe()
+        {
+            const auto actor = player();
+            if (!actor)
+            {
+                std::cout << "Ice probe: Crash not found. Run it inside a level.\n" << std::flush;
+                return;
+            }
+            static const char *keys[]{"ice", "slip", "fric", "surface", "slide", "skid", "moment", "accel", "decel",
+                                      "ground", "material", "speed", "veloc", "traction", "grip", "snow", "terrain"};
+            std::map<std::string, IceValue> now;
+            std::string graphs, named;
+            unsigned named_count = 0;
+            for (const auto c : list(value<Address>(actor + 24), 128))
+            {
+                if (!typed(c, 0x13bbbd0) || value<Address>(c + 24) != actor)
+                    continue;
+                const auto meta = value<Address>(c + 56);
+                if (!typed(meta, 0x1745d78))
+                    continue;
+                auto graph = string(value<Address>(meta + 16));
+                if (graph.rfind("Scripts.Graph.", 0) == 0)
+                    graph.erase(0, 14);
+                graphs += (graphs.empty() ? "" : ", ") + graph;
+                const auto count = value<unsigned>(meta + 24), size = unsigned(value<std::uint16_t>(meta + 90));
+                const auto fields = value<Address>(meta + 40);
+                if (!fields || count > 512)
+                    continue;
+                for (unsigned i = 0; i < count; ++i)
+                {
+                    const auto field = value<Address>(fields + i * 8);
+                    const auto name = string(value<Address>(field + 48));
+                    const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                    if (name.empty() || !bytes || bytes > 8 || offset + bytes > size)
+                        continue;
+                    IceValue v{0, bytes};
+                    SIZE_T got = 0;
+                    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(c + offset), &v.bits, bytes, &got) || got != bytes)
+                        continue;
+                    const auto key = graph + "." + name;
+                    now[key] = v;
+                    auto lower = name;
+                    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                    if (named_count < 80 && std::any_of(std::begin(keys), std::end(keys), [&](const char *k) { return lower.find(k) != std::string::npos; }))
+                    {
+                        named += "Ice probe:   " + key + " = " + ice_format(v) + "\n";
+                        ++named_count;
+                    }
+                }
+            }
+            std::cout << "Ice probe: level " << level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))) << ", "
+                      << now.size() << " settings on Crash. Scripts: " << (graphs.empty() ? "(none)" : graphs) << "\n"
+                      << named;
+            // raw movement-controller words, compared with the last probe
+            std::vector<unsigned> raw(512);
+            const auto controller = value<Address>(actor + 424);
+            SIZE_T got = 0;
+            const bool raw_ok = typed(controller, 0x1589128) &&
+                                ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(controller), raw.data(), raw.size() * 4, &got) && got == raw.size() * 4;
+            if (!ice_probe_last.empty())
+            {
+                unsigned changed = 0;
+                for (const auto &[key, v] : now)
+                {
+                    const auto old = ice_probe_last.find(key);
+                    if (old == ice_probe_last.end() || old->second.bits == v.bits || changed >= 80)
+                        continue;
+                    std::cout << "Ice probe: changed " << key << ": " << ice_format(old->second) << " -> " << ice_format(v) << "\n";
+                    ++changed;
+                }
+                if (raw_ok && ice_raw_last.size() == raw.size())
+                    for (unsigned i = 2; i < raw.size() && changed < 140; ++i) // skip the vtable
+                        if (raw[i] != ice_raw_last[i])
+                        {
+                            std::cout << "Ice probe: changed controller " << hex(i * 4) << ": " << ice_format({ice_raw_last[i], 4})
+                                      << " -> " << ice_format({raw[i], 4}) << "\n";
+                            ++changed;
+                        }
+                std::cout << "Ice probe: " << changed << " changes since the last probe\n";
+            }
+            else
+                std::cout << "Ice probe: saved. Now stand on ice and run /ice_probe again to see what changes.\n";
+            ice_probe_last = std::move(now);
+            ice_raw_last = raw_ok ? raw : std::vector<unsigned>{};
+            std::cout << std::flush;
         }
         void update_c3_buttons(Shared &state, const std::string &zone)
         {
@@ -1788,6 +1905,11 @@ namespace ingame
         {
             state.nitro_probe_ack = state.nitro_probe_request;
             nitro_probe();
+        }
+        if (state.ice_probe_request != state.ice_probe_ack)
+        {
+            state.ice_probe_ack = state.ice_probe_request;
+            ice_probe();
         }
         if (state.nitro_scan_request != state.nitro_scan_ack)
         {

@@ -303,7 +303,7 @@ namespace
             if (slippery())
             {
                 std::uint16_t buttons = pad.wButtons;
-                stick_momentum[index].apply(pad.sThumbLX, pad.sThumbLY, buttons, now);
+                stick_momentum[index].apply(pad.sThumbLX, pad.sThumbLY, buttons, now, walk_tilt);
                 pad.wButtons = buttons;
             }
             else

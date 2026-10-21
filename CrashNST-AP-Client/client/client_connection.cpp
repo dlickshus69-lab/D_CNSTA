@@ -424,6 +424,16 @@ void ClientRuntime::handle_commands()
                 else
                     print_console("Nitro probe needs the in-game adapter. Load into a level first.");
             }
+            else if (command == "/ice_probe")
+            {
+                if (box_markers)
+                {
+                    box_markers->request_ice_probe();
+                    print_console("Ice probe requested (read-only). Run it standing still on normal ground, then again standing on ice.");
+                }
+                else
+                    print_console("Ice probe needs the in-game adapter. Load into a level first.");
+            }
             else if (command == "/nitro_scan")
             {
                 if (box_markers)
