@@ -224,6 +224,8 @@ class SpinPlacement(Choice):
     """Where Spin goes when Ability Shuffle is shuffle_spin.
 
     early: in your first checks (your easiest starting level or a starting gimmick stage).
+    anywhere: any check logic says you can reach without Spin (with relaxed Ability Logic that is most
+    level clears, crystals and boxes).
     early_to_mid: never in your starting levels. It goes on a random check you can reach without Spin
     (a gimmick stage, so a hog, polar bear, jetpack, vehicle or scuba level) behind unlocks you find
     along the way (two or more when the seed allows), so it usually turns up a few rounds of unlocks in. Logic is the
@@ -234,7 +236,26 @@ class SpinPlacement(Choice):
     display_name = "Spin Placement"
     option_early = 0
     option_early_to_mid = 1
+    option_anywhere = 2
     default = option_early_to_mid
+
+
+class AbilityLogic(Choice):
+    """What logic expects you can do without the basic moves when Ability Shuffle is on.
+
+    cautious: level clears need Spin (except your easiest starting level), and gems, relics and boxes
+    need Spin in Crash 1 and every move in Crash 2 and 3. Abilities can only be early or in gimmick stages.
+    relaxed: level clears, power crystals and boxes need only jumping (enemies can be jumped on, crates
+    can be jumped on or hit from below), so abilities can be on almost any of those. Bosses still need
+    Spin, and gems and relics keep the cautious needs. If a level turns out to need a move you do not have
+    yet, play another level and come back.
+    Gimmick stages need no moves either way.
+    """
+
+    display_name = "Ability Logic"
+    option_cautious = 0
+    option_relaxed = 1
+    default = option_cautious
 
 
 class TrapFillPercentage(Range):
@@ -503,6 +524,7 @@ crash_option_groups = [
         BoxItemSpoilers,
         AbilityShuffle,
         SpinPlacement,
+        AbilityLogic,
     ]),
     OptionGroup("Traps", [
         TrapFillPercentage,
@@ -548,6 +570,7 @@ class CrashOptions(PerGameCommonOptions):
     crashsanity: Crashsanity
     ability_shuffle: AbilityShuffle
     spin_placement: SpinPlacement
+    ability_logic: AbilityLogic
     trap_fill_percentage: TrapFillPercentage
     life_loss_trap_weight: LifeLossTrapWeight
     move_lock_trap_weight: MoveLockTrapWeight

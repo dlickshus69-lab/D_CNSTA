@@ -544,8 +544,10 @@ def easiest_start(starting_levels):
     return min(regular, key=lambda key: (int(key[2:]), key[1]))
 
 
-def move_requirements(level, event, spin_shuffled, jump_only_levels):
-    """basic moves logic expects for a check while Ability Shuffle is on"""
+def move_requirements(level, event, spin_shuffled, jump_only_levels, relaxed=False):
+    """basic moves logic expects for a check while Ability Shuffle is on. relaxed (Ability Logic): level clears,
+    crystals and boxes expect only jumping (enemies are jumped on, crates are jumped on or hit from below);
+    bosses still expect Spin, gems and relics keep the cautious needs."""
     override = MOVE_OVERRIDES.get((level.key, event))
     if override is None and event.startswith("box:"):
         override = MOVE_OVERRIDES.get((level.key, "box:"))
@@ -554,6 +556,11 @@ def move_requirements(level, event, spin_shuffled, jump_only_levels):
     # hog, polar bear, jetpack and Crash 3 vehicle stages keep vanilla controls
     if level.key in GIMMICK_LEVELS:
         return ()
+    if relaxed:
+        if event in ("clear", "crystal"):
+            return ("Spin",) if level.key.startswith("B") else ()
+        if event.startswith("box:"):
+            return ()
     if event in ("clear", "crystal"):
         # with Spin shuffled, your easiest starting level is assumed clearable by jumping alone
         return () if spin_shuffled and level.key in jump_only_levels else ("Spin",)

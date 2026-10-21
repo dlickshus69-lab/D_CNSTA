@@ -117,7 +117,7 @@ class CrashWorld(World):
         if not self.ability_shuffle:
             return ()
         jump_only = {easiest_start(self.starting_levels)} if self.ability_shuffle == 2 else set()
-        return move_requirements(level, event, self.ability_shuffle == 2, jump_only)
+        return move_requirements(level, event, self.ability_shuffle == 2, jump_only, self.ability_logic == 1)
 
     def extra_requirements(self, level, event):
         return (*self.relic_requirements(level, event), *self.move_requirements(level, event))
@@ -144,6 +144,9 @@ class CrashWorld(World):
         self.ability_shuffle = slot.get("ability_shuffle", 0)
         if type(self.ability_shuffle) is not int or not 0 <= self.ability_shuffle <= 2:
             raise ValueError("Invalid NST tracker ability shuffle")
+        self.ability_logic = slot.get("ability_logic", 0)
+        if type(self.ability_logic) is not int or not 0 <= self.ability_logic <= 1:
+            raise ValueError("Invalid NST tracker ability logic")
         self.starting_levels = slot.get("starting_levels", [])
         for name in ("hub_area_locks", "level_access_locks"):
             if type(slot.get(name)) is not bool:
@@ -264,6 +267,7 @@ class CrashWorld(World):
         self.level_access_locks = bool(self.options.level_access_locks.value)
         self.relic_tier = self.options.relic_requirement.value
         self.ability_shuffle = self.options.ability_shuffle.value
+        self.ability_logic = self.options.ability_logic.value
         rewards = self.options.collectible_rewards.modes()
         self.vanilla_collectibles = {
             key: mode == "vanilla" for key, mode in rewards.items()
@@ -670,9 +674,10 @@ class CrashWorld(World):
                 and address not in self.locked_collectibles
                 and not self.move_requirements(BY_KEY[key], event)
             ]
+            placement = self.options.spin_placement.value
             later = (
                 self.spin_later_location(starts)
-                if self.options.spin_placement.value == self.options.spin_placement.option_early_to_mid
+                if placement == self.options.spin_placement.option_early_to_mid
                 else None
             )
             if later is not None:
@@ -691,8 +696,9 @@ class CrashWorld(World):
                 location = self.multiworld.get_location(self.random.choice(first_checks), self.player)
                 location.place_locked_item(self.create_item("Spin"))
                 spin_locked = True
-            else:
+            elif placement != self.options.spin_placement.option_anywhere:
                 self.multiworld.early_items[self.player]["Spin"] = 1
+            # anywhere: fill places Spin on any check logic reaches without it
         for name in sorted(starts.elements()):
             self.multiworld.push_precollected(self.create_item(name))
         required = Counter(self.lock_requirements(f"{level.name} - Access" for level in self.active_levels))
@@ -896,6 +902,8 @@ class CrashWorld(World):
         result["box_item_spoilers"] = bool(self.options.box_item_spoilers.value)
         # 0 off, 1 start with Spin, 2 Spin shuffled. Move item IDs are BASE + 2400 + index of BASIC_MOVES.
         result["ability_shuffle"] = self.ability_shuffle
+        # 0 cautious, 1 relaxed: what logic expects without the basic moves
+        result["ability_logic"] = self.ability_logic
         # trap item IDs are BASE + TRAP_IDS. counts tell the client which hooks it needs.
         result["trap_counts"] = getattr(self, "trap_counts", dict.fromkeys(TRAPS, 0))
         result["trap_duration"] = self.options.trap_duration.value
