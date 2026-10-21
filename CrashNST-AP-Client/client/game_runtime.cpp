@@ -1332,6 +1332,94 @@ namespace ingame
             Address entity = 0;
             std::array<float, 3> old{};
         } nitro_home;
+        // copies of a position: x and y exact, height within a hop. a crate stacked on this one is a full crate
+        // height (about 78) above, so it never matches
+        bool crate_copy(const float *v, const std::array<float, 3> &t)
+        {
+            return std::abs(v[0] - t[0]) < 0.05f && std::abs(v[1] - t[1]) < 0.05f && std::abs(v[2] - t[2]) < 25;
+        }
+        // follow pointers from the crate's spawner, entity, models and every script on them (each script read in
+        // full) up to four levels deep, and list every place holding one of the targets
+        std::vector<ScanHit> position_scan(const NitroPick &pick, const std::vector<std::array<float, 3>> &targets,
+                                           std::vector<unsigned> &which, unsigned &visited)
+        {
+            struct Node
+            {
+                Address at;
+                std::string path;
+                unsigned depth, span;
+            };
+            constexpr unsigned max_objects = 60000, max_depth = 4;
+            std::deque<Node> queue;
+            std::set<Address> seen, hit_at;
+            std::vector<Node> roots{{pick.owner, "owner", 0, 2048}, {pick.entity, "entity", 0, 2048},
+                                    {value<Address>(pick.entity + 176), "model component", 0, 2048}, {pick.model, "model", 0, 2048}};
+            for (const auto &[holder, label] : {std::pair<Address, const char *>{pick.owner, "owner"}, {pick.entity, "entity"}})
+                for (const auto c : list(value<Address>(holder + 24), 64))
+                {
+                    const auto meta = value<Address>(c + 56);
+                    const bool graph = typed(meta, 0x1745d78);
+                    auto name = graph ? string(value<Address>(meta + 16)) : std::string("component");
+                    if (name.rfind("Scripts.Graph.", 0) == 0)
+                        name.erase(0, 14);
+                    const unsigned size = graph ? value<std::uint16_t>(meta + 90) : 0;
+                    roots.push_back({c, std::string(label) + " script " + name, 0, std::min(8192u, std::max(2048u, size))});
+                }
+            for (const auto &root : roots)
+                if (root.at && seen.insert(root.at).second)
+                    queue.push_back(root);
+            std::vector<ScanHit> hits;
+            which.clear();
+            visited = 0;
+            const auto image_start = base(), image_end = module_end();
+            std::vector<unsigned char> bytes(8192);
+            while (!queue.empty() && visited < max_objects)
+            {
+                const auto node = std::move(queue.front());
+                queue.pop_front();
+                SIZE_T got = 0;
+                unsigned size = 0;
+                for (const unsigned attempt : {node.span, 512u, 64u})
+                    if (attempt <= node.span && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(node.at), bytes.data(), attempt, &got) && got == attempt)
+                    {
+                        size = attempt;
+                        break;
+                    }
+                if (!size)
+                    continue;
+                ++visited;
+                for (unsigned o = 0; o + 12 <= size; o += 4)
+                {
+                    float v[3];
+                    std::memcpy(v, bytes.data() + o, sizeof(v));
+                    for (unsigned t = 0; t < targets.size(); ++t)
+                        if (crate_copy(v, targets[t]))
+                        {
+                            if (hit_at.insert(node.at + o).second)
+                            {
+                                float w = 0;
+                                if (o + 16 <= size)
+                                    std::memcpy(&w, bytes.data() + o + 12, sizeof(w));
+                                hits.push_back({node.at + o, node.path + " " + hex(o) + (w == 1.0f ? " (w 1)" : "")});
+                                which.push_back(t);
+                            }
+                            break;
+                        }
+                }
+                if (node.depth >= max_depth)
+                    continue;
+                for (unsigned o = 0; o + 8 <= size; o += 8)
+                {
+                    Address p = 0;
+                    std::memcpy(&p, bytes.data() + o, sizeof(p));
+                    if (visited + queue.size() >= max_objects || p < 0x10000 || p > 0x7ffffffeffffULL || (p & 7) ||
+                        (p >= image_start && p < image_end) || !seen.insert(p).second)
+                        continue;
+                    queue.push_back({p, node.path + " " + hex(o) + " ->", node.depth + 1, 512});
+                }
+            }
+            return hits;
+        }
         void nitro_scan()
         {
             const auto actor = player();
@@ -1348,90 +1436,27 @@ namespace ingame
                 return;
             }
             // targets: current position, render translation if different, and the pre-test spot
-            std::vector<std::pair<std::array<float, 3>, const char *>> targets(1, {{}, ""});
-            read(pick.entity + 32, targets[0].first);
+            std::vector<std::array<float, 3>> targets(1);
+            read(pick.entity + 32, targets[0]);
             Matrix matrix{};
-            if (pick.model && read(pick.model + 48, matrix) && !same_place(&matrix[12], targets[0].first, 0.05f))
-                targets.push_back({{matrix[12], matrix[13], matrix[14]}, ""});
-            const bool tested = nitro_home.entity == pick.entity && !same_place(nitro_home.old.data(), targets[0].first, 0.05f);
+            if (pick.model && read(pick.model + 48, matrix) && !same_place(&matrix[12], targets[0], 0.05f))
+                targets.push_back({matrix[12], matrix[13], matrix[14]});
+            const bool tested = nitro_home.entity == pick.entity && !same_place(nitro_home.old.data(), targets[0], 0.05f);
+            const unsigned old_target = tested ? static_cast<unsigned>(targets.size()) : ~0u;
             if (tested)
-                targets.push_back({nitro_home.old, " [old spot]"});
-            struct Node
-            {
-                Address at;
-                std::string path;
-                unsigned depth;
-            };
-            constexpr unsigned max_objects = 60000, max_depth = 4, span = 512;
-            std::deque<Node> queue;
-            std::set<Address> seen, hit_at;
-            std::vector<std::pair<Address, std::string>> roots{{pick.owner, "owner"}, {pick.entity, "entity"},
-                                                               {value<Address>(pick.entity + 176), "model component"}, {pick.model, "model"}};
-            // every script attached to the spawner or the crate, named by its graph
-            for (const auto &[holder, label] : {std::pair<Address, const char *>{pick.owner, "owner"}, {pick.entity, "entity"}})
-                for (const auto c : list(value<Address>(holder + 24), 64))
-                {
-                    const auto meta = value<Address>(c + 56);
-                    auto name = typed(meta, 0x1745d78) ? string(value<Address>(meta + 16)) : std::string("component");
-                    if (name.rfind("Scripts.Graph.", 0) == 0)
-                        name.erase(0, 14);
-                    roots.push_back({c, std::string(label) + " script " + name});
-                }
-            for (const auto &[root, label] : roots)
-                if (root && seen.insert(root).second)
-                    queue.push_back({root, label, 0});
-            std::vector<ScanHit> hits, old_hits;
+                targets.push_back(nitro_home.old);
+            std::vector<unsigned> which;
             unsigned visited = 0;
-            const auto image_start = base(), image_end = module_end();
-            std::vector<unsigned char> bytes(span);
-            while (!queue.empty() && visited < max_objects)
-            {
-                const auto node = std::move(queue.front());
-                queue.pop_front();
-                SIZE_T got = 0;
-                unsigned size = span;
-                if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(node.at), bytes.data(), size, &got) || got != size)
-                {
-                    size = 64;
-                    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(node.at), bytes.data(), size, &got) || got != size)
-                        continue;
-                }
-                ++visited;
-                for (unsigned o = 0; o + 12 <= size; o += 4)
-                {
-                    float v[3];
-                    std::memcpy(v, bytes.data() + o, sizeof(v));
-                    for (const auto &[t, tag] : targets)
-                        if (std::abs(v[0] - t[0]) < 0.05f && std::abs(v[1] - t[1]) < 0.05f && std::abs(v[2] - t[2]) < 80)
-                        {
-                            if (hit_at.insert(node.at + o).second)
-                            {
-                                float w = 0;
-                                if (o + 16 <= size)
-                                    std::memcpy(&w, bytes.data() + o + 12, sizeof(w));
-                                (*tag ? old_hits : hits).push_back({node.at + o, node.path + " " + hex(o) + (w == 1.0f ? " (w 1)" : "") + tag});
-                            }
-                            break;
-                        }
-                }
-                if (node.depth >= max_depth)
-                    continue;
-                for (unsigned o = 0; o + 8 <= size; o += 8)
-                {
-                    Address p = 0;
-                    std::memcpy(&p, bytes.data() + o, sizeof(p));
-                    if (visited + queue.size() >= max_objects || p < 0x10000 || p > 0x7ffffffeffffULL || (p & 7) ||
-                        (p >= image_start && p < image_end) || !seen.insert(p).second)
-                        continue;
-                    queue.push_back({p, node.path + " " + hex(o) + " ->", node.depth + 1});
-                }
-            }
-            std::cout << "Nitro scan: " << pick.name << " (" << static_cast<int>(pick.distance) << " from Crash) at " << triple(targets[0].first)
+            auto found = position_scan(pick, targets, which, visited);
+            std::vector<ScanHit> hits, old_hits;
+            for (unsigned i = 0; i < found.size(); ++i)
+                (which[i] == old_target ? old_hits : hits).push_back(found[i]);
+            std::cout << "Nitro scan: " << pick.name << " (" << static_cast<int>(pick.distance) << " from Crash) at " << triple(targets[0])
                       << ": searched " << visited << " objects, " << hits.size() << " copies of its position"
                       << (tested ? ", " + std::to_string(old_hits.size()) + " still holding its old spot " + triple(nitro_home.old) : std::string())
                       << "\n";
             for (unsigned i = 0; i < old_hits.size() && i < 30; ++i)
-                std::cout << "Nitro scan:   " << old_hits[i].path << "\n";
+                std::cout << "Nitro scan:   " << old_hits[i].path << " [old spot]\n";
             for (unsigned i = 0; i < hits.size() && i < 40; ++i)
                 std::cout << "Nitro scan:   " << hits[i].path << "\n";
             std::cout << "Nitro scan done. Nothing was changed. /nitro_test now also moves these copies.\n" << std::flush;
@@ -1445,7 +1470,8 @@ namespace ingame
             Address entity = 0, actor = 0;
             std::string level;
             std::uint64_t started = 0;
-            bool reported = false;
+            bool reported = false, searched = false;
+            NitroPick pick;
             std::array<float, 3> target{};
             std::vector<ScanHit> written;
             std::vector<bool> moved;
@@ -1488,10 +1514,8 @@ namespace ingame
                 // only overwrite a copy that still holds the crate's position. the crate hops, so a copy may sit
                 // up to a hop higher or lower than the others (the physics copy did)
                 std::array<float, 3> now{};
-                const auto close_by = [](const float *a, const std::array<float, 3> &b)
-                { return std::abs(a[0] - b[0]) < 0.05f && std::abs(a[1] - b[1]) < 0.05f && std::abs(a[2] - b[2]) < 80; };
                 const bool holds = read(copy.at, now) &&
-                                   (close_by(now.data(), before) || (matrix[15] == 1.0f && close_by(now.data(), {matrix[12], matrix[13], matrix[14]})));
+                                   (crate_copy(now.data(), before) || (matrix[15] == 1.0f && crate_copy(now.data(), {matrix[12], matrix[13], matrix[14]})));
                 // each copy moves by the same distance and keeps its own offset: the physics body sits at the
                 // crate's centre, 76 units up, and sinking it into the floor makes the game reset the crate
                 const std::array<float, 3> goal{target[0] + now[0] - before[0], target[1] + now[1] - before[1], target[2] + now[2] - before[2]};
@@ -1505,7 +1529,7 @@ namespace ingame
             }
             nitro_home = {pick.entity, before};
             const auto level = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
-            nitro_test_state = {pick.entity, actor, level, GetTickCount64(), false, target, written, std::vector<bool>(written.size())};
+            nitro_test_state = {pick.entity, actor, level, GetTickCount64(), false, false, pick, target, written, std::vector<bool>(written.size())};
             std::cout << "Nitro test: " << pick.name << " (" << static_cast<int>(pick.distance) << " from Crash) moved from " << triple(before)
                       << " to " << triple(target) << ": " << written.size() << " copies written"
                       << (skipped ? ", " + std::to_string(skipped) + " skipped (no longer matched)" : "")
@@ -1531,6 +1555,42 @@ namespace ingame
                 t = {};
                 return;
             }
+            // the first time the game pulls the crate back, look for whatever still holds the spot it went back to
+            // (its home) and move those too, so its next hop starts next to Crash
+            if (!t.searched)
+                for (unsigned i = 0; i < t.written.size(); ++i)
+                {
+                    std::array<float, 3> at{};
+                    if (!read(t.written[i].at, at) || same_place(at.data(), t.written[i].goal, 1.0f))
+                        continue;
+                    t.searched = true;
+                    // where the crate itself went back to: this copy's value minus its own offset
+                    const std::array<float, 3> spot{at[0] - (t.written[i].goal[0] - t.target[0]), at[1] - (t.written[i].goal[1] - t.target[1]),
+                                                    at[2] - (t.written[i].goal[2] - t.target[2])};
+                    std::vector<unsigned> which;
+                    unsigned visited = 0;
+                    const auto found = position_scan(t.pick, {spot}, which, visited);
+                    unsigned added = 0;
+                    for (const auto &hit : found)
+                    {
+                        if (std::any_of(t.written.begin(), t.written.end(), [&](const ScanHit &w) { return w.at == hit.at; }))
+                            continue;
+                        std::array<float, 3> now{};
+                        if (!read(hit.at, now))
+                            continue;
+                        const std::array<float, 3> goal{t.target[0] + now[0] - spot[0], t.target[1] + now[1] - spot[1], t.target[2] + now[2] - spot[2]};
+                        if (!write(hit.at, goal))
+                            continue;
+                        t.written.push_back(hit);
+                        t.written.back().goal = goal;
+                        t.moved.push_back(false);
+                        ++added;
+                        std::cout << "Nitro test:   new copy " << hit.path << "\n";
+                    }
+                    std::cout << "Nitro test: the game pulled it back to " << triple(spot) << " after " << elapsed << " ms; searched "
+                              << visited << " objects and moved " << added << " more copies that still held that spot\n" << std::flush;
+                    break;
+                }
             // hold: put back any copy the game moved, logging the first move of each
             for (unsigned i = 0; i < t.written.size(); ++i)
             {
