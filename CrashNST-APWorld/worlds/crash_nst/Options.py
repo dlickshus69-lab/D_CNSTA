@@ -225,8 +225,8 @@ class SpinPlacement(Choice):
 
     early: in your first checks (your easiest starting level or a starting gimmick stage).
     early_to_mid: never in your starting levels. It goes on a random check you can reach without Spin
-    (a gimmick stage, so a hog, polar bear, jetpack, vehicle or scuba level) that needs at least one
-    level you unlock along the way, so it turns up somewhere in the early-to-mid game. Logic is the
+    (a gimmick stage, so a hog, polar bear, jetpack, vehicle or scuba level) behind unlocks you find
+    along the way (two or more when the seed allows), so it usually turns up a few rounds of unlocks in. Logic is the
     same either way, so the seed is always beatable. If the seed has no such check (no gimmick stages
     in your levels), Spin is placed early.
     """
@@ -287,7 +287,7 @@ class SlowTrapWeight(Range):
     """How often Slow Traps appear compared to other traps. Crash can only walk for the Trap Duration:
     the stick and d-pad become a steady walking tilt. Controller only (keys cannot be half pressed).
     No effect in gimmick levels (hog, polar bear, jetpack, Crash 3 vehicles), the Crash 2 jet-board
-    levels or the chase levels Boulders, Boulder Dash, Bone Yard and Dino Might!"""
+    levels or the chase levels Boulders, Boulder Dash, Crash Dash, Bone Yard and Dino Might!"""
 
     display_name = "Slow Trap Weight"
     range_start = 0

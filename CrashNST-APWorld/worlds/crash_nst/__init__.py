@@ -644,7 +644,9 @@ class CrashWorld(World):
         )
         if not candidates:
             return None
-        name, missing = self.random.choice(candidates)
+        # prefer spots behind two or more unlocks, so Spin is not found straight after the starting levels
+        deeper = [candidate for candidate in candidates if len(candidate[1]) >= 2]
+        name, missing = self.random.choice(deeper or candidates)
         return self.multiworld.get_location(name, self.player), Counter(missing), open_now
 
     def create_items(self):

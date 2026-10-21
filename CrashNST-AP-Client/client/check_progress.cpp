@@ -107,8 +107,8 @@ std::string LevelProgress::collectible_text() const
 }
 std::string LevelProgress::label_text() const
 {
-    // found/total, then how many more the current items reach
-    auto result = "Checks: " + std::to_string(done) + "/" + std::to_string(total);
+    // found/total, then how many more the current items reach; green or red like the top-left panel
+    auto result = mark(*this) + "Checks: " + std::to_string(done) + "/" + std::to_string(total);
     if (done < total && logic_known)
         result += available ? " (" + std::to_string(available) + " available)" : " (none available)";
     return result;

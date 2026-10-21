@@ -1364,7 +1364,7 @@ namespace
                                                                                  : "Crashsanity: vanilla controls (style not applied)";
                     float width = std::max(r.text_width(current->title), r.text_width(crashsanity));
                     for (const auto &line : lines)
-                        width = std::max(width, r.text_width(line));
+                        width = std::max(width, r.text_width(!line.empty() && (line[0] == '\x01' || line[0] == '\x02') ? line.substr(1) : line));
                     const auto rows = 1 + lines.size() + (crashsanity.empty() ? 0 : 1);
                     r.quad(16, 16, std::min<float>(std::max(width + 16, 300.0f), r.width - 32), 22.0f * rows + 6, 0xbb181818);
                     r.text(22, 20, current->title, 0xffeeeeee);
@@ -1420,9 +1420,14 @@ namespace
                         }
                     }
                     const std::string status = target->all_done ? " (All Done)" : "";
+                    // line two: checks, green or red by its leading mark
+                    std::string checks = target->counts;
+                    const unsigned checks_color = checks.empty() ? 0xff20d8ff : checks[0] == '\x01' ? 0xff4040ff : checks[0] == '\x02' ? 0xff40e040 : 0xff20d8ff;
+                    if (!checks.empty() && (checks[0] == '\x01' || checks[0] == '\x02'))
+                        checks.erase(0, 1);
                     const float title_width = r.text_width(target->title);
                     const float label_height = extra ? 68 : 46;
-                    const float label_width = std::min<float>(std::max({title_width + r.text_width(status), r.text_width(target->counts), r.text_width(plain)}) + 12, 480);
+                    const float label_width = std::min<float>(std::max({title_width + r.text_width(status), r.text_width(checks), r.text_width(plain)}) + 12, 480);
                     for (const auto &previous : labels)
                         if (std::abs(previous[0] - center) < (previous[3] + label_width) / 2 &&
                             y < previous[1] + previous[2] + 2 && y + label_height > previous[1] - 2)
@@ -1435,7 +1440,7 @@ namespace
                     r.text(x + 6, y, target->title, 0xff20d8ff);
                     if (!status.empty())
                         r.text(x + 6 + title_width, y, status, 0xff40e040);
-                    r.text(x + 6, y + 22, target->counts, 0xff20d8ff);
+                    r.text(x + 6, y + 22, checks, checks_color);
                     if (extra)
                     {
                         float piece_x = x + 6;

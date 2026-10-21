@@ -68,7 +68,7 @@ namespace ingame
     struct Level
     {
         char key[5]{}, title[160]{}, counts[64]{}, collectible_counts[128]{};
-        char detail[256]{}; // the top-left level panel: spelled-out lines separated by \n
+        char detail[320]{}; // the top-left level panel: spelled-out lines separated by \n
         unsigned char all_done = 0; // hub label: every check in the level found, shown as (All Done) after its name
         unsigned style = 0;
     };

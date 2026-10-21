@@ -3278,7 +3278,8 @@ namespace ingame
     }
     bool slow_trap_exempt()
     {
-        static const std::set<std::string> chases{"L104", "L113", "L304", "L311"}; // Boulders, Boulder Dash, Bone Yard, Dino Might!
+        // Boulders, Boulder Dash, Crash Dash, Bone Yard, Dino Might!
+        static const std::set<std::string> chases{"L104", "L113", "L205", "L304", "L311"};
         const auto key = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
         return trap_gimmick_level(key) || chases.count(key);
     }
