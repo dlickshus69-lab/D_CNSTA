@@ -35,6 +35,10 @@ namespace ingame
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
     inline bool valid_tint_opacity(float opacity) { return std::isfinite(opacity) && opacity >= 0 && opacity <= 1; }
+    // Slow Trap stick tilt: share of a full push. The game ignores small tilts on the ground, so this has to sit
+    // above its dead zone and below running. /slow_tilt tunes it per computer.
+    constexpr float default_slow_tilt = 0.6f;
+    inline bool valid_slow_tilt(float tilt) { return std::isfinite(tilt) && tilt >= 0.2f && tilt <= 1; }
     inline std::array<float, 4> tint_blend(unsigned color, float opacity)
     {
         // HDR color compensates for crate textures and lighting to approximate pale cyan (#8FD8D8)
@@ -109,11 +113,14 @@ namespace ingame
         unsigned nitro_probe_request = 0, nitro_probe_ack = 0;
         // /nitro_test (experimental): moves the nearest Nitro crate next to Crash once
         unsigned nitro_test_request = 0, nitro_test_ack = 0;
+        // /nitro_scan (read-only): lists every copy of the nearest Nitro's position; /nitro_test then moves them too
+        unsigned nitro_scan_request = 0, nitro_scan_ack = 0;
         unsigned c3_buttons_ready = 0;
         std::uint64_t c3_buttons_active = 0;
         float box_half_size = 50;
         std::array<unsigned, 3> hub_label_distances = default_hub_distances;
         float tint_opacity = default_tint_opacity;
+        float slow_tilt = default_slow_tilt;
         unsigned command_read = 0, command_write = 0;
         char status[256]{}, binding[256]{}, error[256]{};
         char campaign_counts[3][48]{};
@@ -185,7 +192,7 @@ namespace ingame
               s.completion_bytes <= sizeof(s.completion) && s.item_start <= s.location_start &&
               s.location_start <= s.completion_bytes && s.command_write - s.command_read <= max_commands &&
               std::isfinite(s.box_half_size) && s.box_half_size >= 10 && s.box_half_size <= 250 &&
-              std::all_of(s.hub_label_distances.begin(), s.hub_label_distances.end(), [](unsigned distance) { return distance <= max_hub_distance; }) && valid_tint_opacity(s.tint_opacity)))
+              std::all_of(s.hub_label_distances.begin(), s.hub_label_distances.end(), [](unsigned distance) { return distance <= max_hub_distance; }) && valid_tint_opacity(s.tint_opacity) && valid_slow_tilt(s.slow_tilt)))
             return false;
         const auto terminated = [](const auto &text)
         { return std::memchr(text, 0, sizeof(text)) != nullptr; };

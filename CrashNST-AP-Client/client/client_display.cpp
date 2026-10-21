@@ -66,6 +66,7 @@ void ClientRuntime::update_bridge(AP_ConnectionStatus status)
             box_markers = std::make_unique<BoxMarkers>(pid, !standalone::save_ready(), box_marker_mode);
             box_markers->hub_distance(hub_label_distances);
             box_markers->tint_opacity(tint_opacity);
+            box_markers->slow_tilt(slow_tilt);
             names_loaded = false;
             gem_refresh.reset();
             for (const auto &line : feed_history)

@@ -82,7 +82,7 @@ namespace ingame
     {
         static const std::vector<std::string> names{
             "/help", "/server", "/port", "/slot", "/password", "/connect", "/disconnect", "/status", "/quit",
-            "/crashsanity", "/markers", "/boxmarkers", "/outoflogic", "/nitro_probe", "/nitro_test", "/hubdistance", "/hubdistance_c1", "/hubdistance_c2", "/hubdistance_c3", "/tint_opacity", "/clear", "!help", "!license", "!options", "!admin", "!players", "!getitem", "!hint", "!hint_location", "!remaining",
+            "/crashsanity", "/markers", "/boxmarkers", "/outoflogic", "/nitro_probe", "/nitro_scan", "/nitro_test", "/hubdistance", "/hubdistance_c1", "/hubdistance_c2", "/hubdistance_c3", "/tint_opacity", "/slow_tilt", "/slow_test", "/clear", "!help", "!license", "!options", "!admin", "!players", "!getitem", "!hint", "!hint_location", "!remaining",
             "!missing", "!checked", "!status", "!release", "!collect", "!countdown", "!alias"};
         return names;
     }
@@ -209,6 +209,22 @@ namespace ingame
         if (end != value.size() || !valid_tint_opacity(opacity))
             throw std::invalid_argument("Use /tint_opacity 0..1");
         return opacity;
+    }
+    float slow_tilt(const std::string &value)
+    {
+        std::size_t end = 0;
+        float tilt = 0;
+        try
+        {
+            tilt = std::stof(value, &end);
+        }
+        catch (const std::exception &)
+        {
+            throw std::invalid_argument("Use /slow_tilt 0.2..1");
+        }
+        if (end != value.size() || !valid_slow_tilt(tilt))
+            throw std::invalid_argument("Use /slow_tilt 0.2..1");
+        return tilt;
     }
     unsigned hub_distance(const std::string &value)
     {

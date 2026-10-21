@@ -13,6 +13,7 @@ namespace ingame
     unsigned box_marker_mode(const std::string &name);
     unsigned hub_distance(const std::string &value);
     float tint_opacity(const std::string &value);
+    float slow_tilt(const std::string &value);
     const char *box_marker_mode_name(unsigned mode);
     bool valid_server(const std::string &server);
     struct ConsoleInput

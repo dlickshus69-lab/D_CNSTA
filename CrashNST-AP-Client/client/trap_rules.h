@@ -97,12 +97,11 @@ namespace ingame
         return (key >= 0x25 && key <= 0x28) || key == 'W' || key == 'A' || key == 'S' || key == 'D';
     }
 
-    // Slow Trap: Crash walks. Any stick push becomes a steady walking tilt in the same direction, and the
-    // d-pad becomes that same tilt on the stick. A constant tilt never crosses the game's walk/run threshold,
-    // so there is no jitter. The keyboard is left alone: keys cannot be half pressed.
-    inline constexpr float slow_walk_tilt = 0.40f;
+    // Slow Trap: Crash walks. Any stick push becomes a steady tilt (share of a full push) in the same direction,
+    // and the d-pad becomes that same tilt on the stick. A constant tilt never crosses the game's walk/run
+    // threshold, so there is no jitter. The keyboard is left alone: keys cannot be half pressed.
     inline constexpr float stick_deadzone = 7849; // XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE
-    inline void walk_stick(std::int16_t &x, std::int16_t &y, std::uint16_t &buttons)
+    inline void walk_stick(std::int16_t &x, std::int16_t &y, std::uint16_t &buttons, float tilt)
     {
         float fx = x, fy = y, length = std::hypot(fx, fy);
         if (length <= stick_deadzone)
@@ -115,7 +114,7 @@ namespace ingame
         buttons = static_cast<std::uint16_t>(buttons & ~0xFu);
         if (length == 0)
             return; // neither is pushed: leave the resting stick as it is
-        const float scale = slow_walk_tilt * 32767 / length;
+        const float scale = tilt * 32767 / length;
         x = static_cast<std::int16_t>(std::lround(fx * scale));
         y = static_cast<std::int16_t>(std::lround(fy * scale));
     }

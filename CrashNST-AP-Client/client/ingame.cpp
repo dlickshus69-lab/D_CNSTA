@@ -33,6 +33,7 @@ namespace
     std::atomic_bool startup_mode{false}, startup_check{false};
     // input trap end times (GetTickCount64), copied from the shared block each tick
     std::atomic<std::uint64_t> reverse_until{0}, freeze_until{0}, slippery_until{0}, slow_until{0};
+    std::atomic<float> walk_tilt{default_slow_tilt};
     bool frozen() { return active && timer_active(freeze_until, GetTickCount64()); }
     bool reversed() { return active && timer_active(reverse_until, GetTickCount64()); }
     bool slippery() { return active && timer_active(slippery_until, GetTickCount64()); }
@@ -319,7 +320,7 @@ namespace
             if (slowed())
             {
                 std::uint16_t buttons = pad.wButtons;
-                walk_stick(pad.sThumbLX, pad.sThumbLY, buttons);
+                walk_stick(pad.sThumbLX, pad.sThumbLY, buttons, walk_tilt);
                 pad.wButtons = buttons;
             }
         }
@@ -1796,6 +1797,7 @@ extern "C" __declspec(dllexport) void NST_Tick()
                 slippery_until = shared->slippery_until;
                 // Slow has no effect in gimmick and chase levels
                 slow_until = slow_trap_exempt() ? 0 : shared->slow_until;
+                walk_tilt = shared->slow_tilt;
                 update_gameplay(*shared);
             }
             else

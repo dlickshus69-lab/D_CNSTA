@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <iostream>
+#include "trap_rules.h"
 void ClientRuntime::queue_ap_packet(std::string raw)
 {
     std::lock_guard<std::mutex> lock(state_mutex);
@@ -160,6 +161,8 @@ int ClientRuntime::initialize()
                     throw std::runtime_error("Invalid tint opacity");
                 tint_opacity = config["tint_opacity"].asFloat();
             }
+            if (config.isMember("slow_tilt") && config["slow_tilt"].isNumeric() && ingame::valid_slow_tilt(config["slow_tilt"].asFloat()))
+                slow_tilt = config["slow_tilt"].asFloat();
         }
     }
     catch (const std::exception &e)
@@ -189,7 +192,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /slow_test | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -322,6 +325,35 @@ void ClientRuntime::handle_commands()
                 }
                 print_console("Tint opacity: " + std::to_string(tint_opacity) + ". Use /tint_opacity 0..1 (default 0.75).");
             }
+            else if (command == "/slow_tilt")
+            {
+                if (!argument.empty())
+                {
+                    const auto tilt = ingame::slow_tilt(argument);
+                    auto config = std::filesystem::exists(display_file) ? read_state_json(display_file)
+                                                                        : Json::Value(Json::objectValue);
+                    config["slow_tilt"] = tilt;
+                    std::filesystem::create_directories(display_file.parent_path());
+                    write_state_json(display_file, config);
+                    slow_tilt = tilt;
+                    if (box_markers)
+                        box_markers->slow_tilt(tilt);
+                }
+                print_console("Slow Trap stick tilt: " + std::to_string(static_cast<int>(slow_tilt * 100 + 0.5f)) +
+                              "% of a full push. Use /slow_tilt 0.2..1 (default 0.6): higher if Crash will not walk, "
+                              "lower if he runs. /slow_test tries it for 30 seconds.");
+            }
+            else if (command == "/slow_test")
+            {
+                if (box_markers)
+                {
+                    box_markers->apply_trap(ingame::TrapSlow, 30);
+                    print_console("Slow test: 30 seconds of Slow (stick tilt " + std::to_string(static_cast<int>(slow_tilt * 100 + 0.5f)) +
+                                  "%). Not sent to AP. Crash should walk; adjust with /slow_tilt.");
+                }
+                else
+                    print_console("Slow test needs the in-game adapter. Load into a level first.");
+            }
             else if (command == "/hubdistance" || command == "/hubdistance_c1" || command == "/hubdistance_c2" || command == "/hubdistance_c3")
             {
                 const int hub = command == "/hubdistance" ? -1 : command.back() - '1';
@@ -382,6 +414,16 @@ void ClientRuntime::handle_commands()
                 }
                 else
                     print_console("Nitro probe needs the in-game adapter. Load into a level first.");
+            }
+            else if (command == "/nitro_scan")
+            {
+                if (box_markers)
+                {
+                    box_markers->request_nitro_scan();
+                    print_console("Nitro scan requested (read-only, changes nothing). Restart the level first if you already ran /nitro_test.");
+                }
+                else
+                    print_console("Nitro scan needs the in-game adapter. Load into a level first.");
             }
             else if (command == "/nitro_test")
             {

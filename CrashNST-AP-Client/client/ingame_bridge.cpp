@@ -69,6 +69,7 @@ BoxMarkers::BoxMarkers(DWORD pid, bool startup, unsigned marker_mode) : startup_
         shared_->box_half_size = 50;
         shared_->hub_label_distances = ingame::default_hub_distances;
         shared_->tint_opacity = ingame::default_tint_opacity;
+        shared_->slow_tilt = ingame::default_slow_tilt;
         shared_->relic_min_rank = 1;
         if (const auto size = std::getenv("CRASH_NST_MARKER_SIZE"))
         {
@@ -439,6 +440,12 @@ void BoxMarkers::request_nitro_test()
     ++shared_->nitro_test_request;
     unlock();
 }
+void BoxMarkers::request_nitro_scan()
+{
+    lock();
+    ++shared_->nitro_scan_request;
+    unlock();
+}
 void BoxMarkers::receive_death()
 {
     lock();
@@ -475,6 +482,14 @@ void BoxMarkers::hub_distance(const std::array<unsigned, 3> &distances)
     lock();
     shared_->hub_label_distances = distances;
     ++shared_->revision;
+    unlock();
+}
+void BoxMarkers::slow_tilt(float tilt)
+{
+    if (!ingame::valid_slow_tilt(tilt))
+        throw std::invalid_argument("Invalid slow tilt");
+    lock();
+    shared_->slow_tilt = tilt;
     unlock();
 }
 void BoxMarkers::tint_opacity(float opacity)

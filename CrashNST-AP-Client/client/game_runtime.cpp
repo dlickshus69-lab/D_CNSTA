@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <sstream>
 #include <set>
+#include <deque>
 #include <string_view>
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -1261,30 +1262,25 @@ namespace ingame
                       << std::flush;
         }
         // /nitro_test research (experimental): move the nearest live Nitro crate next to Crash by rewriting
-        // only its entity position and render-model translation. No game code is called. Restarting the level
-        // restores the crate. A follow-up line after one second shows whether the game kept the new position.
-        struct NitroTest
-        {
-            Address entity = 0, model = 0;
-            std::uint64_t check_at = 0;
-            std::array<float, 3> target{};
-        } nitro_test_state;
+        // its entity position, its render-model translation and every copy /nitro_scan found. No game code is
+        // called. Restarting the level restores the crate. A follow-up after one second shows what the game kept.
         std::string triple(const std::array<float, 3> &v)
         {
             return std::to_string(v[0]) + ", " + std::to_string(v[1]) + ", " + std::to_string(v[2]);
         }
-        void nitro_test()
+        bool same_place(const float *a, const std::array<float, 3> &b, float tolerance)
         {
-            const auto actor = player();
-            std::array<float, 3> crash{};
-            if (!actor || !read(actor + 32, crash))
-            {
-                std::cout << "Nitro test: Crash not found. Run it inside a level.\n" << std::flush;
-                return;
-            }
-            Address entity = 0, model = 0;
-            float best = 0;
-            std::string chosen;
+            return std::abs(a[0] - b[0]) < tolerance && std::abs(a[1] - b[1]) < tolerance && std::abs(a[2] - b[2]) < tolerance;
+        }
+        struct NitroPick
+        {
+            Address owner = 0, entity = 0, model = 0;
+            float distance = 0;
+            std::string name;
+        };
+        NitroPick nearest_nitro(const std::array<float, 3> &crash)
+        {
+            NitroPick pick;
             for (const auto owner : event_owners())
             {
                 const auto name = string(value<Address>(owner + 128));
@@ -1296,61 +1292,190 @@ namespace ingame
                     continue;
                 const float d = std::sqrt((at[0] - crash[0]) * (at[0] - crash[0]) + (at[1] - crash[1]) * (at[1] - crash[1]) +
                                           (at[2] - crash[2]) * (at[2] - crash[2]));
-                if (!entity || d < best)
-                    entity = crate, model = crate_model(crate), best = d, chosen = name;
+                if (!pick.entity || d < pick.distance)
+                    pick = {owner, crate, crate_model(crate), d, name};
             }
-            if (!entity)
+            return pick;
+        }
+        Address module_end()
+        {
+            static const Address end = []
+            {
+                const auto nt = base() + value<std::int32_t>(base() + 0x3c);
+                return base() + value<std::uint32_t>(nt + 24 + 56); // OptionalHeader.SizeOfImage
+            }();
+            return end;
+        }
+        std::string hex(unsigned offset)
+        {
+            std::ostringstream out;
+            out << "+0x" << std::hex << offset;
+            return out.str();
+        }
+        // /nitro_scan research (read-only): from the crate's owner, entity and models, follow pointers up to three
+        // levels deep and list every place that holds the crate's position as three floats.
+        struct ScanHit
+        {
+            Address at;
+            std::string path;
+        };
+        struct NitroScan
+        {
+            Address entity = 0;
+            std::vector<ScanHit> hits;
+        } nitro_scan_state;
+        void nitro_scan()
+        {
+            const auto actor = player();
+            std::array<float, 3> crash{};
+            if (!actor || !read(actor + 32, crash))
+            {
+                std::cout << "Nitro scan: Crash not found. Run it inside a level.\n" << std::flush;
+                return;
+            }
+            const auto pick = nearest_nitro(crash);
+            if (!pick.entity)
+            {
+                std::cout << "Nitro scan: no live Nitro crate in this level.\n" << std::flush;
+                return;
+            }
+            std::vector<std::array<float, 3>> targets(1);
+            read(pick.entity + 32, targets[0]);
+            Matrix matrix{};
+            if (pick.model && read(pick.model + 48, matrix) && !same_place(&matrix[12], targets[0], 0.05f))
+                targets.push_back({matrix[12], matrix[13], matrix[14]});
+            struct Node
+            {
+                Address at;
+                std::string path;
+                unsigned depth;
+            };
+            constexpr unsigned max_objects = 20000, max_depth = 3, span = 512;
+            std::deque<Node> queue;
+            std::set<Address> seen, hit_at;
+            const std::pair<Address, const char *> roots[]{{pick.owner, "owner"}, {pick.entity, "entity"},
+                                                           {value<Address>(pick.entity + 176), "model component"}, {pick.model, "model"}};
+            for (const auto &[root, label] : roots)
+                if (root && seen.insert(root).second)
+                    queue.push_back({root, label, 0});
+            std::vector<ScanHit> hits;
+            unsigned visited = 0;
+            const auto image_start = base(), image_end = module_end();
+            std::vector<unsigned char> bytes(span);
+            while (!queue.empty() && visited < max_objects)
+            {
+                const auto node = std::move(queue.front());
+                queue.pop_front();
+                SIZE_T got = 0;
+                unsigned size = span;
+                if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(node.at), bytes.data(), size, &got) || got != size)
+                {
+                    size = 64;
+                    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(node.at), bytes.data(), size, &got) || got != size)
+                        continue;
+                }
+                ++visited;
+                for (unsigned o = 0; o + 12 <= size; o += 4)
+                {
+                    float v[3];
+                    std::memcpy(v, bytes.data() + o, sizeof(v));
+                    for (const auto &t : targets)
+                        if (same_place(v, t, 0.05f))
+                        {
+                            if (hit_at.insert(node.at + o).second)
+                            {
+                                float w = 0;
+                                if (o + 16 <= size)
+                                    std::memcpy(&w, bytes.data() + o + 12, sizeof(w));
+                                hits.push_back({node.at + o, node.path + " " + hex(o) + (w == 1.0f ? " (w 1)" : "")});
+                            }
+                            break;
+                        }
+                }
+                if (node.depth >= max_depth)
+                    continue;
+                for (unsigned o = 0; o + 8 <= size; o += 8)
+                {
+                    Address p = 0;
+                    std::memcpy(&p, bytes.data() + o, sizeof(p));
+                    if (p < 0x10000 || p > 0x7ffffffeffffULL || (p & 7) || (p >= image_start && p < image_end) || !seen.insert(p).second)
+                        continue;
+                    queue.push_back({p, node.path + " " + hex(o) + " ->", node.depth + 1});
+                }
+            }
+            std::cout << "Nitro scan: " << pick.name << " (" << static_cast<int>(pick.distance) << " from Crash) at " << triple(targets[0])
+                      << ": searched " << visited << " objects, " << hits.size() << " copies of its position\n";
+            for (unsigned i = 0; i < hits.size() && i < 40; ++i)
+                std::cout << "Nitro scan:   " << hits[i].path << "\n";
+            std::cout << "Nitro scan done. Nothing was changed. /nitro_test now also moves these copies.\n" << std::flush;
+            nitro_scan_state = {pick.entity, std::move(hits)};
+        }
+        struct NitroTest
+        {
+            std::uint64_t check_at = 0;
+            std::array<float, 3> target{};
+            std::vector<ScanHit> written;
+        } nitro_test_state;
+        void nitro_test()
+        {
+            const auto actor = player();
+            std::array<float, 3> crash{};
+            if (!actor || !read(actor + 32, crash))
+            {
+                std::cout << "Nitro test: Crash not found. Run it inside a level.\n" << std::flush;
+                return;
+            }
+            const auto pick = nearest_nitro(crash);
+            if (!pick.entity)
             {
                 std::cout << "Nitro test: no live Nitro crate in this level.\n" << std::flush;
                 return;
             }
             std::array<float, 3> before{};
-            read(entity + 32, before);
-            // where else is this position stored inside the entity? (read-only search of its first 512 bytes)
-            std::string copies;
-            for (unsigned offset = 0; offset + 12 <= 512; offset += 4)
-            {
-                std::array<float, 3> v{};
-                if (read(entity + offset, v) && std::abs(v[0] - before[0]) < 0.01f && std::abs(v[1] - before[1]) < 0.01f &&
-                    std::abs(v[2] - before[2]) < 0.01f)
-                    copies += (copies.empty() ? "+" : ", +") + std::to_string(offset);
-            }
+            read(pick.entity + 32, before);
+            std::vector<ScanHit> copies{{pick.entity + 32, "entity +0x20"}};
             Matrix matrix{};
-            const bool has_matrix = model && read(model + 48, matrix);
-            std::cout << "Nitro test: " << chosen << " (" << static_cast<int>(best) << " from Crash) entity at " << triple(before)
-                      << ", position copies at entity " << (copies.empty() ? "(none)" : copies) << ", model "
-                      << (has_matrix ? "translation " + std::to_string(matrix[12]) + ", " + std::to_string(matrix[13]) + ", " + std::to_string(matrix[14])
-                                     : std::string("not found"))
-                      << "\n";
+            if (pick.model && read(pick.model + 48, matrix))
+                copies.push_back({pick.model + 48 + 48, "model +0x60"});
+            if (nitro_scan_state.entity == pick.entity)
+                for (const auto &hit : nitro_scan_state.hits)
+                    if (std::none_of(copies.begin(), copies.end(), [&](const ScanHit &c) { return c.at == hit.at; }))
+                        copies.push_back(hit);
             // 150 units from Crash along the first axis, at Crash's height
             const std::array<float, 3> target{crash[0] + 150, crash[1], crash[2]};
-            const bool moved_entity = write(entity + 32, target);
-            bool moved_model = false;
-            if (has_matrix)
+            std::vector<ScanHit> written;
+            unsigned skipped = 0;
+            for (const auto &copy : copies)
             {
-                matrix[12] = target[0], matrix[13] = target[1], matrix[14] = target[2];
-                moved_model = write(model + 48, matrix);
+                // only overwrite a copy that still holds the crate's position
+                std::array<float, 3> now{};
+                const bool holds = read(copy.at, now) &&
+                                   (same_place(now.data(), before, 0.05f) || (matrix[15] == 1.0f && same_place(now.data(), {matrix[12], matrix[13], matrix[14]}, 0.05f)));
+                if (holds && write(copy.at, target))
+                    written.push_back(copy);
+                else
+                    ++skipped;
             }
-            nitro_test_state = {entity, has_matrix ? model : 0, GetTickCount64() + 1000, target};
-            std::cout << "Nitro test: moved to " << triple(target) << " (entity " << (moved_entity ? "written" : "write failed")
-                      << ", model " << (moved_model ? "written" : "skipped") << "). Look around Crash, then touch it carefully.\n"
-                      << std::flush;
+            nitro_test_state = {GetTickCount64() + 1000, target, written};
+            std::cout << "Nitro test: " << pick.name << " (" << static_cast<int>(pick.distance) << " from Crash) moved to " << triple(target)
+                      << ": " << written.size() << " copies written" << (skipped ? ", " + std::to_string(skipped) + " skipped (no longer matched)" : "")
+                      << (nitro_scan_state.entity == pick.entity ? "" : ". Tip: run /nitro_scan first to move every copy")
+                      << ". Look around Crash, then touch it carefully.\n" << std::flush;
         }
         void nitro_test_followup()
         {
             auto &t = nitro_test_state;
-            if (!t.entity || GetTickCount64() < t.check_at)
+            if (!t.check_at || GetTickCount64() < t.check_at)
                 return;
-            std::array<float, 3> now{};
-            Matrix matrix{};
-            const bool entity_ok = read(t.entity + 32, now);
-            const bool model_ok = t.model && read(t.model + 48, matrix);
-            const auto kept = [&](float a, float b) { return std::abs(a - b) < 1.0f; };
-            std::cout << "Nitro test after 1 second: entity " << (entity_ok ? triple(now) : std::string("gone"))
-                      << (entity_ok && kept(now[0], t.target[0]) && kept(now[1], t.target[1]) && kept(now[2], t.target[2]) ? " (kept)" : " (changed back or moved)")
-                      << ", model " << (model_ok ? std::to_string(matrix[12]) + ", " + std::to_string(matrix[13]) + ", " + std::to_string(matrix[14]) : std::string("n/a"))
-                      << (model_ok && kept(matrix[12], t.target[0]) && kept(matrix[13], t.target[1]) && kept(matrix[14], t.target[2]) ? " (kept)" : (model_ok ? " (changed back or moved)" : ""))
-                      << "\n" << std::flush;
+            std::string kept, reverted;
+            for (const auto &copy : t.written)
+            {
+                std::array<float, 3> now{};
+                const bool held = read(copy.at, now) && same_place(now.data(), t.target, 1.0f);
+                (held ? kept : reverted) += (((held ? kept : reverted).empty()) ? "" : "; ") + copy.path;
+            }
+            std::cout << "Nitro test after 1 second: kept [" << (kept.empty() ? "none" : kept) << "], changed back ["
+                      << (reverted.empty() ? "none" : reverted) << "]\n" << std::flush;
             t = {};
         }
         void update_c3_buttons(Shared &state, const std::string &zone)
@@ -1590,6 +1715,11 @@ namespace ingame
         {
             state.nitro_probe_ack = state.nitro_probe_request;
             nitro_probe();
+        }
+        if (state.nitro_scan_request != state.nitro_scan_ack)
+        {
+            state.nitro_scan_ack = state.nitro_scan_request;
+            nitro_scan();
         }
         if (state.nitro_test_request != state.nitro_test_ack)
         {

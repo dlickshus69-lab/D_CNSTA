@@ -37,6 +37,7 @@ public:
     void request_nitro_probe();
     // research (experimental): move the nearest Nitro crate next to Crash
     void request_nitro_test();
+    void request_nitro_scan();
     void c3_buttons(bool ready, const std::set<std::string> &allowed = {});
     unsigned collectibles(std::vector<ingame::Collectible> config, unsigned relic_min_rank = 1);
     std::vector<ingame::CollectibleObservation> collectible_observations();
@@ -53,6 +54,7 @@ public:
     void marker_mode(unsigned mode);
     void hub_distance(const std::array<unsigned, 3> &distances);
     void tint_opacity(float opacity);
+    void slow_tilt(float tilt);
     bool toggle(const std::string &target, const std::string &value);
     void stop(bool handover = false);
 

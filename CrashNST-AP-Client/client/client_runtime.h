@@ -111,6 +111,7 @@ class ClientRuntime
     bool out_of_logic_markers = false;
     std::array<unsigned, 3> hub_label_distances = ingame::default_hub_distances;
     float tint_opacity = ingame::default_tint_opacity;
+    float slow_tilt = ingame::default_slow_tilt;
 
     std::string marker_error;
     std::chrono::steady_clock::time_point next_marker_attach = std::chrono::steady_clock::now();
