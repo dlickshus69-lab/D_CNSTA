@@ -842,6 +842,13 @@ namespace
         emit({0x48, 0x8b, 0xc1, 0x48, 0xc7, 0x43, 8, 0, 0, 0, 0, 0x48, 0xc7, 0x43, 16, 0, 0, 0, 0,
               0x48, 0xc7, 0x83, 144, 0, 0, 0, 0, 0, 0, 0, 0x48, 0xc7, 0x83, 152, 0, 0, 0, 0, 0, 0, 0,
               0xff, 0x83, 136, 0, 0, 0}); // Acknowledgement counts actual redirects, not attachment.
+        // Crash 1: the map spawn asks for the previous entrance next. Answer with the client's chosen start entrance
+        // (+168) so Crash stands at the earliest open level instead of the save's last map node.
+        emit({0x48, 0x8b, 0x93, 168, 0, 0, 0, 0x48, 0x85, 0xd2}); // mov rdx,[rbx+168]; test rdx,rdx
+        done.push_back(branch(0x84));
+        emit({0x48, 0x3b, 0x4b, 32}); // cmp rcx,[rbx+32] (the Crash 1 map)
+        done.push_back(branch(0x85));
+        emit({0x48, 0x89, 0x93, 144, 0, 0, 0, 0x48, 0x89, 0x8b, 152, 0, 0, 0}); // [rbx+144]=rdx; [rbx+152]=rcx
         for (auto at : done)
         {
             const auto delta = static_cast<std::int32_t>(c.size() - at - 4);
@@ -973,7 +980,8 @@ LevelRouting::LevelRouting(DWORD pid, const std::map<std::string, std::string> &
             put(256 + count * 24, zone_for(source));
             put(264 + count * 24, zone_for(destination));
             put(272 + count * 24, zone_for("L" + source.substr(1, 1) + "00"));
-            entrances_.push_back({source, zone_for(source), zone_for(destination), zone_for("L" + source.substr(1, 1) + "00")});
+            entrances_.push_back({source, zone_for(source), zone_for(destination), zone_for("L" + source.substr(1, 1) + "00"), false,
+                                  source[1] == '1' ? read<int>(process_, zone_for(source) + 344) : -1});
             ++count;
         }
         std::memcpy(data.data(), &count, 4);
@@ -1113,17 +1121,22 @@ void LevelRouting::lock_entrances(const std::set<std::string> &locked)
         entrance.locked = lock;
     }
 }
-void LevelRouting::prefer_hub_spawn(const std::string &source)
+void LevelRouting::c1_start(const std::set<std::string> &locked)
 {
-    // the hub-spawn query returns the entrance at +144 when the hub being entered matches +152
-    const auto entrance = std::find_if(entrances_.begin(), entrances_.end(), [&](const Entrance &e) { return e.source == source; });
-    if (entrance == entrances_.end() || !installed_ || read<unsigned char>(process_, state() + 4) != 1)
+    if (!installed_ || read<unsigned char>(process_, state() + 4) != 1)
         return;
-    const auto previous = read<std::uintptr_t>(process_, state() + 144), hub = read<std::uintptr_t>(process_, state() + 152);
-    if (previous == entrance->source_zone && hub == entrance->hub)
+    // the open Crash 1 entrance earliest on the map. Stormy Ascent (-1) has no map spot.
+    std::uintptr_t start = 0;
+    int first = 0;
+    for (const auto &entrance : entrances_)
+        if (entrance.source[1] == '1' && entrance.progression >= 0 && !locked.count(entrance.source) &&
+            (!start || entrance.progression < first))
+            start = entrance.source_zone, first = entrance.progression;
+    if (start == c1_start_)
         return;
-    write(process_, state() + 144, previous, entrance->source_zone);
-    write(process_, state() + 152, hub, entrance->hub);
+    // the campaign-start hook copies +168 into the previous-entrance slot when Crash 1's map is the destination
+    write(process_, state() + 168, c1_start_, start);
+    c1_start_ = start;
 }
 std::string LevelRouting::refused_entrance() const
 {

@@ -289,8 +289,8 @@ class DarknessTrapWeight(Range):
 
 
 class NitroTrapWeight(Range):
-    """How often Nitro Traps appear compared to other traps. The game spawns a real Nitro crate a few
-    steps behind Crash on the path he just took. It only happens in levels that have Nitro crates (it
+    """How often Nitro Traps appear compared to other traps. The game spawns a real Nitro crate about
+    2-3 crates ahead of Crash in the direction he is running. It only happens in levels that have Nitro crates (it
     borrows one of their spawners) and never in gimmick levels; until then it waits without holding up
     other traps."""
 

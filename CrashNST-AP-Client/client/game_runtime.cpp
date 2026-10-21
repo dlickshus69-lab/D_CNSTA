@@ -1711,56 +1711,136 @@ namespace ingame
                 t = {};
             }
         }
-        // Nitro Trap: the game spawns a real Nitro a few steps behind Crash. A Nitro spawner's routine only runs
+        // Nitro Trap: the game spawns a real Nitro ahead of Crash. A Nitro spawner's routine only runs
         // while its crate is out, so the farthest ready spawner's crate is set aside, the spawner is pointed at the
         // spot, the game's own spawn routine runs (the one the Crash 3 secret platform uses), and then the spawner
         // gets its position and its own crate back, so that crate stays normal and dying never doubles it.
-        // The spot is somewhere Crash stood on flat ground in the last few seconds, 150-320 units away: real floor,
-        // never inside a wall or over a pit.
+        // The spot is ahead of Crash in the direction he is going, about 400 units (2-3 crates) away: close enough to
+        // be a surprise, far enough to jump it or stop. Floor he stood on earlier in this level (an earlier try, or
+        // ground he came back over) comes first; otherwise it goes straight ahead along the line he is running, at
+        // his ground height and following the slope he is on, and only while he is on the ground. Never on a crate.
+        static constexpr float nitro_ahead = 400, nitro_near = 300, nitro_far = 520;
         struct PathSample
         {
             std::array<float, 3> at;
             std::uint64_t time;
         };
         std::deque<PathSample> crash_path;
+        std::vector<std::array<float, 3>> level_floor; // flat ground Crash stood on in this level, every try
         std::string crash_path_level;
         void record_crash_path(const std::string &level)
         {
             const auto now = GetTickCount64();
             if (level != crash_path_level)
-                crash_path.clear(), crash_path_level = level;
+                crash_path.clear(), level_floor.clear(), crash_path_level = level;
             if (!crash_path.empty() && now - crash_path.back().time < 100)
                 return;
             std::array<float, 3> at{};
             if (!crash_position(at))
                 return;
-            // a respawn or teleport starts a new path
+            // a respawn or teleport starts a new path (the floor seen so far stays known)
             if (!crash_path.empty() && std::hypot(at[0] - crash_path.back().at[0], at[1] - crash_path.back().at[1]) > 1500)
                 crash_path.clear();
             crash_path.push_back({at, now});
             while (crash_path.size() > 80)
                 crash_path.pop_front();
-        }
-        bool path_spot(std::array<float, 3> &spot)
-        {
+            // flat ground: height steady for 0.2 s either side (not a jump, a fall or a steep slope)
             if (crash_path.size() < 5)
+                return;
+            const auto i = crash_path.size() - 3;
+            const auto &floor = crash_path[i].at;
+            float low = floor[2], high = floor[2];
+            for (std::size_t j = i - 2; j <= i + 2; ++j)
+                low = std::min(low, crash_path[j].at[2]), high = std::max(high, crash_path[j].at[2]);
+            if (high - low < 15 && level_floor.size() < 4000 &&
+                std::none_of(level_floor.begin(), level_floor.end(), [&](const std::array<float, 3> &f)
+                             { return std::abs(f[0] - floor[0]) < 60 && std::abs(f[1] - floor[1]) < 60 && std::abs(f[2] - floor[2]) < 40; }))
+                level_floor.push_back(floor);
+        }
+        // the way Crash is going: his movement over half a second, from the latest half second in the last 3 seconds
+        // in which he covered at least 60 units
+        bool crash_heading(float &hx, float &hy, std::size_t &end)
+        {
+            const auto n = crash_path.size();
+            if (n < 6)
                 return false;
-            const auto &now = crash_path.back().at;
-            for (std::size_t i = crash_path.size() - 3; i >= 2; --i)
+            const auto latest = crash_path.back().time;
+            for (std::size_t i = n - 1; i >= 5 && latest - crash_path[i].time <= 3000; --i)
             {
-                const auto &at = crash_path[i].at;
-                const float d = std::hypot(at[0] - now[0], at[1] - now[1]);
-                if (d < 150 || d > 320 || std::abs(at[2] - now[2]) > 80)
-                    continue;
-                // flat ground: height steady for 0.2 s either side (not a jump, a fall or a steep slope)
-                float low = at[2], high = at[2];
-                for (std::size_t j = i - 2; j <= i + 2; ++j)
-                    low = std::min(low, crash_path[j].at[2]), high = std::max(high, crash_path[j].at[2]);
-                if (high - low < 15)
+                const auto &a = crash_path[i - 5].at, &b = crash_path[i].at;
+                const float dx = b[0] - a[0], dy = b[1] - a[1], d = std::hypot(dx, dy);
+                if (d >= 60)
                 {
-                    spot = at;
+                    hx = dx / d, hy = dy / d, end = i;
                     return true;
                 }
+            }
+            return false;
+        }
+        bool ahead_spot(std::array<float, 3> &spot)
+        {
+            float hx = 0, hy = 0;
+            std::size_t end = 0;
+            if (!crash_heading(hx, hy, end))
+                return false;
+            const auto &now = crash_path.back().at;
+            std::vector<std::array<float, 3>> crates;
+            for (const auto owner : event_owners())
+            {
+                std::array<float, 3> at{};
+                if (string(value<Address>(owner + 128)).rfind("Crate_", 0) == 0 && read(owner + 32, at))
+                    crates.push_back(at);
+            }
+            const auto clear = [&](const std::array<float, 3> &p)
+            {
+                return std::none_of(crates.begin(), crates.end(), [&](const std::array<float, 3> &c)
+                                    { return std::hypot(c[0] - p[0], c[1] - p[1]) < 110 && std::abs(c[2] - p[2]) < 160; });
+            };
+            // floor he stood on before, within about 35 degrees of straight ahead
+            float best = 1e9f;
+            for (const auto &f : level_floor)
+            {
+                const float dx = f[0] - now[0], dy = f[1] - now[1], d = std::hypot(dx, dy);
+                if (d < nitro_near || d > nitro_far || std::abs(f[2] - now[2]) > 120)
+                    continue;
+                const float along = (dx * hx + dy * hy) / d;
+                const float score = std::abs(d - nitro_ahead) + (1 - along) * 800;
+                if (along >= 0.82f && score < best && clear(f))
+                    best = score, spot = f;
+            }
+            if (best < 1e9f)
+                return true;
+            // straight ahead: only while he is on the ground (the last 0.2 s at one height) and not turning
+            const auto n = crash_path.size();
+            float low = now[2], high = now[2];
+            for (std::size_t j = n - 3; j < n; ++j)
+                low = std::min(low, crash_path[j].at[2]), high = std::max(high, crash_path[j].at[2]);
+            if (high - low > 8)
+                return false;
+            if (end >= 10)
+            {
+                const auto &a = crash_path[end - 10].at, &b = crash_path[end - 5].at;
+                const float dx = b[0] - a[0], dy = b[1] - a[1], d = std::hypot(dx, dy);
+                if (d >= 60 && (dx * hx + dy * hy) / d < 0.9f)
+                    return false;
+            }
+            // the slope of the ground he ran over in the last half second, if it was smooth (no jump in it)
+            float slope = 0;
+            const auto &back = crash_path[n - 6].at;
+            const float run = std::hypot(now[0] - back[0], now[1] - back[1]);
+            if (run > 40)
+            {
+                bool smooth = true;
+                for (std::size_t j = n - 6; j < n; ++j)
+                    smooth = smooth && std::abs(crash_path[j].at[2] - (back[2] + (now[2] - back[2]) * (j - (n - 6)) / 5.0f)) < 8;
+                if (smooth)
+                    slope = std::clamp((now[2] - back[2]) / run, -0.35f, 0.35f);
+            }
+            for (const float d : {nitro_ahead, nitro_ahead - 50, nitro_ahead + 50, nitro_ahead - 100})
+            {
+                const std::array<float, 3> p{now[0] + hx * d, now[1] + hy * d, now[2] + slope * d};
+                if (clear(p))
+                    return spot = p, true;
             }
             return false;
         }
@@ -1817,8 +1897,8 @@ namespace ingame
             std::array<float, 3> crash{}, spot{};
             if (!crash_position(crash))
                 return why = "Crash not found", false;
-            if (!path_spot(spot))
-                return why = "no spot yet: Crash needs to have walked a few steps on flat ground", false;
+            if (!ahead_spot(spot))
+                return why = "no spot ahead yet: Crash needs to be running on the ground", false;
             const auto spawner = farthest_nitro_spawner(crash);
             if (!spawner.component)
                 return why = "no Nitro crates in this level", false;
@@ -1874,7 +1954,7 @@ namespace ingame
                 next_ready = now + 500;
                 std::array<float, 3> crash{}, spot{};
                 state.nitro_ready = !level.empty() && !gimmick_stage() && !nitro_spawn_state.component && crash_position(crash) &&
-                                    path_spot(spot) && farthest_nitro_spawner(crash).component;
+                                    ahead_spot(spot) && farthest_nitro_spawner(crash).component;
             }
             if (state.nitro_spawn_request == state.nitro_spawn_ack)
             {

@@ -28,9 +28,9 @@ public:
     void lock_entrances(const std::set<std::string> &locked);
     // the locked entrance the last load was turned away from while that hub is the destination, if any
     std::string refused_entrance() const;
-    // the next fresh visit to this entrance's hub (a campaign start) spawns Crash at this entrance instead of the
-    // last spot the save remembers
-    void prefer_hub_spawn(const std::string &source);
+    // starting Crash 1 from the title screen puts Crash on the map at the earliest open entrance (map order),
+    // instead of wherever the save last left him. The campaign-start hook applies it as the game loads the map.
+    void c1_start(const std::set<std::string> &locked);
 
 private:
     struct Entrance
@@ -38,11 +38,12 @@ private:
         std::string source;
         std::uintptr_t source_zone = 0, destination = 0, hub = 0;
         bool locked = false;
+        int progression = -1; // Crash 1 map order
     };
     std::vector<Entrance> entrances_;
     HANDLE process_ = nullptr;
     DWORD pid_ = 0;
-    std::uintptr_t base_ = 0, remote_ = 0, variable_ = 0;
+    std::uintptr_t base_ = 0, remote_ = 0, variable_ = 0, c1_start_ = 0;
     std::vector<ZoneRecord> zones_;
     std::array<std::array<unsigned char, 5>, 8> calls_{};
     unsigned installed_ = 0;
