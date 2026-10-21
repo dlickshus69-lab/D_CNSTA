@@ -17,6 +17,7 @@
 #include <sstream>
 #include <set>
 #include <deque>
+#include <chrono>
 #include <unordered_map>
 #include <string_view>
 #ifdef _MSC_VER
@@ -2582,6 +2583,87 @@ namespace ingame
             move_probe_scan(controller, 2048, 2, 0, vx, vy, speed);
             move_probe_pointees(controller, 256, 3, actor, vx, vy, speed);
         }
+        // /ice_test (research for an ice trap that really slides Crash):
+        //  slide: Crash's velocity (actor +0x60, units per second, found with /move_probe) only moves part of the way
+        //         toward what the game wants each frame, at the rate the game's own ice uses, so his body keeps
+        //         sliding while he turns and runs at once.
+        //  floor: the floor under Crash (Crash_IceSlide's current floor info, /ice_watch) gets ice grip (+0x20/+0x24:
+        //         0.5 on snow, 0.05 on ice) and the IceSurface (+0x18) once Crash has stood on ice in this level.
+        static constexpr float ice_test_accel = 330; // units/s per second: the game's ice builds full speed in about 1.8 s
+        struct IceSurfaceSeen
+        {
+            Address surface = 0, type = 0;
+            std::string level;
+        } ice_surface_seen;
+        Address crash_floor_info(Address actor)
+        {
+            const auto c = crash_script(actor, "Scripts.Graph.Crash_IceSlide");
+            if (!c || !field_at(value<Address>(c + 56), "Collision_Material_id_s2qfleo5", 0x60, 8))
+                return 0;
+            const auto info = value<Address>(c + 0x60);
+            return info && readable(info, 0x40) && typed(info, 0x13ea4d8) ? info : 0;
+        }
+        void update_ice_test(unsigned mode)
+        {
+            static unsigned announced = 0;
+            static Address slide_actor = 0;
+            static float vx = 0, vy = 0;
+            static std::chrono::steady_clock::time_point last{};
+            const auto actor = player();
+            const auto level = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
+            // remember the IceSurface whenever Crash stands on it
+            if (actor)
+                if (const auto info = crash_floor_info(actor))
+                {
+                    const auto surface = value<Address>(info + 0x18);
+                    if (surface && readable(surface, 16) && string(value<Address>(surface + 8), 32) == "IceSurface")
+                        ice_surface_seen = {surface, value<Address>(surface), level};
+                }
+            if (mode != announced)
+            {
+                std::cout << (mode == 1   ? "Ice test: slide on. Crash's speed now follows you slowly, like on ice.\n"
+                              : mode == 2 ? (ice_surface_seen.surface && ice_surface_seen.level == level
+                                                 ? "Ice test: floor on. The floor under Crash gets ice grip and the IceSurface.\n"
+                                                 : "Ice test: floor on. The floor under Crash gets ice grip (no IceSurface yet: stand on real ice once in this level).\n")
+                                          : "Ice test: off\n")
+                          << std::flush;
+                announced = mode;
+            }
+            if (mode != 1 || !actor)
+                slide_actor = 0;
+            if (!actor || !mode)
+                return;
+            if (mode == 1)
+            {
+                std::array<float, 3> v{};
+                if (!read(actor + 0x60, v) || !std::isfinite(v[0]) || !std::isfinite(v[1]))
+                    return;
+                const auto now = std::chrono::steady_clock::now();
+                const float dt = std::chrono::duration<float>(now - last).count();
+                last = now;
+                if (actor != slide_actor || dt > 0.25f)
+                {
+                    slide_actor = actor, vx = v[0], vy = v[1];
+                    return;
+                }
+                const float dx = v[0] - vx, dy = v[1] - vy, gap = std::hypot(dx, dy), step = ice_test_accel * dt;
+                if (gap <= step)
+                    vx = v[0], vy = v[1];
+                else
+                    vx += dx / gap * step, vy += dy / gap * step;
+                write(actor + 0x60, std::array<float, 2>{vx, vy});
+                return;
+            }
+            const auto info = crash_floor_info(actor);
+            if (!info)
+                return;
+            const std::array<float, 2> ice_grip{0.05f, 0.05f};
+            if (value<std::array<float, 2>>(info + 0x20) != ice_grip)
+                write(info + 0x20, ice_grip);
+            if (ice_surface_seen.surface && ice_surface_seen.level == level && readable(ice_surface_seen.surface, 16) &&
+                value<Address>(ice_surface_seen.surface) == ice_surface_seen.type && value<Address>(info + 0x18) != ice_surface_seen.surface)
+                write(info + 0x18, ice_surface_seen.surface);
+        }
         void update_c3_buttons(Shared &state, const std::string &zone)
         {
             static std::uint64_t next = 0, pending_triggers = 0;
@@ -2823,6 +2905,7 @@ namespace ingame
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         update_ice_watch(state.ice_watch != 0);
         update_move_probe(state.move_probe != 0);
+        update_ice_test(state.ice_test <= 2 ? state.ice_test : 0);
         if (state.ice_probe_request != state.ice_probe_ack)
         {
             state.ice_probe_ack = state.ice_probe_request;

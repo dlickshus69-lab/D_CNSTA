@@ -481,6 +481,12 @@ void BoxMarkers::move_probe(bool on)
     shared_->move_probe = on ? 1u : 0u;
     unlock();
 }
+void BoxMarkers::ice_test(unsigned mode)
+{
+    lock();
+    shared_->ice_test = mode;
+    unlock();
+}
 void BoxMarkers::request_ice_probe()
 {
     lock();

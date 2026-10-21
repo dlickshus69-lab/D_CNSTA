@@ -128,6 +128,8 @@ namespace ingame
         unsigned ice_watch = 0;
         // /move_probe on: look for where the game keeps Crash's movement speed
         unsigned move_probe = 0;
+        // /ice_test: 0 off, 1 slide (Crash's velocity keeps momentum), 2 floor (the floor under Crash says ice)
+        unsigned ice_test = 0;
         // /nitro_spawn (experimental): the game spawns a Nitro next to Crash
         unsigned nitro_spawn_request = 0, nitro_spawn_ack = 0;
         // set by the game thread: a Nitro Trap can spawn here now (level with a ready Nitro spawner, not a
