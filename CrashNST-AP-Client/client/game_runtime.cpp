@@ -2596,6 +2596,12 @@ namespace ingame
             Address surface = 0, type = 0;
             std::string level;
         } ice_surface_seen;
+        // the IceSurface asset, checked by its name (its first word is a counter the game keeps changing)
+        bool ice_surface_valid()
+        {
+            const auto s = ice_surface_seen.surface;
+            return s && readable(s, 16) && string(value<Address>(s + 8), 32) == "IceSurface";
+        }
         Address crash_floor_info(Address actor)
         {
             const auto c = crash_script(actor, "Scripts.Graph.Crash_IceSlide");
@@ -2616,6 +2622,7 @@ namespace ingame
         void ice_swap_surface(Address surface, Address ice, std::string name)
         {
             ++ice_swap_running;
+            std::cout << "Ice test: swap: looking for every reference to " << name << " (a few seconds)\n" << std::flush;
             std::thread([surface, ice, name]
                         {
                 std::vector<Address> hits;
@@ -2707,8 +2714,7 @@ namespace ingame
             if (previous == 3 && mode != 3)
                 ice_swap_restore();
             previous = mode;
-            if (mode == 3 && actor && ice_surface_seen.surface && ice_surface_seen.level == level && readable(ice_surface_seen.surface, 16) &&
-                value<Address>(ice_surface_seen.surface) == ice_surface_seen.type)
+            if (mode == 3 && actor && ice_surface_seen.level == level && ice_surface_valid())
                 if (const auto info = crash_floor_info(actor))
                 {
                     const auto surface = value<Address>(info + 0x18);
@@ -2745,7 +2751,26 @@ namespace ingame
                     mx = gx, my = gy;
                 else
                     mx += dx / gap * step, my += dy / gap * step;
+                // does the game keep the position we write? Whenever our position differed from the game's own by
+                // over 20 units, see which one he moved on from
+                static unsigned kept = 0, undone = 0;
+                static Address reported_for = 0;
+                static std::array<float, 2> game_own{};
+                static bool compare = false;
+                if (compare && push_actor != reported_for)
+                {
+                    const float from_ours = std::hypot(p[0] - expect[0], p[1] - expect[1]);
+                    const float from_game = std::hypot(p[0] - game_own[0], p[1] - game_own[1]);
+                    (from_ours < from_game ? kept : undone)++;
+                    if (kept + undone >= 40)
+                    {
+                        std::cout << "Ice test: push: the game kept " << kept << " of 40 position changes\n" << std::flush;
+                        reported_for = push_actor, kept = undone = 0;
+                    }
+                }
                 const std::array<float, 2> moved{expect[0] + mx * dt, expect[1] + my * dt};
+                game_own = {p[0], p[1]};
+                compare = std::hypot(moved[0] - p[0], moved[1] - p[1]) > 20;
                 write(actor + 32, moved);
                 expect = {moved[0], moved[1], p[2]};
                 return;
@@ -2785,8 +2810,7 @@ namespace ingame
             const std::array<float, 2> ice_grip{0.05f, 0.05f};
             if (value<std::array<float, 2>>(info + 0x20) != ice_grip)
                 write(info + 0x20, ice_grip);
-            if (ice_surface_seen.surface && ice_surface_seen.level == level && readable(ice_surface_seen.surface, 16) &&
-                value<Address>(ice_surface_seen.surface) == ice_surface_seen.type && value<Address>(info + 0x18) != ice_surface_seen.surface)
+            if (ice_surface_seen.level == level && ice_surface_valid() && value<Address>(info + 0x18) != ice_surface_seen.surface)
                 write(info + 0x18, ice_surface_seen.surface);
         }
         // /ice_find (research): searches all of the game's memory, on a background thread, for references to the
