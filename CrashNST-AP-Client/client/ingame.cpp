@@ -1210,10 +1210,23 @@ namespace
             r.text(24, r.height - 68, "Waiting for this seed's saves. /quit: close NST", 0xffeeeeee);
             r.text(24, r.height - 44, "/server host:port   /slot name   /password value   /connect", 0xffeeeeee);
         }
-        // Darkness Trap: drawn under the AP HUD, even when F7 hides markers
+        // Darkness Trap: a spotlight that follows Crash, drawn under the AP HUD even when F7 hides markers
         if (!startup_mode && scene.camera_active && timer_active(snapshot->darkness_until, GetTickCount64()))
-            darkness_bands(r.width, r.height, [&](const DarkBand &b)
-                           { if (b.w > 0 && b.h > 0) r.quad(b.x, b.y, b.w, b.h, b.color); });
+        {
+            const float side = static_cast<float>(std::min(r.width, r.height));
+            float cx = r.width / 2.0f, cy = r.height * 0.55f, px = 0, py = 0;
+            if (scene.player_active && project(scene.view_projection, scene.player_position, px, py, r.width, r.height) &&
+                px > -side && px < r.width + side && py > -side && py < r.height + side)
+                cx = px, cy = py - side * 0.05f; // the position is at Crash's feet; light his body
+            darkness_mesh(static_cast<float>(r.width), static_cast<float>(r.height), cx, cy,
+                          [&](const DarkVertex &a, const DarkVertex &b, const DarkVertex &c)
+                          {
+                              if (r.draw.size() + 3 > Renderer::max_vertices)
+                                  return;
+                              for (const auto *v : {&a, &b, &c})
+                                  r.draw.push_back(r.vertex(v->x, v->y, 0.00024f, 0.00024f, v->color));
+                          });
+        }
         if (snapshot->visible && !startup_mode)
         {
             if (scene.camera_active)

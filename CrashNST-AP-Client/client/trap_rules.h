@@ -1,6 +1,7 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
+#include <utility>
 
 namespace ingame
 {
@@ -142,35 +143,40 @@ namespace ingame
         }
     };
 
-    // Darkness Trap: a lit square around the screen point, fading out in steps to near black
-    struct DarkBand
+    // Darkness Trap: a round spotlight on Crash that fades smoothly into near-black, like Lights Out.
+    // Drawn as triangles whose per-vertex alpha the GPU blends, so there are no visible steps.
+    struct DarkVertex
     {
-        float x, y, w, h;
-        unsigned color; // ABGR
+        float x, y;
+        unsigned color; // ABGR, black with alpha
     };
+    inline constexpr unsigned dark_alpha = 245;
+    inline constexpr float dark_lit = 0.10f, dark_mid = 0.18f, dark_edge = 0.30f; // radii, share of the shorter side
     template <class Emit>
-    void darkness_bands(float width, float height, Emit emit)
+    void darkness_mesh(float width, float height, float cx, float cy, Emit emit)
     {
-        const float side = width < height ? width : height, cx = width / 2, cy = height * 0.58f;
-        constexpr unsigned steps = 10;
-        const float lit = side * 0.12f, edge = side * 0.42f;
-        const auto alpha = [](float t) { return static_cast<unsigned>(250 * t * t) << 24; };
-        // each ring is the gap between two squares, drawn as four bands
-        const auto ring = [&](float inner, float outer, unsigned color)
+        constexpr unsigned segments = 64;
+        constexpr float pi = 3.14159265358979f;
+        const float side = width < height ? width : height;
+        const float beyond = 2 * (width + height); // past every screen corner from any centre on screen
+        const auto black = [](float t) { return static_cast<unsigned>(dark_alpha * t + 0.5f) << 24; };
+        // radius and darkness of each ring edge; nothing is drawn inside the lit circle
+        const std::pair<float, unsigned> rings[]{{side * dark_lit, black(0)}, {side * dark_mid, black(0.3f)},
+                                                 {side * dark_edge, black(1)}, {beyond, black(1)}};
+        for (unsigned i = 0; i < segments; ++i)
         {
-            emit(DarkBand{cx - outer, cy - outer, 2 * outer, outer - inner, color});
-            emit(DarkBand{cx - outer, cy + inner, 2 * outer, outer - inner, color});
-            emit(DarkBand{cx - outer, cy - inner, outer - inner, 2 * inner, color});
-            emit(DarkBand{cx + inner, cy - inner, outer - inner, 2 * inner, color});
-        };
-        for (unsigned i = 0; i < steps; ++i)
-            ring(lit + (edge - lit) * i / steps, lit + (edge - lit) * (i + 1) / steps, alpha((i + 1.0f) / steps));
-        // everything outside the last ring is fully dark
-        const auto dark = alpha(1);
-        emit(DarkBand{0, 0, width, cy - edge, dark});
-        emit(DarkBand{0, cy + edge, width, height - cy - edge, dark});
-        emit(DarkBand{0, cy - edge, cx - edge, 2 * edge, dark});
-        emit(DarkBand{cx + edge, cy - edge, width - cx - edge, 2 * edge, dark});
+            const float a0 = 2 * pi * i / segments, a1 = 2 * pi * (i + 1) / segments;
+            const float c0 = std::cos(a0), s0 = std::sin(a0), c1 = std::cos(a1), s1 = std::sin(a1);
+            for (unsigned r = 0; r + 1 < sizeof(rings) / sizeof(rings[0]); ++r)
+            {
+                const auto [inner, inner_color] = rings[r];
+                const auto [outer, outer_color] = rings[r + 1];
+                const DarkVertex p0{cx + inner * c0, cy + inner * s0, inner_color}, p1{cx + inner * c1, cy + inner * s1, inner_color},
+                    q0{cx + outer * c0, cy + outer * s0, outer_color}, q1{cx + outer * c1, cy + outer * s1, outer_color};
+                emit(p0, q0, q1);
+                emit(p0, q1, p1);
+            }
+        }
     }
 
     inline void reverse_keyboard(unsigned char *keys)
