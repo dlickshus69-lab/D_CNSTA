@@ -383,6 +383,16 @@ void ClientRuntime::handle_commands()
                 else
                     print_console("Nitro probe needs the in-game adapter. Load into a level first.");
             }
+            else if (command == "/nitro_test")
+            {
+                if (box_markers)
+                {
+                    box_markers->request_nitro_test();
+                    print_console("Nitro test requested (experimental): the nearest Nitro moves next to Crash. Restart the level to undo.");
+                }
+                else
+                    print_console("Nitro test needs the in-game adapter. Load into a level first.");
+            }
             else if (command == "/markers" || command == "/crashsanity")
             {
                 if (box_markers)

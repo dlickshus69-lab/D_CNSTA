@@ -107,6 +107,8 @@ namespace ingame
                       darkness_until = 0;
         // /nitro_probe: the client bumps the request, the game thread logs once and acknowledges
         unsigned nitro_probe_request = 0, nitro_probe_ack = 0;
+        // /nitro_test (experimental): moves the nearest Nitro crate next to Crash once
+        unsigned nitro_test_request = 0, nitro_test_ack = 0;
         unsigned c3_buttons_ready = 0;
         std::uint64_t c3_buttons_active = 0;
         float box_half_size = 50;

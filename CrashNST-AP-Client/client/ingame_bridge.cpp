@@ -433,6 +433,12 @@ void BoxMarkers::request_nitro_probe()
     ++shared_->nitro_probe_request;
     unlock();
 }
+void BoxMarkers::request_nitro_test()
+{
+    lock();
+    ++shared_->nitro_test_request;
+    unlock();
+}
 void BoxMarkers::receive_death()
 {
     lock();

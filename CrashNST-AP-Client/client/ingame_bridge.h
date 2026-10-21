@@ -35,6 +35,8 @@ public:
     void apply_trap(unsigned kind, unsigned seconds);
     // research: log the current level's Nitro crates and their spawners (read-only)
     void request_nitro_probe();
+    // research (experimental): move the nearest Nitro crate next to Crash
+    void request_nitro_test();
     void c3_buttons(bool ready, const std::set<std::string> &allowed = {});
     unsigned collectibles(std::vector<ingame::Collectible> config, unsigned relic_min_rank = 1);
     std::vector<ingame::CollectibleObservation> collectible_observations();

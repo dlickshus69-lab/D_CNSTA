@@ -1260,6 +1260,99 @@ namespace ingame
                       << " spawners with the known spawn routine. Nothing was changed.\n"
                       << std::flush;
         }
+        // /nitro_test research (experimental): move the nearest live Nitro crate next to Crash by rewriting
+        // only its entity position and render-model translation. No game code is called. Restarting the level
+        // restores the crate. A follow-up line after one second shows whether the game kept the new position.
+        struct NitroTest
+        {
+            Address entity = 0, model = 0;
+            std::uint64_t check_at = 0;
+            std::array<float, 3> target{};
+        } nitro_test_state;
+        std::string triple(const std::array<float, 3> &v)
+        {
+            return std::to_string(v[0]) + ", " + std::to_string(v[1]) + ", " + std::to_string(v[2]);
+        }
+        void nitro_test()
+        {
+            const auto actor = player();
+            std::array<float, 3> crash{};
+            if (!actor || !read(actor + 32, crash))
+            {
+                std::cout << "Nitro test: Crash not found. Run it inside a level.\n" << std::flush;
+                return;
+            }
+            Address entity = 0, model = 0;
+            float best = 0;
+            std::string chosen;
+            for (const auto owner : event_owners())
+            {
+                const auto name = string(value<Address>(owner + 128));
+                if (name.rfind("Crate_Nitro", 0) != 0) // skips Crate_Switch_Nitro, the detonator
+                    continue;
+                const auto crate = crate_entity(owner);
+                std::array<float, 3> at{};
+                if (!crate || !read(crate + 32, at))
+                    continue;
+                const float d = std::sqrt((at[0] - crash[0]) * (at[0] - crash[0]) + (at[1] - crash[1]) * (at[1] - crash[1]) +
+                                          (at[2] - crash[2]) * (at[2] - crash[2]));
+                if (!entity || d < best)
+                    entity = crate, model = crate_model(crate), best = d, chosen = name;
+            }
+            if (!entity)
+            {
+                std::cout << "Nitro test: no live Nitro crate in this level.\n" << std::flush;
+                return;
+            }
+            std::array<float, 3> before{};
+            read(entity + 32, before);
+            // where else is this position stored inside the entity? (read-only search of its first 512 bytes)
+            std::string copies;
+            for (unsigned offset = 0; offset + 12 <= 512; offset += 4)
+            {
+                std::array<float, 3> v{};
+                if (read(entity + offset, v) && std::abs(v[0] - before[0]) < 0.01f && std::abs(v[1] - before[1]) < 0.01f &&
+                    std::abs(v[2] - before[2]) < 0.01f)
+                    copies += (copies.empty() ? "+" : ", +") + std::to_string(offset);
+            }
+            Matrix matrix{};
+            const bool has_matrix = model && read(model + 48, matrix);
+            std::cout << "Nitro test: " << chosen << " (" << static_cast<int>(best) << " from Crash) entity at " << triple(before)
+                      << ", position copies at entity " << (copies.empty() ? "(none)" : copies) << ", model "
+                      << (has_matrix ? "translation " + std::to_string(matrix[12]) + ", " + std::to_string(matrix[13]) + ", " + std::to_string(matrix[14])
+                                     : std::string("not found"))
+                      << "\n";
+            // 150 units from Crash along the first axis, at Crash's height
+            const std::array<float, 3> target{crash[0] + 150, crash[1], crash[2]};
+            const bool moved_entity = write(entity + 32, target);
+            bool moved_model = false;
+            if (has_matrix)
+            {
+                matrix[12] = target[0], matrix[13] = target[1], matrix[14] = target[2];
+                moved_model = write(model + 48, matrix);
+            }
+            nitro_test_state = {entity, has_matrix ? model : 0, GetTickCount64() + 1000, target};
+            std::cout << "Nitro test: moved to " << triple(target) << " (entity " << (moved_entity ? "written" : "write failed")
+                      << ", model " << (moved_model ? "written" : "skipped") << "). Look around Crash, then touch it carefully.\n"
+                      << std::flush;
+        }
+        void nitro_test_followup()
+        {
+            auto &t = nitro_test_state;
+            if (!t.entity || GetTickCount64() < t.check_at)
+                return;
+            std::array<float, 3> now{};
+            Matrix matrix{};
+            const bool entity_ok = read(t.entity + 32, now);
+            const bool model_ok = t.model && read(t.model + 48, matrix);
+            const auto kept = [&](float a, float b) { return std::abs(a - b) < 1.0f; };
+            std::cout << "Nitro test after 1 second: entity " << (entity_ok ? triple(now) : std::string("gone"))
+                      << (entity_ok && kept(now[0], t.target[0]) && kept(now[1], t.target[1]) && kept(now[2], t.target[2]) ? " (kept)" : " (changed back or moved)")
+                      << ", model " << (model_ok ? std::to_string(matrix[12]) + ", " + std::to_string(matrix[13]) + ", " + std::to_string(matrix[14]) : std::string("n/a"))
+                      << (model_ok && kept(matrix[12], t.target[0]) && kept(matrix[13], t.target[1]) && kept(matrix[14], t.target[2]) ? " (kept)" : (model_ok ? " (changed back or moved)" : ""))
+                      << "\n" << std::flush;
+            t = {};
+        }
         void update_c3_buttons(Shared &state, const std::string &zone)
         {
             static std::uint64_t next = 0, pending_triggers = 0;
@@ -1498,6 +1591,12 @@ namespace ingame
             state.nitro_probe_ack = state.nitro_probe_request;
             nitro_probe();
         }
+        if (state.nitro_test_request != state.nitro_test_ack)
+        {
+            state.nitro_test_ack = state.nitro_test_request;
+            nitro_test();
+        }
+        nitro_test_followup();
         const auto world = value<Address>(base() + 0x1a64690);
         const auto key = level_key(string(value<Address>(world + 184)));
         // mixed vehicle levels retain normal controls until their active form is mapped
