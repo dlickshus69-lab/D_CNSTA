@@ -1318,6 +1318,7 @@ namespace ingame
         {
             Address at;
             std::string path;
+            std::array<float, 3> goal{}; // where /nitro_test put this copy
         };
         struct NitroScan
         {
@@ -1491,8 +1492,14 @@ namespace ingame
                 { return std::abs(a[0] - b[0]) < 0.05f && std::abs(a[1] - b[1]) < 0.05f && std::abs(a[2] - b[2]) < 80; };
                 const bool holds = read(copy.at, now) &&
                                    (close_by(now.data(), before) || (matrix[15] == 1.0f && close_by(now.data(), {matrix[12], matrix[13], matrix[14]})));
-                if (holds && write(copy.at, target))
+                // each copy moves by the same distance and keeps its own offset: the physics body sits at the
+                // crate's centre, 76 units up, and sinking it into the floor makes the game reset the crate
+                const std::array<float, 3> goal{target[0] + now[0] - before[0], target[1] + now[1] - before[1], target[2] + now[2] - before[2]};
+                if (holds && write(copy.at, goal))
+                {
                     written.push_back(copy);
+                    written.back().goal = goal;
+                }
                 else
                     ++skipped;
             }
@@ -1528,15 +1535,16 @@ namespace ingame
             for (unsigned i = 0; i < t.written.size(); ++i)
             {
                 std::array<float, 3> at{};
-                if (!read(t.written[i].at, at) || same_place(at.data(), t.target, 1.0f))
+                if (!read(t.written[i].at, at) || same_place(at.data(), t.written[i].goal, 1.0f))
                     continue;
                 if (!t.moved[i])
                 {
                     t.moved[i] = true;
                     std::cout << "Nitro test: at " << elapsed << " ms the game moved " << t.written[i].path << " to " << triple(at)
-                              << (same_place(at.data(), nitro_home.old, 1.0f) ? " (its old spot)" : "") << "; putting it back\n" << std::flush;
+                              << (std::abs(at[0] - nitro_home.old[0]) < 1 && std::abs(at[1] - nitro_home.old[1]) < 1 ? " (its old spot)" : "")
+                              << "; putting it back\n" << std::flush;
                 }
-                write(t.written[i].at, t.target);
+                write(t.written[i].at, t.written[i].goal);
             }
             if (!t.reported && elapsed >= 1000)
             {
@@ -1563,6 +1571,7 @@ namespace ingame
             unsigned size = 0;
         };
         std::map<std::string, IceValue> ice_probe_last;
+        std::set<Address> ice_materials, ice_material_types;
         std::vector<unsigned> ice_raw_last;
         std::string ice_format(const IceValue &v)
         {
@@ -1582,6 +1591,24 @@ namespace ingame
                 out << "0x" << std::hex << v.bits;
             return out.str();
         }
+        std::string describe_object(Address p)
+        {
+            std::ostringstream out;
+            const auto vt = value<Address>(p);
+            if (!vt)
+                return "(unreadable)";
+            if (vt >= base() && vt < module_end())
+                out << "type " << hex(static_cast<unsigned>(vt - base()));
+            else
+                out << "first word 0x" << std::hex << vt << std::dec;
+            for (unsigned off = 8; off <= 64; off += 8)
+            {
+                const auto text = string(value<Address>(p + off), 64);
+                if (text.size() >= 3 && std::all_of(text.begin(), text.end(), [](unsigned char c) { return c >= 32 && c < 127; }))
+                    out << ", " << hex(off) << " \"" << text << "\"";
+            }
+            return out.str();
+        }
         void ice_probe()
         {
             const auto actor = player();
@@ -1593,6 +1620,7 @@ namespace ingame
             static const char *keys[]{"ice", "slip", "fric", "surface", "slide", "skid", "moment", "accel", "decel",
                                       "ground", "material", "speed", "veloc", "traction", "grip", "snow", "terrain"};
             std::map<std::string, IceValue> now;
+            ice_materials.clear();
             std::string graphs, named;
             unsigned named_count = 0;
             for (const auto c : list(value<Address>(actor + 24), 128))
@@ -1610,6 +1638,28 @@ namespace ingame
                 const auto fields = value<Address>(meta + 40);
                 if (!fields || count > 512)
                     continue;
+                if (graph == "Crash_IceSlide")
+                {
+                    // the game's own ice logic: every setting, and what its material references are
+                    std::cout << "Ice probe: Crash_IceSlide has " << count << " settings\n";
+                    for (unsigned i = 0; i < count; ++i)
+                    {
+                        const auto field = value<Address>(fields + i * 8);
+                        const auto name = string(value<Address>(field + 48));
+                        const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                        IceValue v{0, std::min(bytes, 8u)};
+                        if (bytes && offset + v.size <= size)
+                            read(c + offset, v.bits);
+                        std::cout << "Ice probe:   IceSlide " << hex(offset) << " " << name << " (" << bytes << " bytes) = " << ice_format(v);
+                        if (bytes == 8 && v.bits > 0x10000 && v.bits < 0x7ffffffeffffULL)
+                        {
+                            std::cout << " -> " << describe_object(v.bits);
+                            if (name.find("Material") != std::string::npos)
+                                ice_materials.insert(v.bits), ice_material_types.insert(value<Address>(v.bits));
+                        }
+                        std::cout << "\n";
+                    }
+                }
                 for (unsigned i = 0; i < count; ++i)
                 {
                     const auto field = value<Address>(fields + i * 8);
@@ -1635,6 +1685,42 @@ namespace ingame
             std::cout << "Ice probe: level " << level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))) << ", "
                       << now.size() << " settings on Crash. Scripts: " << (graphs.empty() ? "(none)" : graphs) << "\n"
                       << named;
+            // what material is Crash standing on? look for objects of the same type as Crash_IceSlide's materials
+            // in Crash and his movement controller, one pointer deep
+            if (!ice_material_types.empty())
+            {
+                unsigned shown = 0;
+                for (const auto &[root, label] : {std::pair<Address, const char *>{actor, "crash"}, {value<Address>(actor + 424), "controller"}})
+                {
+                    if (!root)
+                        continue;
+                    std::vector<Address> words(256);
+                    if (!read(root, words))
+                        continue;
+                    for (unsigned i = 0; i < words.size() && shown < 30; ++i)
+                    {
+                        const auto p = words[i];
+                        if (p < 0x10000 || p > 0x7ffffffeffffULL || (p & 7))
+                            continue;
+                        const auto describe = [&](Address q, const std::string &path)
+                        {
+                            if (!ice_material_types.count(value<Address>(q)))
+                                return;
+                            ++shown;
+                            std::cout << "Ice probe: material at " << path << " = 0x" << std::hex << q << std::dec
+                                      << (ice_materials.count(q) ? " (one of IceSlide's)" : "") << ": " << describe_object(q) << "\n";
+                        };
+                        describe(p, std::string(label) + " " + hex(i * 8));
+                        std::vector<Address> inner(64);
+                        if (read(p, inner))
+                            for (unsigned j = 0; j < inner.size() && shown < 30; ++j)
+                                if (inner[j] > 0x10000 && inner[j] < 0x7ffffffeffffULL && !(inner[j] & 7))
+                                    describe(inner[j], std::string(label) + " " + hex(i * 8) + " -> " + hex(j * 8));
+                    }
+                }
+                if (!shown)
+                    std::cout << "Ice probe: no material of that type found on Crash or his controller\n";
+            }
             // raw movement-controller words, compared with the last probe
             std::vector<unsigned> raw(512);
             const auto controller = value<Address>(actor + 424);
