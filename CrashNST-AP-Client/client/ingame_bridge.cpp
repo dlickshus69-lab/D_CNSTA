@@ -444,16 +444,24 @@ void BoxMarkers::request_nitro_test()
 }
 void BoxMarkers::pause_traps(bool paused, std::uint64_t elapsed_ms)
 {
-    // the game thread pauses running traps itself, every frame (update_gameplay): this only covers the time the
-    // game thread isn't running at all (a long load), when its frames stop
+    // the game thread pauses running traps itself, every frame it runs (update_gameplay). While it doesn't run at
+    // all (the pause menu, a load) time stands still for traps too: their end times move on by the time since it
+    // last ran, or since this last did, and the game thread adds the rest when it runs again.
+    (void)paused, (void)elapsed_ms;
     const auto now = GetTickCount64();
     lock();
-    const bool stalled = now > shared_->heartbeat_game + 1500;
-    if (paused && stalled && elapsed_ms)
-        for (auto *until : {&shared_->move_lock_until, &shared_->reverse_until, &shared_->freeze_until,
-                            &shared_->slippery_until, &shared_->slow_until, &shared_->darkness_until})
-            if (*until > now)
-                *until += elapsed_ms;
+    const auto beat = shared_->heartbeat_game;
+    if (beat && now > beat + 250)
+    {
+        const auto from = std::max(beat, shared_->stall_accounted);
+        if (now > from)
+            for (auto *until : {&shared_->move_lock_until, &shared_->reverse_until, &shared_->freeze_until,
+                                &shared_->slippery_until, &shared_->slow_until, &shared_->darkness_until})
+                if (*until > from)
+                    *until += now - from;
+        shared_->stall_accounted = now;
+        shared_->traps_paused = 1;
+    }
     unlock();
 }
 void BoxMarkers::request_nitro_spawn()

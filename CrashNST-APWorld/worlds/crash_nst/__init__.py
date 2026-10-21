@@ -92,7 +92,11 @@ class CrashWorld(World):
         return CrashItem(name, classification, ITEMS[name], self.player)
 
     def get_filler_item_name(self):
-        return self.random.choice(FILLER)
+        # Filler / Traps weights; all 0 means an even mix
+        weights = {"1-Up": self.options.one_up_weight.value, "Wumpa Fruit": self.options.wumpa_fruit_weight.value}
+        if not any(weights.values()):
+            return self.random.choice(FILLER)
+        return self.random.choices(list(weights), weights=list(weights.values()))[0]
 
     @staticmethod
     def interpret_slot_data(slot_data):

@@ -258,6 +258,26 @@ class AbilityLogic(Choice):
     default = option_cautious
 
 
+class WumpaFruitWeight(Range):
+    """How often a filler item is Wumpa Fruit (1 to 10 fruit each) compared to the other fillers. Filler fills
+    every slot left after progression, tokens and traps."""
+
+    display_name = "Wumpa Fruit Filler Weight"
+    range_start = 0
+    range_end = 100
+    default = 50
+
+
+class OneUpWeight(Range):
+    """How often a filler item is a 1-Up (an extra life) compared to the other fillers. If every filler weight
+    is 0, fillers are an even mix of Wumpa Fruit and 1-Ups."""
+
+    display_name = "1-Up Filler Weight"
+    range_start = 0
+    range_end = 100
+    default = 50
+
+
 class TrapFillPercentage(Range):
     """Replace a percentage of junk items in the item pool with random traps.
 
@@ -527,7 +547,9 @@ crash_option_groups = [
         SpinPlacement,
         AbilityLogic,
     ]),
-    OptionGroup("Traps", [
+    OptionGroup("Filler / Traps", [
+        WumpaFruitWeight,
+        OneUpWeight,
         TrapFillPercentage,
         LifeLossTrapWeight,
         MoveLockTrapWeight,
@@ -572,6 +594,8 @@ class CrashOptions(PerGameCommonOptions):
     ability_shuffle: AbilityShuffle
     spin_placement: SpinPlacement
     ability_logic: AbilityLogic
+    wumpa_fruit_weight: WumpaFruitWeight
+    one_up_weight: OneUpWeight
     trap_fill_percentage: TrapFillPercentage
     life_loss_trap_weight: LifeLossTrapWeight
     move_lock_trap_weight: MoveLockTrapWeight

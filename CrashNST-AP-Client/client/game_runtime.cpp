@@ -419,6 +419,44 @@ namespace ingame
         }
         // Crash_DamageManager's BonusRoundActive game variable: on from a bonus round's start until it ends
         std::atomic<Address> bonus_round_variable{0};
+        // Aku watch (research for an Aku Aku filler): the AkuAkuCount and WumpaCount game variables; their first
+        // bytes are logged whenever they change, to see where the game keeps the mask count
+        std::atomic<Address> aku_variable{0}, wumpa_variable{0};
+        void update_aku_watch()
+        {
+            static std::array<std::uint64_t, 8> last_aku{}, last_wumpa{};
+            static Address last_aku_at = 0, last_wumpa_at = 0;
+            const auto watch = [](const char *name, Address variable, std::array<std::uint64_t, 8> &last, Address &last_at)
+            {
+                if (!variable)
+                    return;
+                std::array<std::uint64_t, 8> now{};
+                if (!read(variable, now))
+                    return;
+                if (variable != last_at)
+                {
+                    std::ostringstream out;
+                    out << "Aku watch: " << name << " is 0x" << std::hex << variable << " (type +0x" << (now[0] - base()) << "):";
+                    for (const auto w : now)
+                        out << " " << w;
+                    std::cout << out.str() << std::dec << "\n" << std::flush;
+                    last_at = variable, last = now;
+                    return;
+                }
+                if (now == last)
+                    return;
+                std::ostringstream out;
+                out << "Aku watch: " << name << " changed:";
+                for (unsigned i = 1; i < now.size(); ++i)
+                    if (now[i] != last[i])
+                        out << " +0x" << std::hex << i * 8 << " 0x" << last[i] << " -> 0x" << now[i] << std::dec << " (as numbers "
+                            << static_cast<int>(last[i] & 0xffffffff) << " -> " << static_cast<int>(now[i] & 0xffffffff) << ")";
+                std::cout << out.str() << "\n" << std::flush;
+                last = now;
+            };
+            watch("AkuAkuCount", aku_variable.load(), last_aku, last_aku_at);
+            watch("WumpaCount", wumpa_variable.load(), last_wumpa, last_wumpa_at);
+        }
         bool bonus_round_active()
         {
             const auto variable = bonus_round_variable.load();
@@ -874,6 +912,10 @@ namespace ingame
                         const auto name = string(value<Address>(handle + 8), 47);
                         if (name == "BonusRoundActive")
                             bonus_round_variable = variable;
+                        if (name == "AkuAkuCount")
+                            aku_variable = variable;
+                        if (name == "WumpaCount")
+                            wumpa_variable = variable;
                         std::snprintf(slot.name, sizeof(slot.name), "%s", name.c_str());
                         slot.variable = variable;
                         names << " " << name;
@@ -2145,17 +2187,101 @@ namespace ingame
             d = {};
             state.nitro_countdown_end = 0;
         }
-        // where the Nitro lands: under Crash, at the lowest height he was at in the last second (the ground, even if
-        // he is in the middle of a jump)
+        // where the Nitro lands: where Crash was a third of a second ago (standing still, that's where he is; on the
+        // move, he has just left it), at the lowest height he was at in the last second (the ground, even mid-jump),
+        // nudged a hair so no copy of Crash's own position ever matches the crate's
         std::array<float, 3> drop_spot()
         {
             std::array<float, 3> at{};
             crash_position(at);
             const auto now = GetTickCount64();
+            for (auto it = crash_path.rbegin(); it != crash_path.rend(); ++it)
+                if (now - it->time >= 330)
+                {
+                    at[0] = it->at[0], at[1] = it->at[1];
+                    break;
+                }
+            at[0] += 0.5f, at[1] += 0.5f;
             for (const auto &p : crash_path)
                 if (now - p.time <= 1000 && std::hypot(p.at[0] - at[0], p.at[1] - at[1]) < 400)
                     at[2] = std::min(at[2], p.at[2]);
             return at;
+        }
+        // a heap page we may read and write: committed, private, read/write, not a guard, uncached or write-combined
+        // page (those can belong to the graphics driver)
+        bool heap_page(Address at, std::size_t size)
+        {
+            MEMORY_BASIC_INFORMATION info{};
+            if (at < 0x10000 || !VirtualQuery(reinterpret_cast<void *>(at), &info, sizeof(info)) || info.State != MEM_COMMIT ||
+                info.Type != MEM_PRIVATE || info.Protect != PAGE_READWRITE)
+                return false;
+            return at + size <= reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize;
+        }
+        // the copies of a Nitro's position, along the exact paths /nitro_scan found them on Nitros, each checked: no
+        // search (searching around a crate created that frame froze the game). Each copy is kept with its own value;
+        // the physics body's copy sits at the crate's centre, up to a crate above the others.
+        std::vector<std::pair<Address, std::array<float, 3>>> nitro_copies(Address entity, Address model, const std::array<float, 3> &ground)
+        {
+            std::vector<std::pair<Address, std::array<float, 3>>> out;
+            std::set<Address> seen;
+            const auto add = [&](Address at)
+            {
+                std::array<float, 3> v{};
+                if (!at || !seen.insert(at).second || !heap_page(at, 12) || !read(at, v))
+                    return;
+                if (std::abs(v[0] - ground[0]) < 0.05f && std::abs(v[1] - ground[1]) < 0.05f && v[2] > ground[2] - 30 && v[2] < ground[2] + 110)
+                    out.push_back({at, v});
+            };
+            // a pointer read from a checked heap page
+            const auto hop = [&](Address from, unsigned offset) -> Address
+            {
+                if (!from || !heap_page(from + offset, 8))
+                    return 0;
+                const auto p = value<Address>(from + offset);
+                return p >= 0x10000 && p < 0x7ffffffeffffULL && !(p & 7) ? p : 0;
+            };
+            const auto path = [&](Address from, std::initializer_list<unsigned> hops, unsigned last)
+            {
+                for (const auto h : hops)
+                    from = hop(from, h);
+                if (from)
+                    add(from + last);
+            };
+            add(entity + 0x20);
+            if (const auto component = hop(entity, 176))
+                add(component + 0xf8);
+            if (model)
+            {
+                add(model + 0x60);
+                path(model, {0x180, 0x178}, 0x1e0);
+                path(model, {0x180, 0x1d8}, 0x20);
+            }
+            for (const auto c : list(value<Address>(entity + 24), 64))
+            {
+                if (!heap_page(c, 0x160))
+                    continue;
+                const auto meta = value<Address>(c + 56);
+                const bool graph = typed(meta, 0x1745d78);
+                const auto name = graph ? string(value<Address>(meta + 16)) : std::string();
+                if (!graph)
+                {
+                    add(c + 0x120);
+                    path(c, {0x158}, 0x48);
+                    path(c, {0x158, 0x108, 0x170}, 0xf0);
+                    path(c, {0x158, 0x108, 0x170}, 0x114);
+                }
+                else if (name == "Scripts.Graph.common_Crate")
+                {
+                    path(c, {0xd0}, 0x118);
+                    path(c, {0xd0}, 0x13c);
+                    path(c, {0xd0, 0x50}, 0xf0);
+                    path(c, {0xd0, 0x50}, 0x114);
+                    path(c, {0x98, 0x28}, 0x20);
+                    path(c, {0x98, 0xd0, 0x108}, 0x1f0);
+                    path(c, {0x98, 0xd0, 0x138}, 0x1c4);
+                }
+            }
+            return out;
         }
         void update_nitro_drop(Shared &state, const std::string &level)
         {
@@ -2177,12 +2303,12 @@ namespace ingame
                 }
             }
             static std::uint64_t last_tick = 0;
-            const auto dt = last_tick && now > last_tick ? std::min<std::uint64_t>(now - last_tick, 1000) : 0;
+            const auto dt = last_tick && now > last_tick ? std::min<std::uint64_t>(now - last_tick, 600000) : 0;
             last_tick = now;
             if (d.stage == NitroDropTrap::Idle)
                 return;
-            // the pause menu stops the countdown and the fall where they are
-            if (state.menu_paused)
+            // the pause menu (or any stretch the game didn't run) stops the countdown and the fall where they are
+            if (state.menu_paused || dt > 250)
             {
                 d.start += dt, d.spawned += dt, d.fall_start += dt;
                 if (state.nitro_countdown_end)
@@ -2229,28 +2355,13 @@ namespace ingame
                 d.entity = trap_nitro.entity;
                 std::array<float, 3> ground{};
                 read(d.entity + 32, ground);
-                NitroPick pick{0, d.entity, crate_model(d.entity), 0, "drop"};
-                std::vector<std::array<float, 3>> targets{ground, {ground[0], ground[1], ground[2] + 76}};
-                Matrix matrix{};
-                if (pick.model && read(pick.model + 48, matrix) && !same_place(&matrix[12], ground, 0.05f))
-                    targets.push_back({matrix[12], matrix[13], matrix[14]});
-                std::vector<unsigned> which;
-                unsigned visited = 0;
-                // every copy /nitro_scan ever found is at most three steps from the crate: a small search does it
-                const auto searched_at = GetTickCount64();
-                const auto hits = position_scan(pick, targets, which, visited, 6000, 3);
-                const auto search_ms = GetTickCount64() - searched_at;
-                for (const auto &hit : hits)
-                {
-                    std::array<float, 3> at{};
-                    if (read(hit.at, at))
-                        d.copies.push_back({hit.at, at});
-                }
+                std::cout << "Nitro drop: the Nitro is at " << triple(ground) << "; finding its copies\n" << std::flush;
+                d.copies = nitro_copies(d.entity, crate_model(d.entity), ground);
+                std::cout << "Nitro drop: " << d.copies.size() << " copies; lifting it\n" << std::flush;
                 for (const auto &[at, g] : d.copies)
                     write(at, std::array<float, 3>{g[0], g[1], g[2] + drop_height});
                 d.stage = NitroDropTrap::Falling, d.fall_start = now;
-                std::cout << "Nitro drop: falling onto " << triple(ground) << " (" << d.copies.size() << " copies, searched " << visited
-                          << " objects in " << search_ms << " ms)\n" << std::flush;
+                std::cout << "Nitro drop: falling onto " << triple(ground) << "\n" << std::flush;
                 return;
             }
             // falling: speeding up like a dropped crate, landing a second later
@@ -5057,14 +5168,18 @@ namespace ingame
             static bool was_paused = false;
             const auto now = GetTickCount64();
             const bool paused = !state.player_ready || state.menu_paused;
-            if (last_frame && now > last_frame && (paused || was_paused))
+            if (last_frame && now > last_frame)
             {
-                // longer gaps (the game thread stopped, a long load) are covered by the client
-                const auto gap = std::min<std::uint64_t>(now - last_frame, 1500);
-                for (auto *until : {&state.move_lock_until, &state.reverse_until, &state.freeze_until, &state.slippery_until,
-                                    &state.slow_until, &state.darkness_until})
-                    if (*until > last_frame)
-                        *until += gap;
+                // the game didn't run for a while (the pause menu, a load): the client moved the trap times on while it
+                // waited, up to stall_accounted; the rest of the gap is added here. Otherwise a frame Crash couldn't move
+                // in moves them on by that frame.
+                const bool stalled = now - last_frame > 250;
+                const auto from = stalled ? std::max(last_frame, state.stall_accounted) : last_frame;
+                if ((stalled || paused || was_paused) && now > from)
+                    for (auto *until : {&state.move_lock_until, &state.reverse_until, &state.freeze_until, &state.slippery_until,
+                                        &state.slow_until, &state.darkness_until})
+                        if (*until > from)
+                            *until += now - from;
             }
             last_frame = now, was_paused = paused;
             state.traps_paused = paused ? 1u : 0u;
@@ -5158,6 +5273,7 @@ namespace ingame
         if (!actor)
             return;
         bind_player_death(actor);
+        update_aku_watch();
         if (!code_matches(0x4df230, std::array<unsigned char, 16>{0x48, 0x89, 0x5c, 0x24, 8, 0x57, 0x48, 0x83,
                                                                   0xec, 0x20, 0x8b, 0xb9, 0xf8, 0, 0, 0}))
             throw std::runtime_error("DeathLink health getter differs");
