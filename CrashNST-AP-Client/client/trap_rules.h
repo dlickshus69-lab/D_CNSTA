@@ -164,8 +164,8 @@ namespace ingame
         float x, y;
         unsigned color; // ABGR, black with alpha
     };
-    inline constexpr unsigned dark_alpha = 245;
-    inline constexpr float dark_lit = 0.10f, dark_mid = 0.18f, dark_edge = 0.30f; // radii, share of the shorter side
+    inline constexpr unsigned dark_alpha = 255; // pure black outside the light
+    inline constexpr float dark_lit = 0.10f, dark_mid = 0.17f, dark_edge = 0.26f; // radii, share of the shorter side
     template <class Emit>
     void darkness_mesh(float width, float height, float cx, float cy, Emit emit)
     {
@@ -175,7 +175,7 @@ namespace ingame
         const float beyond = 2 * (width + height); // past every screen corner from any centre on screen
         const auto black = [](float t) { return static_cast<unsigned>(dark_alpha * t + 0.5f) << 24; };
         // radius and darkness of each ring edge; nothing is drawn inside the lit circle
-        const std::pair<float, unsigned> rings[]{{side * dark_lit, black(0)}, {side * dark_mid, black(0.3f)},
+        const std::pair<float, unsigned> rings[]{{side * dark_lit, black(0)}, {side * dark_mid, black(0.45f)},
                                                  {side * dark_edge, black(1)}, {beyond, black(1)}};
         for (unsigned i = 0; i < segments; ++i)
         {
