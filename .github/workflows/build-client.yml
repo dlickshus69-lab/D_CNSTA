@@ -101,5 +101,12 @@ jobs:
           "@
           $existing = gh release list --json tagName --jq '.[].tagName'
           if ($existing -contains "latest-build") { gh release delete latest-build --cleanup-tag --yes }
-          gh release create latest-build CrashNST-AP-Client-x64.zip CrashNST-APWorld/dist/crash_nst.apworld `
-            --title "Dlickshus Crash Bandicoot N. Sane Trilogy Archipelago V$version" --notes $notes --target $env:GITHUB_SHA --latest
+          # GitHub can take a moment to drop the old tag: retry so a hiccup never leaves the Releases page empty
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            gh release create latest-build CrashNST-AP-Client-x64.zip CrashNST-APWorld/dist/crash_nst.apworld `
+              --title "Dlickshus Crash Bandicoot N. Sane Trilogy Archipelago V$version" --notes $notes --target $env:GITHUB_SHA --latest
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "Release attempt $attempt failed; retrying in 20 seconds"
+            Start-Sleep -Seconds 20
+          }
+          exit 1
