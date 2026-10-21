@@ -2330,6 +2330,14 @@ namespace ingame
                 }
                 else if (name == "Scripts.Graph.common_Crate")
                 {
+                    // found by a search on a crate the trap spawned: a whole matrix in the crate script (w 1) and a second
+                    // pair like crate-a/b
+                    label = "crate-matrix";
+                    add(c + 0x628);
+                    label = "crate-h";
+                    path(c, {0x320}, 0x118);
+                    label = "crate-i";
+                    path(c, {0x320}, 0x13c);
                     label = "crate-a";
                     path(c, {0xd0}, 0x118);
                     label = "crate-b";
@@ -2440,26 +2448,9 @@ namespace ingame
                 std::cout << "Nitro drop: the Nitro is at " << triple(high) << ", " << static_cast<int>(d.drop) << " above the spot\n" << std::flush;
                 // every copy, kept with where it ends up (its own offset from the crate, on the ground)
                 d.copies.clear();
-                auto found = nitro_copies(d.entity, crate_model(d.entity), high);
-                if (std::abs(high[0]) + std::abs(high[1]) > 1)
-                {
-                    // the known paths miss the copies the crate is drawn from: search near the crate as well, heap pages
-                    // only, for its real position (and its centre, a crate's height up), at most 64 places
-                    NitroPick pick{0, d.entity, crate_model(d.entity), 0, "drop"};
-                    std::vector<unsigned> which;
-                    unsigned visited = 0;
-                    const auto started = GetTickCount64();
-                    const auto hits = position_scan(pick, {high, {high[0], high[1], high[2] + 76}}, which, visited, 8000, 4, 64, true);
-                    std::ostringstream names;
-                    for (const auto &hit : hits)
-                    {
-                        std::array<float, 3> v{};
-                        if (std::none_of(found.begin(), found.end(), [&](const auto &f) { return f.first == hit.at; }) && read(hit.at, v))
-                            found.push_back({hit.at, v}), names << " [" << hit.path << "]";
-                    }
-                    std::cout << "Nitro drop: search found " << hits.size() << " places in " << (GetTickCount64() - started) << " ms ("
-                              << visited << " objects):" << names.str() << "\n" << std::flush;
-                }
+                // no search here: one through the crate's objects took 4.7 seconds on the game's frame, which froze the
+                // game and made the client give up on it. Every place that search found is a fixed path above.
+                const auto found = nitro_copies(d.entity, crate_model(d.entity), high);
                 for (const auto &[at, v] : found)
                     d.copies.push_back({at, std::array<float, 3>{v[0], v[1], v[2] - d.drop}});
                 d.stage = NitroDropTrap::Falling, d.fall_start = now;

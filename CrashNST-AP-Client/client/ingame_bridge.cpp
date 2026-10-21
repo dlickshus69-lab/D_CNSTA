@@ -163,9 +163,19 @@ BoxMarkers::BoxMarkers(DWORD pid, bool startup, unsigned marker_mode) : startup_
 }
 void BoxMarkers::lock()
 {
-    const auto result = WaitForSingleObject(mutex_, 1000);
-    if (result != WAIT_OBJECT_0 && result != WAIT_ABANDONED)
-        throw std::runtime_error("In-game bridge is busy");
+    // the game holds the bridge for a frame; a slow frame (a load, a hitch) can hold it for seconds. Wait for it
+    // rather than give up: giving up after one second once shut the whole AP client down mid-game.
+    for (unsigned waited = 0; waited < 30; ++waited)
+    {
+        const auto result = WaitForSingleObject(mutex_, 1000);
+        if (result == WAIT_OBJECT_0 || result == WAIT_ABANDONED)
+        {
+            if (waited)
+                std::cout << "In-game bridge was busy for " << waited << " s; continuing.\n" << std::flush;
+            return;
+        }
+    }
+    throw std::runtime_error("In-game bridge is busy");
 }
 void BoxMarkers::unlock()
 {
