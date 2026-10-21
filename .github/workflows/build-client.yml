@@ -43,10 +43,25 @@ jobs:
           git -C references/APCpp submodule update --init --recursive
 
       - name: Configure
-        run: cmake -S CrashNST-AP-Client/client -B build/client -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+        # link liblzma statically like the official client; otherwise the DLL needs liblzma-5.dll at runtime
+        run: >-
+          cmake -S CrashNST-AP-Client/client -B build/client -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+          -DLIBLZMA_LIBRARY="$(cygpath -m /mingw64/lib/liblzma.a)"
+          -DLIBLZMA_INCLUDE_DIR="$(cygpath -m /mingw64/include)"
 
       - name: Build
         run: cmake --build build/client --parallel 4
+
+      - name: Check the DLLs only need files Windows ships with
+        run: |
+          for dll in build/client/crash_nst_ingame.dll build/client/proxy/dinput8.dll; do
+            echo "$dll imports:"
+            objdump -p "$dll" | awk '/DLL Name/ {print "  " $3}' | sort -u | tee imports.txt
+            if grep -iE '^ *lib[^ ]*\.dll$' imports.txt; then
+              echo "::error::$dll depends on a MinGW runtime DLL that players do not have"
+              exit 1
+            fi
+          done
 
       - name: Arrange files like the game folder
         run: |
