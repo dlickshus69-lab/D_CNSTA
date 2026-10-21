@@ -973,6 +973,7 @@ LevelRouting::LevelRouting(DWORD pid, const std::map<std::string, std::string> &
             put(256 + count * 24, zone_for(source));
             put(264 + count * 24, zone_for(destination));
             put(272 + count * 24, zone_for("L" + source.substr(1, 1) + "00"));
+            entrances_.push_back({source, zone_for(source), zone_for(destination), zone_for("L" + source.substr(1, 1) + "00")});
             ++count;
         }
         std::memcpy(data.data(), &count, 4);
@@ -1095,6 +1096,32 @@ bool LevelRouting::bind_secret(const std::array<unsigned char, 48> &handle)
     return true;
 }
 unsigned LevelRouting::start_count() const { return read<unsigned>(process_, state() + 136); }
+void LevelRouting::lock_entrances(const std::set<std::string> &locked)
+{
+    if (!installed_ || read<unsigned char>(process_, state() + 4) != 1)
+        throw std::runtime_error("Entrance-routing dispatcher is inactive");
+    // each 24-byte record at +256 holds source, destination and hub. the dispatcher loads the destination
+    // only when the request comes from that hub, and then records the hub as the return point.
+    for (unsigned i = 0; i < entrances_.size(); ++i)
+    {
+        auto &entrance = entrances_[i];
+        const bool lock = locked.count(entrance.source) != 0;
+        if (lock == entrance.locked)
+            continue;
+        const auto address = state() + 264 + i * 24;
+        write(process_, address, lock ? entrance.destination : entrance.hub, lock ? entrance.hub : entrance.destination);
+        entrance.locked = lock;
+    }
+}
+std::string LevelRouting::refused_entrance() const
+{
+    const auto destination = read<std::uintptr_t>(process_, state() + 16);
+    const auto source = read<std::uintptr_t>(process_, state() + 144);
+    for (const auto &entrance : entrances_)
+        if (entrance.locked && entrance.source_zone == source && entrance.hub == destination)
+            return entrance.source;
+    return {};
+}
 unsigned LevelRouting::secret_return_count() const { return read<unsigned>(process_, state() + 160); }
 
 void LevelRouting::secrets(const std::set<std::string> &allowed)

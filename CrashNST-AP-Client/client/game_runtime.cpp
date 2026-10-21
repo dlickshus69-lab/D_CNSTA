@@ -1710,7 +1710,7 @@ namespace ingame
         vanilla_movement = state.vanilla_controls != 0;
         move_shuffle = state.move_shuffle != 0;
         owned_moves = state.owned_moves;
-        move_lock_until = state.move_lock_until;
+        move_lock_until = state.traps_paused ? 0 : state.move_lock_until;
         if (state.nitro_probe_request != state.nitro_probe_ack)
         {
             state.nitro_probe_ack = state.nitro_probe_request;

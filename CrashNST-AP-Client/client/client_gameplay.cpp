@@ -80,6 +80,34 @@ void ClientRuntime::update_routing(ClientTick &tick)
     if (!tick.room_valid)
         level_routing.reset();
     tick.room_ready = tick.room_valid && level_routing && level_routing->ready();
+    if (tick.room_ready)
+        try
+        {
+            // backstop for the hub gates: a locked entrance sends you back to its hub even if its gate
+            // was not attached yet. secret stages keep their own route.
+            std::set<std::string> locked;
+            for (const auto &placement : tick.placements)
+            {
+                const auto &source = placement.first;
+                if (std::none_of(secret_stages.begin(), secret_stages.end(), [&](const auto &s) { return s.first == source; }) &&
+                    level_locked(*seed, tick.items, source))
+                    locked.insert(source);
+            }
+            level_routing->lock_entrances(locked);
+            const auto refused = level_routing->refused_entrance();
+            if (refused != routing_refused)
+            {
+                if (!refused.empty())
+                    print_console("That level is still locked, so you are back in the hub.", true);
+                routing_refused = refused;
+            }
+        }
+        catch (const std::exception &e)
+        {
+            if (routing_error != e.what())
+                std::cerr << "Entrance locks: " << e.what() << std::endl;
+            routing_error = e.what();
+        }
 }
 
 void ClientRuntime::update_zone(ClientTick &tick)
@@ -418,6 +446,21 @@ void ClientRuntime::update_ownership(ClientTick &tick)
             std::cerr << "Filler delivery: " << e.what() << std::endl;
         }
     }
+    // running traps pause outside levels: hubs, maps, menus and loading screens
+    if (box_markers)
+        try
+        {
+            const auto now = GetTickCount64();
+            const auto scene = read_scene(GetCurrentProcess());
+            const bool in_level = scene.camera_active && !level_key(scene.zone).empty();
+            const auto elapsed = last_pause_tick && now > last_pause_tick ? std::min<std::uint64_t>(now - last_pause_tick, 5000) : 0;
+            box_markers->pause_traps(!in_level, elapsed);
+            last_pause_tick = now;
+        }
+        catch (const std::exception &)
+        {
+            last_pause_tick = 0;
+        }
     // traps fire one at a time, in any level (not hubs or menus) with the camera active, trap_gap_ms apart.
     // unlike 1-Ups they do not wait for an AP-unlocked level.
     // each is saved as applied before it starts, so reconnecting never replays it.

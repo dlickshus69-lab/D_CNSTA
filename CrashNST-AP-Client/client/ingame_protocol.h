@@ -109,6 +109,9 @@ namespace ingame
         unsigned trap_kills = 0;
         std::uint64_t move_lock_until = 0, reverse_until = 0, freeze_until = 0, slippery_until = 0, slow_until = 0,
                       darkness_until = 0;
+        // set by the client while you are in a hub, menu or loading screen: timers are pushed back and
+        // trap effects are off
+        unsigned traps_paused = 0;
         // /nitro_probe: the client bumps the request, the game thread logs once and acknowledges
         unsigned nitro_probe_request = 0, nitro_probe_ack = 0;
         // /nitro_test (experimental): moves the nearest Nitro crate next to Crash once

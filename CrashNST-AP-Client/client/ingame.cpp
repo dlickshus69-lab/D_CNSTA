@@ -313,7 +313,11 @@ namespace
             {
                 std::lock_guard<std::mutex> guard(momentum_mutex);
                 if (slippery())
-                    stick_momentum[index].apply(pad.sThumbLX, pad.sThumbLY, now);
+                {
+                    std::uint16_t buttons = pad.wButtons;
+                    stick_momentum[index].apply(pad.sThumbLX, pad.sThumbLY, buttons, now);
+                    pad.wButtons = buttons;
+                }
                 else
                     stick_momentum[index].primed = false;
             }
@@ -1206,7 +1210,7 @@ namespace
             r.text(24, r.height - 44, "/server host:port   /slot name   /password value   /connect", 0xffeeeeee);
         }
         // Darkness Trap: a spotlight that follows Crash, drawn under the AP HUD even when F7 hides markers
-        if (!startup_mode && scene.camera_active && timer_active(snapshot->darkness_until, GetTickCount64()))
+        if (!startup_mode && scene.camera_active && !snapshot->traps_paused && timer_active(snapshot->darkness_until, GetTickCount64()))
         {
             const float side = static_cast<float>(std::min(r.width, r.height));
             float cx = r.width / 2.0f, cy = r.height * 0.55f, px = 0, py = 0;
@@ -1254,11 +1258,13 @@ namespace
                                                                           {snapshot->freeze_until, "Frozen"},
                                                                           {snapshot->slippery_until, "Slippery"},
                                                                           // the timer keeps running in gimmick/chase levels, where Slow does nothing
-                                                                          {snapshot->slow_until, slow_until.load() ? "Slow" : "Slow (off here)"},
+                                                                          {snapshot->slow_until, slow_until.load() || snapshot->traps_paused ? "Slow" : "Slow (off here)"},
                                                                           {snapshot->darkness_until, "Darkness"}};
                     for (const auto &[until, label] : timers)
                         if (timer_active(until, now))
                             traps += (traps.empty() ? "" : "  ") + std::string(label) + " " + std::to_string(seconds_left(until, now)) + "s";
+                    if (!traps.empty() && snapshot->traps_paused)
+                        traps = "Paused: " + traps;
                     if (!traps.empty())
                     {
                         const float width = r.text_width(traps) + 16, x = std::max(4.0f, r.width - width - 16);
@@ -1792,11 +1798,13 @@ extern "C" __declspec(dllexport) void NST_Tick()
         {
             if (active && valid(*shared) && !shared->stop)
             {
-                reverse_until = shared->reverse_until;
-                freeze_until = shared->freeze_until;
-                slippery_until = shared->slippery_until;
+                // traps do nothing while paused in a hub or menu
+                const bool paused = shared->traps_paused != 0;
+                reverse_until = paused ? 0 : shared->reverse_until;
+                freeze_until = paused ? 0 : shared->freeze_until;
+                slippery_until = paused ? 0 : shared->slippery_until;
                 // Slow has no effect in gimmick and chase levels
-                slow_until = slow_trap_exempt() ? 0 : shared->slow_until;
+                slow_until = paused || slow_trap_exempt() ? 0 : shared->slow_until;
                 walk_tilt = shared->slow_tilt;
                 update_gameplay(*shared);
             }

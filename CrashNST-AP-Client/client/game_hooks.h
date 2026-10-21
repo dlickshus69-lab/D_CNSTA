@@ -24,8 +24,19 @@ public:
     unsigned start_count() const;
     unsigned secret_return_count() const;
     void secrets(const std::set<std::string> &allowed);
+    // a locked entrance loads its own hub instead of its level, so slipping past a hub gate just reloads the hub
+    void lock_entrances(const std::set<std::string> &locked);
+    // the locked entrance the last load was turned away from while that hub is the destination, if any
+    std::string refused_entrance() const;
 
 private:
+    struct Entrance
+    {
+        std::string source;
+        std::uintptr_t source_zone = 0, destination = 0, hub = 0;
+        bool locked = false;
+    };
+    std::vector<Entrance> entrances_;
     HANDLE process_ = nullptr;
     DWORD pid_ = 0;
     std::uintptr_t base_ = 0, remote_ = 0, variable_ = 0;

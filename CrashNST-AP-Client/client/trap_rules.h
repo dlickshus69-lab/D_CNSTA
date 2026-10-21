@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <utility>
@@ -119,29 +120,50 @@ namespace ingame
         y = static_cast<std::int16_t>(std::lround(fy * scale));
     }
 
-    // Slippery Trap: the stick eases toward the real input like momentum on ice;
-    // released movement keys keep reporting "held" briefly
-    inline constexpr float slippery_ease_ms = 350;
-    inline constexpr unsigned slippery_key_hold_ms = 250;
+    // Slippery Trap: ice. Crash follows a velocity that your input only slowly steers. While it is above a small
+    // floor he keeps running at full speed in its direction, so he slides on after you let go, drifts wide
+    // through turns and skids before reversing. The d-pad steers the same velocity. Movement keys keep
+    // reporting "held" for a moment after release.
+    inline constexpr float slippery_ease_ms = 650;
+    inline constexpr float slide_floor = 0.2f, slide_speed = 0.9f; // shares of a full push
+    inline constexpr unsigned slippery_key_hold_ms = 450;
     struct StickMomentum
     {
         float x = 0, y = 0;
         std::uint64_t last = 0;
         bool primed = false;
-        void apply(std::int16_t &stick_x, std::int16_t &stick_y, std::uint64_t now)
+        void apply(std::int16_t &stick_x, std::int16_t &stick_y, std::uint16_t &buttons, std::uint64_t now)
         {
-            if (!primed || now < last)
+            float ix = stick_x, iy = stick_y;
+            if (std::hypot(ix, iy) <= stick_deadzone)
             {
-                x = stick_x, y = stick_y, last = now, primed = true;
+                // resting stick: the d-pad steers, otherwise there is no input
+                ix = static_cast<float>(((buttons & 8u) ? 1 : 0) - ((buttons & 4u) ? 1 : 0));
+                iy = static_cast<float>(((buttons & 1u) ? 1 : 0) - ((buttons & 2u) ? 1 : 0));
+                if (const float length = std::hypot(ix, iy); length > 0)
+                    ix *= 32767 / length, iy *= 32767 / length;
+            }
+            buttons = static_cast<std::uint16_t>(buttons & ~0xFu);
+            if (!primed || now < last)
+                x = ix, y = iy, primed = true;
+            else
+            {
+                const auto elapsed = static_cast<float>(now - last > 100 ? 100 : now - last);
+                const auto blend = 1 - std::exp(-elapsed / slippery_ease_ms);
+                x += (ix - x) * blend;
+                y += (iy - y) * blend;
+            }
+            last = now;
+            const float length = std::hypot(x, y);
+            if (length < slide_floor * 32767)
+            {
+                stick_x = stick_y = 0;
                 return;
             }
-            const auto elapsed = static_cast<float>(now - last > 100 ? 100 : now - last);
-            const auto blend = 1 - std::exp(-elapsed / slippery_ease_ms);
-            x += (stick_x - x) * blend;
-            y += (stick_y - y) * blend;
-            last = now;
-            stick_x = static_cast<std::int16_t>(std::lround(x));
-            stick_y = static_cast<std::int16_t>(std::lround(y));
+            const float scale = std::max(length, slide_speed * 32767) / length;
+            const auto clamp = [](float v) { return static_cast<std::int16_t>(std::lround(v < -32768 ? -32768 : v > 32767 ? 32767 : v)); };
+            stick_x = clamp(x * scale);
+            stick_y = clamp(y * scale);
         }
     };
     struct KeyMomentum

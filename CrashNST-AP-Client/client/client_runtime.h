@@ -121,6 +121,8 @@ class ClientRuntime
     std::string completion_error;
     unsigned last_deaths = 0, last_collectible_awards = 0;
     std::chrono::steady_clock::time_point next_trap{};
+    std::uint64_t last_pause_tick = 0;
+    std::string routing_refused;
     std::unique_ptr<LevelRouting> level_routing;
     unsigned routing_start_count = 0, routing_secret_return_count = 0;
     std::string routing_error;
