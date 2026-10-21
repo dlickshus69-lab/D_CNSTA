@@ -17,6 +17,7 @@
 #include <sstream>
 #include <set>
 #include <deque>
+#include <unordered_map>
 #include <string_view>
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -2202,40 +2203,118 @@ namespace ingame
             ice_raw_last = raw_ok ? raw : std::vector<unsigned>{};
             std::cout << std::flush;
         }
-        // /ice_watch: every 0.2 s compare Crash_IceSlide's settings (values only) and log what changed, so walking on and
-        // off ice shows what the game's ice logic does without typing anything on the ice
+        // /ice_watch: every 0.2 s compare Crash_IceSlide's settings and log its flags and materials when they change.
+        // It also sorts every other value on Crash (his script settings, raw words of Crash and of his movement
+        // controller, and of the objects the controller points to) by whether the sample was taken on ice
+        // (IceSlide's two ice flags on) or on normal ground (both off). /ice_watch off lists the values that differ
+        // between the two: the switches the game flips for ice.
         std::map<std::string, IceValue> ice_watch_last;
         unsigned ice_watch_lines = 0;
-        void update_ice_watch(bool on)
+        struct IceSides
         {
-            static std::uint64_t next = 0;
-            static Address watched_actor = 0;
-            const auto now = GetTickCount64();
-            if (!on)
+            std::vector<std::uint64_t> seen[2]; // [0] normal ground, [1] ice
+            bool varies[2] = {};
+            unsigned size = 4;
+        };
+        std::map<std::string, IceSides> ice_sides; // script settings by name
+        // raw words by number: root (1 Crash, 2 controller, 3 an object the controller points to), the controller
+        // offset of that pointer, and the word's offset
+        std::unordered_map<std::uint64_t, IceSides> ice_raw_sides;
+        unsigned ice_side_samples[2] = {};
+        static std::uint64_t ice_raw_key(unsigned root, unsigned pointer, unsigned offset)
+        {
+            return (std::uint64_t(root) << 48) | (std::uint64_t(pointer) << 24) | offset;
+        }
+        std::string ice_raw_label(std::uint64_t key)
+        {
+            const auto root = unsigned(key >> 48), pointer = unsigned((key >> 24) & 0xffffff), offset = unsigned(key & 0xffffff);
+            return root == 1 ? "crash " + hex(offset) : root == 2 ? "controller " + hex(offset) : "controller " + hex(pointer) + " -> " + hex(offset);
+        }
+        void ice_side_note(IceSides &s, bool ice, std::uint64_t bits, unsigned size)
+        {
+            s.size = size;
+            auto &seen = s.seen[ice];
+            if (std::find(seen.begin(), seen.end(), bits) != seen.end())
+                return;
+            if (seen.size() >= 3)
+                s.varies[ice] = true;
+            else
+                seen.push_back(bits);
+        }
+        std::string ice_side_values(const IceSides &s, bool ice)
+        {
+            std::string out;
+            for (const auto bits : s.seen[ice])
+                out += (out.empty() ? "" : " / ") + ice_format({bits, s.size});
+            return out + (s.varies[ice] ? " / ... (keeps changing)" : "");
+        }
+        void ice_side_report()
+        {
+            if (ice_side_samples[0] < 3 || ice_side_samples[1] < 3)
             {
-                ice_watch_last.clear(), watched_actor = 0;
+                std::cout << "Ice watch: not enough samples to compare (" << ice_side_samples[0] << " on normal ground, "
+                          << ice_side_samples[1] << " on ice). Stand and walk on both for a few seconds.\n";
                 return;
             }
-            if (now < next || ice_watch_lines >= 600)
-                return;
-            next = now + 200;
-            const auto actor = player();
-            if (!actor)
-                return;
-            if (actor != watched_actor)
-                ice_watch_last.clear(), watched_actor = actor;
+            unsigned switches = 0, moving = 0;
+            std::vector<std::pair<std::string, const IceSides *>> all;
+            for (const auto &[key, s] : ice_sides)
+                all.push_back({key, &s});
+            std::vector<std::pair<std::uint64_t, const IceSides *>> raw;
+            for (const auto &[key, s] : ice_raw_sides)
+                raw.push_back({key, &s});
+            std::sort(raw.begin(), raw.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+            for (const auto &[key, s] : raw)
+                all.push_back({ice_raw_label(key), s});
+            for (const auto &[key, sides] : all)
+            {
+                const auto &s = *sides;
+                if (s.seen[0].empty() || s.seen[1].empty())
+                    continue;
+                const bool disjoint = std::none_of(s.seen[0].begin(), s.seen[0].end(), [&](std::uint64_t b)
+                                                   { return std::find(s.seen[1].begin(), s.seen[1].end(), b) != s.seen[1].end(); });
+                if (!s.varies[0] && !s.varies[1] && disjoint && switches < 150)
+                {
+                    ++switches;
+                    std::cout << "Ice switch: " << key << ": ground " << ice_side_values(s, false) << " | ice " << ice_side_values(s, true) << "\n";
+                }
+                else if (!s.varies[0] && s.seen[0].size() == 1 && s.varies[1] && moving < 60)
+                {
+                    ++moving;
+                    std::cout << "Ice only: " << key << ": ground " << ice_side_values(s, false) << " | ice " << ice_side_values(s, true) << "\n";
+                }
+            }
+            std::cout << "Ice watch: compared " << all.size() << " values over " << ice_side_samples[0] << " samples on normal ground and "
+                      << ice_side_samples[1] << " on ice: " << switches << " switches, " << moving << " that only change on ice\n";
+        }
+        Address crash_script(Address actor, const char *graph)
+        {
+            for (const auto c : list(value<Address>(actor + 24), 128))
+                if (typed(c, 0x13bbbd0) && value<Address>(c + 24) == actor && typed(value<Address>(c + 56), 0x1745d78) &&
+                    string(value<Address>(value<Address>(c + 56) + 16)) == graph)
+                    return c;
+            return 0;
+        }
+        void ice_side_sample(Address actor, bool ice)
+        {
+            ++ice_side_samples[ice];
+            // every script setting on Crash except the ice script itself
             for (const auto c : list(value<Address>(actor + 24), 128))
             {
                 if (!typed(c, 0x13bbbd0) || value<Address>(c + 24) != actor)
                     continue;
                 const auto meta = value<Address>(c + 56);
-                if (!typed(meta, 0x1745d78) || string(value<Address>(meta + 16)) != "Scripts.Graph.Crash_IceSlide")
+                if (!typed(meta, 0x1745d78))
+                    continue;
+                auto graph = string(value<Address>(meta + 16));
+                if (graph.rfind("Scripts.Graph.", 0) == 0)
+                    graph.erase(0, 14);
+                if (graph == "Crash_IceSlide")
                     continue;
                 const auto count = value<unsigned>(meta + 24), size = unsigned(value<std::uint16_t>(meta + 90));
                 const auto fields = value<Address>(meta + 40);
                 if (!fields || count > 512)
-                    return;
-                const bool first = ice_watch_last.empty();
+                    continue;
                 for (unsigned i = 0; i < count; ++i)
                 {
                     const auto field = value<Address>(fields + i * 8);
@@ -2243,23 +2322,125 @@ namespace ingame
                     const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
                     if (name.empty() || !bytes || bytes > 8 || offset + bytes > size)
                         continue;
-                    IceValue v{0, bytes};
+                    std::uint64_t bits = 0;
                     SIZE_T got = 0;
-                    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(c + offset), &v.bits, bytes, &got) || got != bytes)
-                        continue;
-                    auto &old = ice_watch_last[name];
-                    if (!first && old.bits != v.bits && ice_watch_lines < 600)
-                    {
-                        ++ice_watch_lines;
-                        std::cout << "Ice watch: " << name << ": " << ice_format(old) << " -> " << ice_format(v) << "\n";
-                    }
-                    old = v;
+                    if (ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(c + offset), &bits, bytes, &got) && got == bytes)
+                        ice_side_note(ice_sides[graph + "." + name], ice, bits, bytes == 4 ? 4u : bytes == 1 ? 1u : 8u);
                 }
-                if (first)
-                    std::cout << "Ice watch: watching " << ice_watch_last.size() << " Crash_IceSlide settings. Walk onto ice and off again.\n";
-                std::cout << std::flush;
+            }
+            // raw 4-byte words: Crash, his movement controller, and every object the controller points to
+            const auto words = [&](Address at, unsigned count, unsigned root, unsigned pointer)
+            {
+                std::vector<std::uint32_t> raw(count);
+                SIZE_T got = 0;
+                if (!readable(at, count * 4) ||
+                    !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(at), raw.data(), count * 4, &got) || got != count * 4)
+                    return std::vector<std::uint32_t>{};
+                for (unsigned i = 2; i < count; ++i) // skip the type word
+                    ice_side_note(ice_raw_sides[ice_raw_key(root, pointer, i * 4)], ice, raw[i], 4);
+                return raw;
+            };
+            words(actor, 256, 1, 0);
+            const auto controller = value<Address>(actor + 424);
+            if (!typed(controller, 0x1589128))
+                return;
+            const auto raw = words(controller, 512, 2, 0);
+            for (unsigned i = 2; i + 1 < raw.size(); i += 2)
+            {
+                const Address p = raw[i] | (static_cast<Address>(raw[i + 1]) << 32);
+                if (p < 0x10000 || p > 0x7ffffffeffffULL || (p & 7) || p == controller || p == actor)
+                    continue;
+                words(p, 96, 3, i * 4);
+            }
+        }
+        void update_ice_watch(bool on)
+        {
+            static std::uint64_t next = 0;
+            static Address watched_actor = 0;
+            static bool was_on = false;
+            const auto now = GetTickCount64();
+            if (!on)
+            {
+                if (was_on)
+                    ice_side_report(), std::cout << std::flush;
+                was_on = false;
+                ice_watch_last.clear(), watched_actor = 0;
                 return;
             }
+            if (!was_on)
+                ice_sides.clear(), ice_raw_sides.clear(), ice_side_samples[0] = ice_side_samples[1] = 0, ice_watch_lines = 0, was_on = true;
+            if (now < next)
+                return;
+            next = now + 200;
+            const auto actor = player();
+            if (!actor)
+                return;
+            if (actor != watched_actor)
+                ice_watch_last.clear(), watched_actor = actor;
+            const auto c = crash_script(actor, "Scripts.Graph.Crash_IceSlide");
+            if (!c)
+                return;
+            const auto meta = value<Address>(c + 56);
+            const auto count = value<unsigned>(meta + 24), size = unsigned(value<std::uint16_t>(meta + 90));
+            const auto fields = value<Address>(meta + 40);
+            if (!fields || count > 512)
+                return;
+            const bool first = ice_watch_last.empty();
+            for (unsigned i = 0; i < count; ++i)
+            {
+                const auto field = value<Address>(fields + i * 8);
+                const auto name = string(value<Address>(field + 48));
+                const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                if (name.empty() || !bytes || bytes > 8 || offset + bytes > size)
+                    continue;
+                IceValue v{0, bytes};
+                SIZE_T got = 0;
+                if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(c + offset), &v.bits, bytes, &got) || got != bytes)
+                    continue;
+                auto &old = ice_watch_last[name];
+                // the two slide floats change every sample on ice: the comparison at the end covers them
+                if (!first && old.bits != v.bits && ice_watch_lines < 300 && name.rfind("Float_", 0) != 0)
+                {
+                    ++ice_watch_lines;
+                    std::cout << "Ice watch: " << name << ": " << ice_format(old) << " -> " << ice_format(v) << "\n";
+                }
+                old = v;
+            }
+            if (first)
+                std::cout << "Ice watch: watching " << ice_watch_last.size() << " Crash_IceSlide settings and comparing everything else on Crash. Walk onto ice and off again.\n";
+            const auto surface = ice_watch_last.find("Bool_id_bxsqi703"), mode = ice_watch_last.find("Bool_id_17gxyac6");
+            if (surface != ice_watch_last.end() && mode != ice_watch_last.end() && (surface->second.bits & 0xff) == (mode->second.bits & 0xff))
+                ice_side_sample(actor, (surface->second.bits & 0xff) != 0);
+            std::cout << std::flush;
+        }
+        // /ice_force on (test): holds Crash_IceSlide's two ice flags on, to see whether its ice logic then runs on any ground
+        void update_ice_force(bool on)
+        {
+            static bool announced = false;
+            if (!on)
+            {
+                if (announced)
+                    std::cout << "Ice force: off\n" << std::flush;
+                announced = false;
+                return;
+            }
+            const auto actor = player();
+            const auto c = actor ? crash_script(actor, "Scripts.Graph.Crash_IceSlide") : 0;
+            const auto meta = c ? value<Address>(c + 56) : 0;
+            if (!c || !field_at(meta, "Bool_id_bxsqi703", 0x68, 1) || !field_at(meta, "Bool_id_17gxyac6", 0x78, 1))
+            {
+                if (!announced)
+                    std::cout << "Ice force: Crash_IceSlide not found here\n" << std::flush;
+                announced = true;
+                return;
+            }
+            if (!announced)
+                std::cout << "Ice force: holding Crash_IceSlide's ice flags on (its updater "
+                          << (value<Address>(c + 0x70) ? "exists" : "has not started yet: touch real ice once first if this level has some") << ")\n"
+                          << std::flush;
+            announced = true;
+            write(c + 0x68, static_cast<unsigned char>(1));
+            write(c + 0x78, static_cast<unsigned char>(1));
         }
         void update_c3_buttons(Shared &state, const std::string &zone)
         {
@@ -2501,6 +2682,7 @@ namespace ingame
         }
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         update_ice_watch(state.ice_watch != 0);
+        update_ice_force(state.ice_force != 0);
         if (state.ice_probe_request != state.ice_probe_ack)
         {
             state.ice_probe_ack = state.ice_probe_request;

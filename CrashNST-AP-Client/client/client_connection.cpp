@@ -446,11 +446,23 @@ void ClientRuntime::handle_commands()
                 {
                     const bool on = argument != "off";
                     box_markers->ice_watch(on);
-                    print_console(on ? "Ice watch on: the log records the game's ice settings whenever they change. Walk onto ice and off again, then /ice_watch off."
-                                     : "Ice watch off.");
+                    print_console(on ? "Ice watch on: walk on normal ground for a few seconds, then on ice for a few seconds, then /ice_watch off. The log lists what the game changes for ice."
+                                     : "Ice watch off. The comparison is in the log.");
                 }
                 else
                     print_console("Ice watch needs the in-game adapter. Load into a level first.");
+            }
+            else if (command == "/ice_force")
+            {
+                if (box_markers)
+                {
+                    const bool on = argument != "off";
+                    box_markers->ice_force(on);
+                    print_console(on ? "Ice force on (test): the game's ice switches are held on. Walk on normal ground and see if Crash slides, then /ice_force off."
+                                     : "Ice force off.");
+                }
+                else
+                    print_console("Ice force needs the in-game adapter. Load into a level first.");
             }
             else if (command == "/ice_probe")
             {
