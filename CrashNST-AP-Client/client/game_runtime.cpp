@@ -3250,7 +3250,7 @@ namespace ingame
                           << string(value<Address>(static_cast<Address>(k.surface_old) + 0x10), 32) << ")\n" << std::flush;
                 ice_kick_search(actor, k.piece, script, script + size);
                 k.stage = IceKick::Searching;
-                ice_note("kick: " + string(value<Address>(surface + 8), 48) + " is now ice. IceKick::Searching (stand still).");
+                ice_note("kick: " + string(value<Address>(surface + 8), 48) + " is now ice. Searching (stand still).");
                 return;
             }
             if (k.stage == IceKick::Searching)
@@ -3335,6 +3335,290 @@ namespace ingame
             else
                 ++k.trial;
         }
+        //  track: finds where the game keeps the floor piece Crash stands on, by watching memory. It searches all of
+        //         the game's memory for the piece he stands on, then each time he walks onto a different kind of
+        //         floor keeps only the places that changed to the new piece. What is left follows his floor. Then
+        //         it gives his floor the Ice kind and puts another piece in those places one at a time: the right
+        //         one makes the game re-check the floor at once (his ice flag turns on and he slides). Off puts the
+        //         kind back and does the same so he stops at once.
+        struct IceTrack
+        {
+            enum Stage { Idle, Scanning, Narrowing, Trying, Holding, Stopping } stage = Idle;
+            std::string level;
+            Address script = 0, script_end = 0, surface = 0, kind = 0, fake = 0, piece = 0;
+            unsigned kudd = 0, flag = 0;
+            std::uint64_t surface_old = 0, changed_time = 0, trial_time = 0, stop_time = 0;
+            Address last_seen = 0, filtered_for = 0;
+            unsigned changes = 0;
+            bool applied = false;
+            std::vector<Address> places;
+            std::set<Address> pieces_seen; // stored ^ ice_mask
+            std::size_t trial = 0;
+            Address trial_at = 0, worked = 0;
+        } ice_track;
+        std::atomic_bool ice_track_scan_done{false};
+        std::vector<Address> ice_track_found;
+        std::mutex ice_track_mutex;
+        void ice_track_restore_kind()
+        {
+            auto &t = ice_track;
+            if (t.applied && readable(t.surface + 0x28, 8) && value<Address>(t.surface + 0x28) == t.kind)
+                write(t.surface + 0x28, t.surface_old);
+            t.applied = false;
+        }
+        std::string ice_track_owner(Address at, Address actor)
+        {
+            std::ostringstream out;
+            Address object = 0;
+            for (Address q = at; q + 1024 > at && q >= 0x10000; q -= 8)
+                if (const auto v = value<Address>(q); v >= base() && v < module_end())
+                {
+                    object = q;
+                    break;
+                }
+            if (!object)
+                return "no type nearby";
+            out << "type +0x" << std::hex << (value<Address>(object) - base()) << " +0x" << (at - object);
+            // is that object Crash, his controller, one of his components, or pointed to by one of them?
+            std::vector<std::pair<Address, std::string>> roots{{actor, "crash"}, {value<Address>(actor + 424), "controller"}};
+            const auto components = list(value<Address>(actor + 24), 256);
+            for (std::size_t i = 0; i < components.size(); ++i)
+                roots.push_back({components[i], "component " + std::to_string(i) + " (type +0x" + [&]
+                                                                         {
+                                                                             std::ostringstream t;
+                                                                             t << std::hex << (value<Address>(components[i]) - base());
+                                                                             return t.str();
+                                                                         }() + ")"});
+            for (const auto &[root, name] : roots)
+            {
+                if (object == root)
+                {
+                    out << " = " << name;
+                    return out.str();
+                }
+                std::vector<std::uint64_t> words(0x800 / 8);
+                if (!read(root, words))
+                    continue;
+                for (std::size_t i = 0; i < words.size(); ++i)
+                    if (words[i] == object)
+                    {
+                        out << " <- " << name << " +0x" << std::hex << i * 8;
+                        return out.str();
+                    }
+            }
+            return out.str();
+        }
+        void update_ice_track(bool on, Address actor, const std::string &level)
+        {
+            auto &t = ice_track;
+            const auto now = GetTickCount64();
+            if (!on && t.stage != IceTrack::Idle && t.stage != IceTrack::Stopping)
+            {
+                ice_track_restore_kind();
+                if (t.worked && level == t.level && readable(t.worked, 8) && readable(t.script + 0x60, 8))
+                {
+                    const auto piece = value<Address>(t.script + 0x60);
+                    if (piece && t.fake && value<Address>(t.worked) == piece && write(t.worked, t.fake))
+                    {
+                        t.stage = IceTrack::Stopping, t.stop_time = now, t.piece = piece;
+                        ice_note("track off: the floor is back to normal. Crash should stop sliding now.");
+                        return;
+                    }
+                }
+                t.stage = IceTrack::Idle;
+                ice_note("track off: the floor is back to normal.");
+                return;
+            }
+            if (t.stage == IceTrack::Stopping)
+            {
+                if (now - t.stop_time < 300)
+                    return;
+                if (readable(t.worked, 8) && value<Address>(t.worked) == t.fake)
+                    write(t.worked, t.piece);
+                std::cout << "Ice test: track off: the ice flag is now " << (t.flag && value<std::uint8_t>(t.script + t.flag)) << "\n" << std::flush;
+                t.stage = IceTrack::Idle;
+                return;
+            }
+            if (!on)
+                return;
+            if (t.stage != IceTrack::Idle && level != t.level)
+            {
+                ice_track_restore_kind();
+                t.stage = IceTrack::Idle;
+                ice_note("track: stopped (left the level). Type /ice_test off.");
+                return;
+            }
+            if (!actor)
+                return;
+            const auto script = crash_script(actor, "Scripts.Graph.Crash_IceSlide");
+            if (!script)
+                return;
+            const auto piece = value<Address>(script + 0x60);
+            if (t.stage == IceTrack::Idle)
+            {
+                if (!typed(piece, 0x13ea4d8))
+                    return; // in the air or loading
+                t = {};
+                t.level = level, t.script = script;
+                t.script_end = script + value<std::uint16_t>(value<Address>(script + 56) + 90);
+                t.kudd = ice_slide_field(script, "Collision_Material_id_kuddrvja").first;
+                t.flag = ice_slide_field(script, "Bool_id_bxsqi703").first;
+                t.last_seen = t.filtered_for = piece, t.changed_time = now;
+                t.pieces_seen.insert(piece ^ ice_mask);
+                t.stage = IceTrack::Scanning;
+                ice_track_scan_done = false;
+                const Address wanted_masked = piece ^ ice_mask;
+                std::thread([wanted_masked]
+                            {
+                    std::vector<Address> hits;
+                    struct Hits
+                    {
+                        Address wanted;
+                        std::vector<Address> *hits;
+                        bool operator()(std::uint64_t v) const { return v == wanted; }
+                        bool add(Address where) const { return hits->push_back(where), hits->size() < 400000; }
+                    };
+                    ice_scan(Hits{wanted_masked ^ ice_mask, &hits});
+                    {
+                        std::lock_guard lock(ice_track_mutex);
+                        ice_track_found = std::move(hits);
+                    }
+                    ice_track_scan_done = true; })
+                    .detach();
+                if (!(ice_surface_seen.level == level && ice_surface_valid()))
+                    ice_surface_by_name(level);
+                ice_note("track: searching memory (stand still, a few seconds).");
+                return;
+            }
+            if (t.stage == IceTrack::Scanning)
+            {
+                if (!ice_track_scan_done)
+                    return;
+                {
+                    std::lock_guard lock(ice_track_mutex);
+                    t.places = std::move(ice_track_found);
+                    ice_track_found.clear();
+                }
+                // keep the places that still hold the piece he stands on
+                const auto now_piece = piece;
+                t.places.erase(std::remove_if(t.places.begin(), t.places.end(),
+                                              [&](Address at) { return value<Address>(at) != now_piece; }),
+                               t.places.end());
+                std::cout << "Ice test: track: the floor piece 0x" << std::hex << piece << std::dec << " ("
+                          << string(value<Address>(value<Address>(piece + 0x18) + 8), 48) << ") is in " << t.places.size() << " places\n"
+                          << std::flush;
+                t.stage = IceTrack::Narrowing;
+                ice_note("track: found " + std::to_string(t.places.size()) +
+                         " places. Now walk onto the ice, then back onto the snow, then onto the ice and the snow again.");
+                return;
+            }
+            if (t.stage == IceTrack::Narrowing)
+            {
+                if (piece != t.last_seen)
+                    t.last_seen = piece, t.changed_time = now;
+                if (!typed(piece, 0x13ea4d8) || piece == t.filtered_for || now - t.changed_time < 400)
+                    return;
+                // he has stood on a different piece for a moment: keep only the places that changed to it
+                const auto before = t.places.size();
+                t.places.erase(std::remove_if(t.places.begin(), t.places.end(),
+                                              [&](Address at) { return value<Address>(at) != piece; }),
+                               t.places.end());
+                t.filtered_for = piece, ++t.changes;
+                t.pieces_seen.insert(piece ^ ice_mask);
+                const auto name = string(value<Address>(value<Address>(piece + 0x18) + 8), 48);
+                std::cout << "Ice test: track: on " << name << " (0x" << std::hex << piece << std::dec << "): " << before << " -> "
+                          << t.places.size() << " places\n"
+                          << std::flush;
+                if (t.places.empty())
+                {
+                    t.stage = IceTrack::Holding;
+                    ice_note("track: lost it (the game doesn't keep the floor that way). Type /ice_test off and send me the log.");
+                    return;
+                }
+                const bool on_ice = ice_surface_seen.level == level && value<Address>(piece + 0x18) == ice_surface_seen.surface;
+                if (t.changes < 3 || t.places.size() > 24 || on_ice)
+                {
+                    ice_note("track: " + std::to_string(t.places.size()) + " places left. Keep walking: " +
+                             (on_ice ? "now onto the snow." : "now onto the ice."));
+                    return;
+                }
+                std::ostringstream out;
+                out << "Ice test: track: these follow Crash's floor:\n";
+                for (const auto at : t.places)
+                    out << "Ice test:   0x" << std::hex << at << std::dec
+                        << (at >= t.script && at < t.script_end ? " (Crash_IceSlide's own setting)" : "") << " in "
+                        << ice_track_owner(at, actor) << "\n";
+                std::cout << out.str() << std::flush;
+                // another piece to put in their place: one he stood on before
+                for (const auto masked : t.pieces_seen)
+                    if (const auto p = masked ^ ice_mask; p != piece && typed(p, 0x13ea4d8))
+                    {
+                        t.fake = p;
+                        break;
+                    }
+                const auto kind = ice_surface_valid() ? value<Address>(ice_surface_seen.surface + 0x28) : 0;
+                const auto surface = value<Address>(piece + 0x18);
+                if (!t.fake || !typed(kind, 0x13ea438) || !readable(surface + 0x28, 8))
+                {
+                    t.stage = IceTrack::Holding;
+                    ice_note("track: found the places but can't test them here. Type /ice_test off and send me the log.");
+                    return;
+                }
+                t.surface = surface, t.kind = kind, t.surface_old = value<std::uint64_t>(surface + 0x28);
+                t.applied = write(surface + 0x28, kind);
+                t.piece = piece, t.trial = 0, t.trial_at = 0, t.stage = IceTrack::Trying;
+                ice_note("track: " + std::to_string(t.places.size()) + " places follow your floor. " + name +
+                         " is now ice: stand still while it tries them.");
+                return;
+            }
+            if (t.stage != IceTrack::Trying)
+                return;
+            const bool flag = t.flag && value<std::uint8_t>(script + t.flag);
+            if (t.trial_at)
+            {
+                if (!flag && now - t.trial_time < 350)
+                    return;
+                if (readable(t.trial_at, 8) && value<Address>(t.trial_at) == t.fake)
+                    write(t.trial_at, t.piece);
+                std::cout << "Ice test: track: try " << (t.trial + 1) << " (0x" << std::hex << t.trial_at << std::dec << "): "
+                          << (flag ? "ICE ON" : "nothing") << "\n" << std::flush;
+                if (flag)
+                {
+                    t.worked = t.trial_at, t.trial_at = 0, t.stage = IceTrack::Holding;
+                    ice_note("track: it worked (try " + std::to_string(t.trial + 1) + ")! Crash should slide now. /ice_test off to stop it.");
+                    return;
+                }
+                t.trial_at = 0, ++t.trial;
+            }
+            else if (flag)
+            {
+                t.stage = IceTrack::Holding;
+                ice_note("track: Crash is on ice already. /ice_test off, stand on the snow, and /ice_test track again.");
+                return;
+            }
+            if (piece != t.piece)
+            {
+                t.stage = IceTrack::Holding;
+                ice_note("track: you moved onto other floor during the test. /ice_test off and try again.");
+                return;
+            }
+            if (t.trial >= t.places.size())
+            {
+                t.stage = IceTrack::Holding;
+                ice_note("track: none of them made the game re-check the floor. Type /ice_test off and send me the log.");
+                return;
+            }
+            const auto at = t.places[t.trial];
+            if (!readable(at, 8) || value<Address>(at) != t.piece)
+            {
+                ++t.trial;
+                return;
+            }
+            if (write(at, t.fake))
+                t.trial_at = at, t.trial_time = now;
+            else
+                ++t.trial;
+        }
         void update_ice_test(unsigned mode)
         {
             static unsigned announced = 0;
@@ -3376,6 +3660,7 @@ namespace ingame
                               : mode == 8 ? "Ice test: copyall on.\n"
                               : mode == 9 ? "Ice test: which on.\n"
                               : mode == 10 ? "Ice test: kick on.\n"
+                              : mode == 11 ? "Ice test: track on.\n"
                                           : "Ice test: off\n")
                           << std::flush;
                 announced = mode;
@@ -3388,6 +3673,7 @@ namespace ingame
                 ice_swapped.clear(), ice_swap_surfaces.clear(), swap_level = level;
             }
             update_ice_kick(mode == 10, actor, level);
+            update_ice_track(mode == 11, actor, level);
             if (previous == 3 && mode != 3)
                 ice_swap_restore();
             if (previous == 5 && mode != 5)
@@ -3890,7 +4176,7 @@ namespace ingame
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         update_ice_watch(state.ice_watch != 0);
         update_move_probe(state.move_probe != 0);
-        update_ice_test(state.ice_test <= 10 ? state.ice_test : 0);
+        update_ice_test(state.ice_test <= 11 ? state.ice_test : 0);
         if (!ice_note_text.empty())
         {
             copy(state.ice_note, ice_note_text);
