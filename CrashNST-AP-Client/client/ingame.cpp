@@ -1348,16 +1348,31 @@ namespace
                 const auto key = ingame::level_key(scene.zone);
                 if (const auto current = level(key))
                 {
-                    const float extra = current->collectible_counts[0] ? 22 : 0;
-                    r.quad(16, 16, 550, 70 + extra, 0xbb181818);
+                    // game and level, then spelled-out check counts (all checks, then gems, power crystal, relic), then
+                    // Crashsanity
+                    std::vector<std::string> lines;
+                    const std::string detail = current->detail;
+                    for (std::size_t start = 0; start < detail.size();)
+                    {
+                        const auto end = std::min(detail.find('\n', start), detail.size());
+                        lines.push_back(detail.substr(start, end - start));
+                        start = end + 1;
+                    }
+                    const std::string crashsanity = !current->style              ? ""
+                                                    : snapshot->vanilla_controls ? "Crashsanity: vanilla controls (F10)"
+                                                    : snapshot->applied_style    ? "Crashsanity: Crash " + std::to_string(snapshot->applied_style) + " (F10: vanilla controls)"
+                                                                                 : "Crashsanity: vanilla controls (style not applied)";
+                    float width = std::max(r.text_width(current->title), r.text_width(crashsanity));
+                    for (const auto &line : lines)
+                        width = std::max(width, r.text_width(line));
+                    const auto rows = 1 + lines.size() + (crashsanity.empty() ? 0 : 1);
+                    r.quad(16, 16, std::min<float>(std::max(width + 16, 300.0f), r.width - 32), 22.0f * rows + 6, 0xbb181818);
                     r.text(22, 20, current->title, 0xffeeeeee);
-                    r.text(22, 42, current->counts, 0xff20d8ff);
-                    if (extra)
-                        r.text(22, 64, current->collectible_counts, 0xff20d8ff);
-                    if (current->style)
-                        r.text(22, 64 + extra, snapshot->vanilla_controls ? "Crashsanity: vanilla controls (F10)" : snapshot->applied_style ? "Crashsanity: Crash " + std::to_string(snapshot->applied_style) + " (F10: vanilla controls)"
-                                                                                                                                 : "Crashsanity: vanilla controls (style not applied)",
-                               0xffeeeeee);
+                    float y = 42;
+                    for (const auto &line : lines)
+                        r.text(22, y, line, 0xff20d8ff), y += 22;
+                    if (!crashsanity.empty())
+                        r.text(22, y, crashsanity, 0xffeeeeee);
                 }
                 std::vector<std::array<float, 4>> labels;
                 const auto campaign = ingame::hub_campaign(scene.zone);

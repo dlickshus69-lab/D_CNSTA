@@ -280,6 +280,7 @@ void BoxMarkers::progress(const CheckProgress &counts, const std::map<std::strin
         ingame::copy(level.title, p.title);
         ingame::copy(level.counts, p.text());
         ingame::copy(level.collectible_counts, p.collectible_text());
+        ingame::copy(level.detail, p.detail_text());
     }
     shared_->entrance_count = 0;
     int c3_index = 0;

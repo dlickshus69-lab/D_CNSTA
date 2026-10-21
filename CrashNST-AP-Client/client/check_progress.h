@@ -10,7 +10,8 @@
 unsigned box_marker_color(bool spoilers, const Json::Value &location_flags, std::int64_t location);
 struct CheckCounts
 {
-    unsigned done = 0, in_logic = 0, total = 0;
+    // in_logic counts every check whose requirements are met (found or not); available only the ones not found yet
+    unsigned done = 0, in_logic = 0, total = 0, available = 0;
     bool logic_known = true;
     std::string text() const;
 };
@@ -19,6 +20,8 @@ struct LevelProgress : CheckCounts
     std::string title;
     std::array<CheckCounts, 3> collectibles{};
     std::string collectible_text() const;
+    // the level panel in the top-left corner: one spelled-out line for all checks, then one per collectible type
+    std::string detail_text() const;
 };
 struct CheckProgress
 {

@@ -34,6 +34,7 @@ namespace ingame
     // gimmick levels except the scuba levels Under Pressure and Deep Trouble
     bool darkness_trap_exempt();
     // gimmick stages (hog, polar bear, jetpack, Crash 3 vehicles): no Darkness there
+    // gimmick levels for traps: hog, polar bear, jetpack, Crash 3 vehicle/scuba levels and the Crash 2 jet-board levels
     bool gimmick_stage();
     // Crash's position (x, y horizontal, z up) when he is loaded
     bool crash_position(std::array<float, 3> &at);

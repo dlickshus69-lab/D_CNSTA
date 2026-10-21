@@ -202,7 +202,7 @@ class AbilityShuffle(Choice):
     off: normal moves.
     start_with_spin: start with Spin and find the other three.
     shuffle_spin: find all four. Logic only expects your easiest starting level (and gimmick stages)
-    without Spin, and Spin is placed in those first checks.
+    without Spin. Spin Placement decides how soon Spin turns up.
 
     Logic is a cautious draft: level clears need Spin; gems, relics and boxes need Spin in Crash 1
     and every move in Crash 2 and 3. Gimmick stages (hog, polar bear, jetpack and Crash 3 vehicle
@@ -218,6 +218,23 @@ class AbilityShuffle(Choice):
     option_start_with_spin = 1
     option_shuffle_spin = 2
     default = option_off
+
+
+class SpinPlacement(Choice):
+    """Where Spin goes when Ability Shuffle is shuffle_spin.
+
+    early: in your first checks (your easiest starting level or a starting gimmick stage).
+    early_to_mid: never in your starting levels. It goes on a random check you can reach without Spin
+    (a gimmick stage, so a hog, polar bear, jetpack, vehicle or scuba level) that needs at least one
+    level you unlock along the way, so it turns up somewhere in the early-to-mid game. Logic is the
+    same either way, so the seed is always beatable. If the seed has no such check (no gimmick stages
+    in your levels), Spin is placed early.
+    """
+
+    display_name = "Spin Placement"
+    option_early = 0
+    option_early_to_mid = 1
+    default = option_early_to_mid
 
 
 class TrapFillPercentage(Range):
@@ -255,9 +272,10 @@ class LifeLossTrapWeight(Range):
 
 
 class SlipperyTrapWeight(Range):
-    """How often Slippery Traps appear compared to other traps. Ice for the Trap Duration: Crash turns
-    slowly, so turns and reversals become wide drifting arcs, and he keeps sliding after you let go.
-    Strongest on a controller (stick and d-pad). No effect in gimmick levels."""
+    """How often Slippery Traps appear compared to other traps. Ice for the Trap Duration, at the speeds
+    of the game's own ice: Crash speeds up slowly, turns in wide slides and slides on after you let go.
+    Strongest on a controller (stick and d-pad). No effect in gimmick levels or the Crash 2 jet-board
+    levels."""
 
     display_name = "Slippery Trap Weight"
     range_start = 0
@@ -268,8 +286,8 @@ class SlipperyTrapWeight(Range):
 class SlowTrapWeight(Range):
     """How often Slow Traps appear compared to other traps. Crash can only walk for the Trap Duration:
     the stick and d-pad become a steady walking tilt. Controller only (keys cannot be half pressed).
-    No effect in gimmick levels (hog, polar bear, jetpack, Crash 3 vehicles) or the chase levels
-    Boulders, Boulder Dash, Bone Yard and Dino Might!"""
+    No effect in gimmick levels (hog, polar bear, jetpack, Crash 3 vehicles), the Crash 2 jet-board
+    levels or the chase levels Boulders, Boulder Dash, Bone Yard and Dino Might!"""
 
     display_name = "Slow Trap Weight"
     range_start = 0
@@ -280,7 +298,8 @@ class SlowTrapWeight(Range):
 class DarknessTrapWeight(Range):
     """How often Darkness Traps appear compared to other traps. The screen goes dark except for a
     soft spotlight on Crash, like Lights Out, for the Trap Duration. No effect in gimmick levels
-    (hog, polar bear, jetpack, Crash 3 vehicles), except the scuba levels."""
+    (hog, polar bear, jetpack, Crash 3 vehicles), except underwater, on Coco's jet ski and on the
+    Crash 2 jet board."""
 
     display_name = "Darkness Trap Weight"
     range_start = 0
@@ -290,9 +309,9 @@ class DarknessTrapWeight(Range):
 
 class NitroTrapWeight(Range):
     """How often Nitro Traps appear compared to other traps. The game spawns a real Nitro crate about
-    2 crates ahead of Crash in the direction he is running. It only happens in levels that have Nitro crates (it
-    borrows one of their spawners) and never in gimmick levels; until then it waits without holding up
-    other traps."""
+    1.5 crates ahead of Crash in the direction he is running. It only happens in levels that have Nitro
+    crates (it borrows one of their spawners) and never in gimmick or Crash 2 jet-board levels; until
+    then it waits without holding up other traps."""
 
     display_name = "Nitro Trap Weight"
     range_start = 0
@@ -302,7 +321,7 @@ class NitroTrapWeight(Range):
 
 class MoveLockTrapWeight(Range):
     """How often Move Lock Traps appear compared to other traps. Spin, slide, body slam and
-    crouch stop working for the Trap Duration."""
+    crouch stop working for the Trap Duration. No effect in gimmick or Crash 2 jet-board levels."""
 
     display_name = "Move Lock Trap Weight"
     range_start = 0
@@ -483,6 +502,7 @@ crash_option_groups = [
         Boxsanity,
         BoxItemSpoilers,
         AbilityShuffle,
+        SpinPlacement,
     ]),
     OptionGroup("Traps", [
         TrapFillPercentage,
@@ -527,6 +547,7 @@ class CrashOptions(PerGameCommonOptions):
     box_item_spoilers: BoxItemSpoilers
     crashsanity: Crashsanity
     ability_shuffle: AbilityShuffle
+    spin_placement: SpinPlacement
     trap_fill_percentage: TrapFillPercentage
     life_loss_trap_weight: LifeLossTrapWeight
     move_lock_trap_weight: MoveLockTrapWeight

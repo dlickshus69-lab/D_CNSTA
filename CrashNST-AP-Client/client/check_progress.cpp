@@ -53,6 +53,27 @@ std::string CheckCounts::text() const
     return std::to_string(done) + "/" + (logic_known ? std::to_string(in_logic) : "?") + " (" + std::to_string(total) +
            ")";
 }
+namespace
+{
+    std::string found_line(const std::string &name, const CheckCounts &c)
+    {
+        auto line = name + ": " + std::to_string(c.done) + " of " + std::to_string(c.total) + " found";
+        if (c.done >= c.total)
+            return line + ", all done";
+        if (!c.logic_known)
+            return line;
+        return line + (c.available ? ", " + std::to_string(c.available) + " available now" : ", none available yet");
+    }
+} // namespace
+std::string LevelProgress::detail_text() const
+{
+    auto result = found_line("Checks", *this);
+    const char *names[]{"Gems", "Power Crystal", "Relic"};
+    for (unsigned i = 0; i < collectibles.size(); ++i)
+        if (collectibles[i].total)
+            result += "\n" + found_line(names[i], collectibles[i]);
+    return result;
+}
 std::string LevelProgress::collectible_text() const
 {
     std::string result;
@@ -206,7 +227,12 @@ CheckProgress check_progress(const CheckRules &rules, const std::vector<std::pai
             if (collectible)
                 ++collectible->in_logic;
             if (!done)
+            {
                 result.reachable.insert(id);
+                ++count.available;
+                if (collectible)
+                    ++collectible->available;
+            }
         }
     }
     return result;

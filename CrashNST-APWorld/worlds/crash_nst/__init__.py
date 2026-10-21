@@ -38,6 +38,7 @@ from .data import (
     TRAPS,
     move_requirements,
     easiest_start,
+    HUB_ITEMS,
     lock_requirements,
     hub_area,
     valid_requirement_counts,
@@ -607,6 +608,45 @@ class CrashWorld(World):
                 )
                 region.locations.append(clear)
 
+    def spin_later_location(self, starts):
+        """Spin Placement early_to_mid: a random check outside the starting levels that needs no Spin and only
+        level or hub access items you do not start with: at least one, and no more than the starting levels
+        have open checks. Returns the location, the items it still needs and the open starting checks, or None
+        when the seed has no such check."""
+        access = set(HUB_ITEMS.values()) | {f"{level.name} - Access" for level in LEVELS}
+        starting = set(self.starting_levels)
+
+        def spots(level):
+            entrance = Counter(self.lock_requirements(entrance_requirements(level, self.active_levels)))
+            for event, name, address in checks(level):
+                if address in self.active_checks and address not in self.locked_collectibles:
+                    yield name, entrance | Counter(self.requirements(level, event))
+            for crate in self.active_crates:
+                if crate["level"] == level.key:
+                    yield crate_location(crate), entrance | Counter(self.box_requirements(level, crate_event(crate)))
+
+        # empty checks you can reach from the start without Spin
+        open_now = sorted(
+            name
+            for level in self.active_levels
+            if level.key in starting
+            for name, needed in spots(level)
+            if "Spin" not in needed and not needed - starts
+        )
+        candidates = sorted(
+            (name, tuple(sorted((needed - starts).elements())))
+            for level in self.active_levels
+            if level.key not in starting
+            for name, needed in spots(level)
+            if "Spin" not in needed
+            and all(item in access for item in needed)
+            and 1 <= sum((needed - starts).values()) <= len(open_now)
+        )
+        if not candidates:
+            return None
+        name, missing = self.random.choice(candidates)
+        return self.multiworld.get_location(name, self.player), Counter(missing), open_now
+
     def create_items(self):
         if self.tracker_slot is not None:
             return
@@ -615,6 +655,7 @@ class CrashWorld(World):
         if self.ability_shuffle == 1:
             starts["Spin"] = 1
         spin_locked = False
+        spin_route = Counter()  # unlocks placed on starting checks so Spin stays reachable
         if self.ability_shuffle == 2:
             # only the easiest starting level and gimmick stages are open without Spin. with very few such
             # checks, fill cannot route around it, so Spin goes on one of their clears; otherwise it is placed
@@ -627,7 +668,23 @@ class CrashWorld(World):
                 and address not in self.locked_collectibles
                 and not self.move_requirements(BY_KEY[key], event)
             ]
-            if len(open_checks) < 4:
+            later = (
+                self.spin_later_location(starts)
+                if self.options.spin_placement.value == self.options.spin_placement.option_early_to_mid
+                else None
+            )
+            if later is not None:
+                # early_to_mid: out of the starting levels, behind at least one level you unlock first
+                location, missing, open_now = later
+                location.place_locked_item(self.create_item("Spin"))
+                spin_locked = True
+                if len(open_now) < 4:
+                    # so few open checks that fill could miss the only route: the unlocks Spin needs go on them
+                    spots = self.random.sample(open_now, sum(missing.values()))
+                    for item, spot in zip(sorted(missing.elements()), spots):
+                        self.multiworld.get_location(spot, self.player).place_locked_item(self.create_item(item))
+                    spin_route = missing
+            elif len(open_checks) < 4:
                 first_checks = sorted(name for event, name in open_checks if event in ("clear", "crystal"))
                 location = self.multiworld.get_location(self.random.choice(first_checks), self.player)
                 location.place_locked_item(self.create_item("Spin"))
@@ -646,6 +703,7 @@ class CrashWorld(World):
         required -= starts
         if spin_locked:
             required.pop("Spin", None)
+        required -= spin_route
         locked = set(self.locked_collectibles.values())
         local_reward_items = set(self.local_reward_sources.values())
         shuffled = set(self.shuffled_collectibles.values()) - set(starts)
@@ -676,7 +734,7 @@ class CrashWorld(World):
             and name not in local_reward_items
             and int(name[6]) in self.enabled_campaigns
         ]
-        capacity = len(self.active_checks) - len(self.locked_collectibles) - spin_locked
+        capacity = len(self.active_checks) - len(self.locked_collectibles) - spin_locked - sum(spin_route.values())
         progression_count = sum(required.values()) + len(shuffled) + len(always)
         if progression_count > capacity:
             # abilities and moves need room: hand out a few collectible rewards at the start instead of shuffling
