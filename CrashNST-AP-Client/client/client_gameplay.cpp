@@ -390,7 +390,17 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                 const auto scene = read_scene(GetCurrentProcess());
                 const auto level = level_key(scene.zone);
                 if (!scene.camera_active || !level_accessible(*seed, tick.items, level))
+                {
+                    // say once per level why rewards are held back, so logs show it
+                    static std::string noted;
+                    const auto note = level.empty() ? std::string() : level;
+                    if (!note.empty() && note != noted && scene.camera_active)
+                        std::cout << "1-Up/Wumpa rewards wait: " << note
+                                  << " counts as locked for this seed, so rewards arrive in the next unlocked level.\n"
+                                  << std::flush;
+                    noted = note;
                     break;
+                }
                 if (session.reserve_filler(index))
                 {
                     ability_access->queue_filler(index, item, scene.zone_address);
@@ -408,7 +418,8 @@ void ClientRuntime::update_ownership(ClientTick &tick)
             std::cerr << "Filler delivery: " << e.what() << std::endl;
         }
     }
-    // traps fire one at a time, only in an accessible level with the camera active, trap_gap_ms apart.
+    // traps fire one at a time, in any level (not hubs or menus) with the camera active, trap_gap_ms apart.
+    // unlike 1-Ups they do not wait for an AP-unlocked level.
     // each is saved as applied before it starts, so reconnecting never replays it.
     if (tick.room_ready && box_markers && seed && std::chrono::steady_clock::now() >= next_trap)
     {
@@ -421,7 +432,7 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                     continue;
                 const auto scene = read_scene(GetCurrentProcess());
                 const auto level = level_key(scene.zone);
-                if (!scene.camera_active || level.empty() || !level_accessible(*seed, tick.items, level))
+                if (!scene.camera_active || level.empty())
                     break;
                 // Life Loss uses the game's lives reward, which must be attached and idle
                 if (kind == ingame::TrapLifeLoss &&
