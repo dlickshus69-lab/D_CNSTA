@@ -278,7 +278,8 @@ void BoxMarkers::progress(const CheckProgress &counts, const std::map<std::strin
         auto &level = shared_->levels[shared_->level_count++];
         ingame::copy(level.key, key);
         ingame::copy(level.title, p.title);
-        ingame::copy(level.counts, p.text());
+        ingame::copy(level.counts, "Checks: " + p.text());
+        ingame::copy(level.clear, p.clear_text());
         ingame::copy(level.collectible_counts, p.collectible_text());
         ingame::copy(level.detail, p.detail_text());
     }

@@ -81,16 +81,21 @@ std::string LevelProgress::detail_text() const
 }
 std::string LevelProgress::collectible_text() const
 {
+    // C power crystal, G gems, R relic
     std::string result;
-    const char *labels[]{"C", "P", "R"};
-    for (unsigned i = 0; i < collectibles.size(); ++i)
+    const std::pair<unsigned, const char *> order[]{{1, "C"}, {0, "G"}, {2, "R"}};
+    for (const auto &[i, label] : order)
         if (collectibles[i].total)
         {
             if (!result.empty())
                 result += "   ";
-            result += std::string(labels[i]) + ": " + collectibles[i].text();
+            result += std::string(label) + ": " + collectibles[i].text();
         }
     return result;
+}
+std::string LevelProgress::clear_text() const
+{
+    return !clear.total ? "" : clear.done >= clear.total ? "Level Cleared" : "Not Finished";
 }
 std::array<LevelProgress, 3> campaign_progress(const CheckProgress &progress,
                                                const std::map<std::string, std::string> &placements)

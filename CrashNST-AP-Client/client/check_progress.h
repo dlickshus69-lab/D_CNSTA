@@ -21,6 +21,8 @@ struct LevelProgress : CheckCounts
     std::array<CheckCounts, 3> collectibles{};
     CheckCounts clear{}; // the level's clear check
     std::string collectible_text() const;
+    // hub label line: "Level Cleared" or "Not Finished" (empty when the level has no clear check)
+    std::string clear_text() const;
     // the level panel in the top-left corner: one spelled-out line for all checks, then one per collectible type
     std::string detail_text() const;
 };

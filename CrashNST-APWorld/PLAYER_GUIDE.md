@@ -14,7 +14,7 @@ Console input supports Left/Right, Home/End, Shift selection and Ctrl+A/C/V.
 Automatic connection attempts stop after five failures.  
 Correct the connection settings and use `/connect` to start a fresh attempt.
 
-The level panel in the top-left corner spells it out: checks found out of the level's total and how many more are available now (in logic), whether the level clear is done, then the same for gems, the power crystal and the relic. Hub and map labels keep the short form **`checked/in logic (total)`**, where `C`, `P` and `R` are gem, power-crystal and relic checks.   
+The level panel in the top-left corner spells it out: checks found out of the level's total and how many more are available now (in logic), whether the level clear is done, then the same for gems, the power crystal and the relic. The label over a hub entrance shows the game and level, `Checks: checked/in logic (total)`, whether the level is cleared ("Level Cleared" or "Not Finished"), then the same short counts for `C` power crystal, `G` gems and `R` relic.   
 Campaign totals appear in the game choose menu and on hub maps.  
 Approach an unlocked hub entrance to see its destination label and check counts.  
 `/hubdistance_c1`, `/hubdistance_c2` and `/hubdistance_c3` show each hub's label

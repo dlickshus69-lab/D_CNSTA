@@ -69,6 +69,7 @@ namespace ingame
     {
         char key[5]{}, title[160]{}, counts[48]{}, collectible_counts[128]{};
         char detail[256]{}; // the top-left level panel: spelled-out lines separated by \n
+        char clear[24]{};   // hub label: Level Cleared / Not Finished
         unsigned style = 0;
     };
     struct Entrance
@@ -249,7 +250,7 @@ namespace ingame
             if (!terminated(s.boxes[i].level) || !terminated(s.boxes[i].name) || box_color_index(s.boxes[i].color) >= 5)
                 return false;
         for (unsigned i = 0; i < s.level_count; ++i)
-            if (!terminated(s.levels[i].key) || !terminated(s.levels[i].title) || !terminated(s.levels[i].counts) || !terminated(s.levels[i].collectible_counts) || !terminated(s.levels[i].detail) || s.levels[i].style > 3)
+            if (!terminated(s.levels[i].key) || !terminated(s.levels[i].title) || !terminated(s.levels[i].counts) || !terminated(s.levels[i].collectible_counts) || !terminated(s.levels[i].detail) || !terminated(s.levels[i].clear) || s.levels[i].style > 3)
                 return false;
         for (unsigned i = 0; i < s.entrance_count; ++i)
             if (!terminated(s.entrances[i].hub) || !terminated(s.entrances[i].destination) ||

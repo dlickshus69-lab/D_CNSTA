@@ -21,6 +21,14 @@ namespace ingame::engine_memory
                ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(at), &value, sizeof(value), &got) &&
                got == sizeof(value);
     }
+    // a vector is filled element by element (the template above would overwrite the vector object itself)
+    template <class T> inline bool read(Address at, std::vector<T> &values)
+    {
+        SIZE_T got = 0;
+        const auto bytes = values.size() * sizeof(T);
+        return at && !values.empty() &&
+               ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(at), values.data(), bytes, &got) && got == bytes;
+    }
     template <class T> T value(Address at)
     {
         T result{};
