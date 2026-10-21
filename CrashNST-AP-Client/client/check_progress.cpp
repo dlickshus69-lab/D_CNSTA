@@ -69,10 +69,10 @@ std::string LevelProgress::detail_text() const
 {
     auto result = found_line("Checks", *this);
     if (clear.total)
-        result += "\nLevel: " + std::string(clear.done >= clear.total ? "Cleared"
-                                           : !clear.logic_known       ? "Not Cleared"
-                                           : clear.available          ? "Not Cleared, available now"
-                                                                      : "Not Cleared, not available yet");
+        result += "\nLevel Clear: " + std::string(clear.done >= clear.total ? "done"
+                                                 : !clear.logic_known       ? "not yet"
+                                                 : clear.available          ? "not yet, available now"
+                                                                            : "not yet, not available yet");
     const char *names[]{"Gems", "Power Crystal", "Relic"};
     for (unsigned i = 0; i < collectibles.size(); ++i)
         if (collectibles[i].total)
@@ -81,8 +81,8 @@ std::string LevelProgress::detail_text() const
 }
 std::string LevelProgress::collectible_text() const
 {
-    // C power crystal, G gems, R relic
-    std::string result;
+    // the level clear, then C power crystal, G gems, R relic
+    std::string result = clear.total ? "Clear: " + std::to_string(clear.done) + "/" + std::to_string(clear.total) : "";
     const std::pair<unsigned, const char *> order[]{{1, "C"}, {0, "G"}, {2, "R"}};
     for (const auto &[i, label] : order)
         if (collectibles[i].total)
@@ -95,7 +95,7 @@ std::string LevelProgress::collectible_text() const
 }
 std::string LevelProgress::label_text() const
 {
-    // found/total, then how many more the current items reach (cleared or not goes on the level-name line)
+    // found/total, then how many more the current items reach
     auto result = "Checks: " + std::to_string(done) + "/" + std::to_string(total);
     if (done < total && logic_known)
         result += available ? " (" + std::to_string(available) + " available)" : " (none available)";

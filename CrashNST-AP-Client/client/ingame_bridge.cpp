@@ -279,7 +279,7 @@ void BoxMarkers::progress(const CheckProgress &counts, const std::map<std::strin
         ingame::copy(level.key, key);
         ingame::copy(level.title, p.title);
         ingame::copy(level.counts, p.label_text());
-        level.cleared = !p.clear.total ? 0 : p.clear.done >= p.clear.total ? 2 : 1;
+        level.all_done = p.total && p.done >= p.total;
         ingame::copy(level.collectible_counts, p.collectible_text());
         ingame::copy(level.detail, p.detail_text());
     }
