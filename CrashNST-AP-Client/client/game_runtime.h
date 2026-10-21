@@ -15,8 +15,8 @@ namespace ingame
     std::vector<LiveBox> live_boxes(const Shared &state, const std::string &zone);
     SceneView scene();
     bool campaign_menu_visible();
-    // a pause-menu panel is on screen (names containing "pause" or "resume"); visible panel sets are logged when
-    // they change so the real names show up in the log
+    // the pause menu is on screen (its Left_Side and Right_Side panels); visible panel sets are logged when they
+    // change so other menus' names show up in the log
     bool pause_menu_visible();
     std::string level_key(std::string zone);
     unsigned hub_campaign(std::string zone);

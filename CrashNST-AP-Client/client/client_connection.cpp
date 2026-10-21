@@ -424,6 +424,16 @@ void ClientRuntime::handle_commands()
                 else
                     print_console("Nitro probe needs the in-game adapter. Load into a level first.");
             }
+            else if (command == "/nitro_spawn")
+            {
+                if (box_markers)
+                {
+                    box_markers->request_nitro_spawn();
+                    print_console("Nitro spawn requested (experimental): the game spawns a Nitro next to Crash. Restart the level to undo.");
+                }
+                else
+                    print_console("Nitro spawn needs the in-game adapter. Load into a level first.");
+            }
             else if (command == "/ice_probe")
             {
                 if (box_markers)
