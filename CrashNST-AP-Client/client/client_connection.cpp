@@ -440,6 +440,18 @@ void ClientRuntime::handle_commands()
                 else
                     print_console("Nitro spawn needs the in-game adapter. Load into a level first.");
             }
+            else if (command == "/ice_watch")
+            {
+                if (box_markers)
+                {
+                    const bool on = argument != "off";
+                    box_markers->ice_watch(on);
+                    print_console(on ? "Ice watch on: the log records the game's ice settings whenever they change. Walk onto ice and off again, then /ice_watch off."
+                                     : "Ice watch off.");
+                }
+                else
+                    print_console("Ice watch needs the in-game adapter. Load into a level first.");
+            }
             else if (command == "/ice_probe")
             {
                 if (box_markers)

@@ -39,6 +39,7 @@ public:
     void request_nitro_test();
     void request_nitro_scan();
     void request_ice_probe();
+    void ice_watch(bool on);
     void request_nitro_spawn();
     bool nitro_ready();
     void pause_traps(bool paused, std::uint64_t elapsed_ms);

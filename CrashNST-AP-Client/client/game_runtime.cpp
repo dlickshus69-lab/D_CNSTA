@@ -1398,6 +1398,18 @@ namespace ingame
             Address entity = 0;
             std::array<float, 3> old{};
         } nitro_home;
+        // research probes follow unknown pointers. only read pages that are committed, readable and not guard pages:
+        // touching another thread's stack guard page can make the game crash later
+        bool readable(Address at, std::size_t size)
+        {
+            MEMORY_BASIC_INFORMATION info{};
+            if (at < 0x10000 || !VirtualQuery(reinterpret_cast<void *>(at), &info, sizeof(info)) || info.State != MEM_COMMIT ||
+                (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) || !(info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                                                                                  PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
+                return false;
+            const auto end = reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize;
+            return at + size <= end || readable(end, at + size - end);
+        }
         // copies of a position: x and y exact, height within a hop. a crate stacked on this one is a full crate
         // height (about 78) above, so it never matches
         bool crate_copy(const float *v, const std::array<float, 3> &t)
@@ -1446,7 +1458,7 @@ namespace ingame
                 SIZE_T got = 0;
                 unsigned size = 0;
                 for (const unsigned attempt : {node.span, 512u, 64u})
-                    if (attempt <= node.span && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(node.at), bytes.data(), attempt, &got) && got == attempt)
+                    if (attempt <= node.span && readable(node.at, attempt) && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(node.at), bytes.data(), attempt, &got) && got == attempt)
                     {
                         size = attempt;
                         break;
@@ -1912,6 +1924,8 @@ namespace ingame
         std::string describe_object(Address p)
         {
             std::ostringstream out;
+            if (!readable(p, 72))
+                return "(not readable)";
             const auto vt = value<Address>(p);
             if (!vt)
                 return "(unreadable)";
@@ -1921,7 +1935,10 @@ namespace ingame
                 out << "first word 0x" << std::hex << vt << std::dec;
             for (unsigned off = 8; off <= 64; off += 8)
             {
-                const auto text = string(value<Address>(p + off), 64);
+                const auto at = value<Address>(p + off);
+                if (!readable(at, 64))
+                    continue;
+                const auto text = string(at, 64);
                 if (text.size() >= 3 && std::all_of(text.begin(), text.end(), [](unsigned char c) { return c >= 32 && c < 127; }))
                     out << ", " << hex(off) << " \"" << text << "\"";
             }
@@ -1969,7 +1986,7 @@ namespace ingame
                         if (bytes && offset + v.size <= size)
                             read(c + offset, v.bits);
                         std::cout << "Ice probe:   IceSlide " << hex(offset) << " " << name << " (" << bytes << " bytes) = " << ice_format(v);
-                        if (bytes == 8 && v.bits > 0x10000 && v.bits < 0x7ffffffeffffULL)
+                        if (bytes == 8 && v.bits > 0x10000 && v.bits < 0x7ffffffeffffULL && readable(v.bits, 8))
                         {
                             std::cout << " -> " << describe_object(v.bits);
                             if (name.find("Material") != std::string::npos)
@@ -2018,11 +2035,11 @@ namespace ingame
                     for (unsigned i = 0; i < words.size() && shown < 30; ++i)
                     {
                         const auto p = words[i];
-                        if (p < 0x10000 || p > 0x7ffffffeffffULL || (p & 7))
+                        if (p < 0x10000 || p > 0x7ffffffeffffULL || (p & 7) || !readable(p, 512))
                             continue;
                         const auto describe = [&](Address q, const std::string &path)
                         {
-                            if (!ice_material_types.count(value<Address>(q)))
+                            if (!readable(q, 8) || !ice_material_types.count(value<Address>(q)))
                                 return;
                             ++shown;
                             std::cout << "Ice probe: material at " << path << " = 0x" << std::hex << q << std::dec
@@ -2071,6 +2088,65 @@ namespace ingame
             ice_probe_last = std::move(now);
             ice_raw_last = raw_ok ? raw : std::vector<unsigned>{};
             std::cout << std::flush;
+        }
+        // /ice_watch: every 0.2 s compare Crash_IceSlide's settings (values only) and log what changed, so walking on and
+        // off ice shows what the game's ice logic does without typing anything on the ice
+        std::map<std::string, IceValue> ice_watch_last;
+        unsigned ice_watch_lines = 0;
+        void update_ice_watch(bool on)
+        {
+            static std::uint64_t next = 0;
+            static Address watched_actor = 0;
+            const auto now = GetTickCount64();
+            if (!on)
+            {
+                ice_watch_last.clear(), watched_actor = 0;
+                return;
+            }
+            if (now < next || ice_watch_lines >= 600)
+                return;
+            next = now + 200;
+            const auto actor = player();
+            if (!actor)
+                return;
+            if (actor != watched_actor)
+                ice_watch_last.clear(), watched_actor = actor;
+            for (const auto c : list(value<Address>(actor + 24), 128))
+            {
+                if (!typed(c, 0x13bbbd0) || value<Address>(c + 24) != actor)
+                    continue;
+                const auto meta = value<Address>(c + 56);
+                if (!typed(meta, 0x1745d78) || string(value<Address>(meta + 16)) != "Scripts.Graph.Crash_IceSlide")
+                    continue;
+                const auto count = value<unsigned>(meta + 24), size = unsigned(value<std::uint16_t>(meta + 90));
+                const auto fields = value<Address>(meta + 40);
+                if (!fields || count > 512)
+                    return;
+                const bool first = ice_watch_last.empty();
+                for (unsigned i = 0; i < count; ++i)
+                {
+                    const auto field = value<Address>(fields + i * 8);
+                    const auto name = string(value<Address>(field + 48));
+                    const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                    if (name.empty() || !bytes || bytes > 8 || offset + bytes > size)
+                        continue;
+                    IceValue v{0, bytes};
+                    SIZE_T got = 0;
+                    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(c + offset), &v.bits, bytes, &got) || got != bytes)
+                        continue;
+                    auto &old = ice_watch_last[name];
+                    if (!first && old.bits != v.bits && ice_watch_lines < 600)
+                    {
+                        ++ice_watch_lines;
+                        std::cout << "Ice watch: " << name << ": " << ice_format(old) << " -> " << ice_format(v) << "\n";
+                    }
+                    old = v;
+                }
+                if (first)
+                    std::cout << "Ice watch: watching " << ice_watch_last.size() << " Crash_IceSlide settings. Walk onto ice and off again.\n";
+                std::cout << std::flush;
+                return;
+            }
         }
         void update_c3_buttons(Shared &state, const std::string &zone)
         {
@@ -2311,6 +2387,7 @@ namespace ingame
             nitro_probe();
         }
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
+        update_ice_watch(state.ice_watch != 0);
         if (state.ice_probe_request != state.ice_probe_ack)
         {
             state.ice_probe_ack = state.ice_probe_request;
@@ -2332,8 +2409,12 @@ namespace ingame
         // mixed vehicle levels retain normal controls until their active form is mapped
         const bool walking = actor && typed(value<Address>(actor + 424), 0x1589128) && !special_level(key);
         const auto desired = walking && !vanilla_movement ? assigned_movement() : 0;
-        // Crash 1 controls and Move Lock Traps block crouch/slide input live
-        blocked_crouch_controller = walking && (movement_style(desired, scene_campaign(), false) == 1 || move_lock_active())
+        // Crash 1 controls and Move Lock Traps block crouch/slide input live. Ability Shuffle without Crouch Jump
+        // removes the crouch component at level start like Crash 1 does, but the button still reached the game, so a
+        // crouch (a tutorial popup asks for one) could start and never end and every jump became a high jump. Block the
+        // button too while neither Crouch Jump nor Slide is owned (the same button slides, so an owned Slide keeps it).
+        const bool unowned_crouch = crouch_locked() && move_blocked(MoveSlide, move_shuffle, vanilla_movement, owned_moves);
+        blocked_crouch_controller = walking && (movement_style(desired, scene_campaign(), false) == 1 || move_lock_active() || unowned_crouch)
                                         ? value<Address>(actor + 424) : 0;
         active_style = 0;
         state.applied_style = 0;
