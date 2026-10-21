@@ -417,6 +417,13 @@ namespace ingame
                 return 0;
             return variable;
         }
+        // Crash_DamageManager's BonusRoundActive game variable: on from a bonus round's start until it ends
+        std::atomic<Address> bonus_round_variable{0};
+        bool bonus_round_active()
+        {
+            const auto variable = bonus_round_variable.load();
+            return variable && typed(variable, 0x155ebf0) && reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60)(variable);
+        }
         void record_death_change(bool before, bool after)
         {
             if (before == after)
@@ -426,8 +433,15 @@ namespace ingame
                 remote_death = false;
                 return;
             }
-            if (!remote_death.exchange(false))
-                ++observed_deaths;
+            if (remote_death.exchange(false))
+                return; // a received DeathLink (or Death Trap) killed him: not sent back
+            // a bonus round death only ends the bonus round (no life lost), so it isn't sent to anyone
+            if (bonus_round_active())
+            {
+                std::cout << "DeathLink: died in a bonus round, not sent.\n" << std::flush;
+                return;
+            }
+            ++observed_deaths;
         }
         // death watch (research: DeathLink in bonus rounds). The game variables Crash_DamageManager uses, by name, and
         // every change of a yes/no game variable while in a level go to the log, so a bonus-round death shows which
@@ -802,6 +816,7 @@ namespace ingame
                 death_watch_unknown = 0; // a fresh log allowance for each Crash (new level, bonus round)
             }
             death_handle = 0;
+            bonus_round_variable = 0;
             for (const auto c : list(value<Address>(actor + 24), 128))
             {
                 if (!typed(c, 0x13bbbd0) || value<Address>(c + 24) != actor || !(value<unsigned>(c + 32) & 1) ||
@@ -840,6 +855,8 @@ namespace ingame
                             continue;
                         auto &slot = death_watch[found++];
                         const auto name = string(value<Address>(handle + 8), 47);
+                        if (name == "BonusRoundActive")
+                            bonus_round_variable = variable;
                         std::snprintf(slot.name, sizeof(slot.name), "%s", name.c_str());
                         slot.variable = variable;
                         names << " " << name;
@@ -3992,6 +4009,184 @@ namespace ingame
                                 : "who: nothing caught in 30 seconds. Type /ice_test off and send me the log.");
             }
         }
+        //  contact (research): the floor change is noticed in the game's code at +0x510b70, called every frame from
+        //  Crash's update (+0x4bcc70) with Crash and his ground contact object (type +0x1509a38). This dumps that code
+        //  and the functions it calls, then watches Crash and the contact object: every time he settles on a
+        //  different kind of floor it notes their values, and at the end lists the ones that follow the floor kind
+        //  (one value on snow, another on ice). One of them is what the game compares.
+        void code_dump(Address begin, Address end, const char *why)
+        {
+            std::ostringstream code;
+            code << "Code: " << why << " +0x" << std::hex << (begin - base()) << "..+0x" << (end - base()) << "\n";
+            for (Address at = begin; at < end; at += 64)
+            {
+                std::array<unsigned char, 64> bytes{};
+                const auto n = static_cast<unsigned>(std::min<Address>(64, end - at));
+                SIZE_T got = 0;
+                ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(at), bytes.data(), n, &got);
+                code << "Code: +0x" << (at - base()) << " ";
+                for (unsigned b = 0; b < got; ++b)
+                    code << std::setw(2) << std::setfill('0') << unsigned(bytes[b]);
+                code << "\n";
+            }
+            std::cout << code.str() << std::flush;
+        }
+        // a function and, one level down, every function it calls directly
+        void code_dump_tree(Address begin, Address end, std::set<Address> &done)
+        {
+            if (!done.insert(begin).second)
+                return;
+            code_dump(begin, end, "function");
+            std::vector<unsigned char> bytes(end - begin);
+            SIZE_T got = 0;
+            ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(begin), bytes.data(), bytes.size(), &got);
+            for (std::size_t i = 0; i + 5 <= got; ++i)
+                if (bytes[i] == 0xe8)
+                {
+                    std::int32_t rel = 0;
+                    std::memcpy(&rel, &bytes[i + 1], 4);
+                    const Address target = begin + i + 5 + rel;
+                    if (target < base() + 0x1000 || target >= module_end() || done.count(target))
+                        continue;
+                    DWORD64 image = 0;
+                    const auto entry = RtlLookupFunctionEntry(target, &image, nullptr);
+                    if (!entry || image + entry->BeginAddress != target)
+                        continue; // not the start of a function: a false match inside an instruction
+                    done.insert(target);
+                    code_dump(target, std::min<Address>(image + entry->EndAddress, target + 0x200), "callee");
+                }
+        }
+        Address find_typed_near(Address actor, Address rva)
+        {
+            std::deque<std::pair<Address, int>> queue{{actor, 0}};
+            std::set<Address> seen{actor};
+            while (!queue.empty() && seen.size() < 4000)
+            {
+                const auto [at, depth] = queue.front();
+                queue.pop_front();
+                std::vector<std::uint64_t> words((depth ? 0x400 : 0x1000) / 8);
+                if (!read(at, words))
+                    continue;
+                for (const auto w : words)
+                {
+                    const auto p = static_cast<Address>(w);
+                    if (p < 0x10000 || p > 0x7ffffffeffffULL || (p & 7) || (p >= base() && p < module_end()))
+                        continue;
+                    if (typed(p, rva))
+                        return p;
+                    if (depth < 2 && seen.insert(p).second)
+                        queue.push_back({p, depth + 1});
+                }
+            }
+            return 0;
+        }
+        struct ContactWatch
+        {
+            bool active = false, dumped = false;
+            Address actor = 0, contact = 0, dispatcher = 0, script = 0;
+            Address last_piece = 0, settled_piece = 0;
+            std::uint64_t changed = 0;
+            std::vector<std::string> kinds;                       // the floor kind at each settle
+            std::vector<std::vector<std::uint64_t>> contact_at, actor_at;
+        } contact_watch;
+        void contact_report()
+        {
+            auto &w = contact_watch;
+            std::ostringstream out;
+            out << "Contact: " << w.kinds.size() << " floors:";
+            for (const auto &k : w.kinds)
+                out << " " << k;
+            out << "\n";
+            const auto list = [&](const char *what, const std::vector<std::vector<std::uint64_t>> &snaps)
+            {
+                if (snaps.size() < 2)
+                    return;
+                unsigned shown = 0;
+                for (std::size_t i = 0; i < snaps[0].size() && shown < 80; ++i)
+                {
+                    // same value on the same kind of floor every time, and different kinds differ somewhere
+                    std::map<std::string, std::uint64_t> by_kind;
+                    bool consistent = true, differs = false;
+                    for (std::size_t s = 0; s < snaps.size() && consistent; ++s)
+                    {
+                        auto [it, fresh] = by_kind.emplace(w.kinds[s], snaps[s][i]);
+                        if (!fresh && it->second != snaps[s][i])
+                            consistent = false;
+                    }
+                    for (const auto &[kind, v] : by_kind)
+                        differs |= v != by_kind.begin()->second;
+                    if (!consistent || !differs)
+                        continue;
+                    ++shown;
+                    out << "Contact: " << what << " +0x" << std::hex << i * 8 << ":";
+                    for (const auto &[kind, v] : by_kind)
+                        out << " " << kind << "=0x" << v;
+                    out << std::dec << "\n";
+                }
+                out << "Contact: " << what << ": " << shown << " values follow the floor kind\n";
+            };
+            list("crash", w.actor_at);
+            list("contact", w.contact_at);
+            std::cout << out.str() << std::flush;
+        }
+        void update_contact_watch(bool on, Address actor)
+        {
+            auto &w = contact_watch;
+            if (!on)
+            {
+                if (w.active)
+                    contact_report();
+                w.active = false;
+                return;
+            }
+            if (!w.dumped)
+            {
+                w.dumped = true;
+                std::set<Address> done;
+                code_dump_tree(base() + 0x510b70, base() + 0x510e80, done);
+                code_dump_tree(base() + 0x4dcf50, base() + 0x4dd0d0, done);
+                code_dump(base() + 0x4bcb70, base() + 0x4bcc70, "before the actor update");
+            }
+            if (!actor)
+                return;
+            if (!w.active || w.actor != actor)
+            {
+                w = {};
+                w.dumped = true, w.active = true, w.actor = actor;
+                w.contact = find_typed_near(actor, 0x1509a38);
+                w.dispatcher = find_typed_near(actor, 0x14cb600);
+                w.script = crash_script(actor, "Scripts.Graph.Crash_IceSlide");
+                std::cout << "Contact: crash 0x" << std::hex << actor << ", contact 0x" << w.contact << " (crash +0x" << (w.contact - actor)
+                          << "), dispatcher 0x" << w.dispatcher << " (crash +0x" << (w.dispatcher - actor) << ")\n" << std::dec << std::flush;
+                ice_note(w.contact ? "contact: watching. Walk ice -> snow -> ice -> snow (stop a second on each), then /ice_test off."
+                                   : "contact: Crash's contact object wasn't found. /ice_test off and send me the log.");
+                return;
+            }
+            if (!w.contact || !w.script)
+                return;
+            const auto piece = value<Address>(w.script + 0x60);
+            const auto now = GetTickCount64();
+            if (piece != w.last_piece)
+                w.last_piece = piece, w.changed = now;
+            if (piece == w.settled_piece || now - w.changed < 500 || !typed(piece, 0x13ea4d8) || w.kinds.size() >= 12)
+                return;
+            w.settled_piece = piece;
+            std::vector<std::uint64_t> c(0x1000 / 8), a(0x2000 / 8);
+            if (!read(w.contact, c))
+                c.assign(c.size(), 0);
+            if (!read(actor, a))
+            {
+                a.assign(a.size(), 0);
+                a.resize(0x800 / 8);
+                if (!read(actor, a))
+                    a.assign(a.size(), 0);
+                a.resize(0x2000 / 8, 0);
+            }
+            const auto kind = string(value<Address>(value<Address>(value<Address>(piece + 0x18) + 0x28) + 0x10), 24);
+            w.kinds.push_back(kind.empty() ? "?" : kind);
+            w.contact_at.push_back(std::move(c)), w.actor_at.push_back(std::move(a));
+            ice_note("contact: on " + w.kinds.back() + " (" + std::to_string(w.kinds.size()) + "). Keep walking ice <-> snow.");
+        }
         void update_ice_test(unsigned mode)
         {
             static unsigned announced = 0;
@@ -4036,6 +4231,7 @@ namespace ingame
                               : mode == 11 ? "Ice test: track on.\n"
                               : mode == 12 ? "Ice test: who on.\n"
                               : mode == 13 ? "Ice test: whopage on.\n"
+                              : mode == 14 ? "Ice test: contact on.\n"
                                           : "Ice test: off\n")
                           << std::flush;
                 announced = mode;
@@ -4050,6 +4246,7 @@ namespace ingame
             update_ice_kick(mode == 10, actor, level);
             update_ice_track(mode == 11, actor, level);
             update_ice_who(mode, actor);
+            update_contact_watch(mode == 14, actor);
             if (previous == 3 && mode != 3)
                 ice_swap_restore();
             if (previous == 5 && mode != 5)
@@ -4552,7 +4749,7 @@ namespace ingame
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         update_ice_watch(state.ice_watch != 0);
         update_move_probe(state.move_probe != 0);
-        update_ice_test(state.ice_test <= 13 ? state.ice_test : 0);
+        update_ice_test(state.ice_test <= 14 ? state.ice_test : 0);
         if (!ice_note_text.empty())
         {
             copy(state.ice_note, ice_note_text);

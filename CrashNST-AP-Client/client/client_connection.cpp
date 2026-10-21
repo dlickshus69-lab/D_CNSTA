@@ -353,8 +353,18 @@ void ClientRuntime::handle_commands()
                 std::string name = command == "/slow_test" ? "slow" : argument;
                 std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 const auto kind = std::find_if(std::begin(kinds), std::end(kinds), [&](const auto &k) { return name == k.first; });
-                if (kind == std::end(kinds))
-                    print_console("Use /trap_test slow, slippery, darkness, reverse, freeze, movelock or nitro. Close the console (F1) to play.");
+                if (name == "deathlink")
+                {
+                    if (!box_markers)
+                        print_console("DeathLink test needs the in-game adapter. Load into a level first.");
+                    else
+                    {
+                        box_markers->receive_death();
+                        print_console("DeathLink test: Crash dies as if someone else died (in a bonus round, the bonus round ends). Not sent to AP. Close the console (F1).");
+                    }
+                }
+                else if (kind == std::end(kinds))
+                    print_console("Use /trap_test slow, slippery, darkness, reverse, freeze, movelock, nitro or deathlink. Close the console (F1) to play.");
                 else if (!box_markers)
                     print_console("Trap test needs the in-game adapter. Load into a level first.");
                 else if (kind->second == ingame::TrapNitro)
@@ -468,9 +478,9 @@ void ClientRuntime::handle_commands()
             {
                 if (box_markers)
                 {
-                    const unsigned mode = argument == "slide" ? 1u : argument == "floor" ? 2u : argument == "swap" ? 3u : argument == "push" ? 4u : argument == "const" ? 5u : argument == "copy" ? 6u : argument == "name" ? 7u : argument == "copyall" ? 8u : argument == "which" ? 9u : argument == "kick" ? 10u : argument == "track" ? 11u : argument == "who" ? 12u : argument == "whopage" ? 13u : 0u;
+                    const unsigned mode = argument == "slide" ? 1u : argument == "floor" ? 2u : argument == "swap" ? 3u : argument == "push" ? 4u : argument == "const" ? 5u : argument == "copy" ? 6u : argument == "name" ? 7u : argument == "copyall" ? 8u : argument == "which" ? 9u : argument == "kick" ? 10u : argument == "track" ? 11u : argument == "who" ? 12u : argument == "whopage" ? 13u : argument == "contact" ? 14u : 0u;
                     if (!mode && argument != "off")
-                        print_console("Use /ice_test who, whopage, track, kick, which, copyall, swap, name, const, copy, push, slide, floor or off.");
+                        print_console("Use /ice_test contact, who, whopage, track, kick, which, copyall, swap, name, const, copy, push, slide, floor or off.");
                     box_markers->ice_test(mode);
                     print_console(mode == 1 ? "Ice test: slide on. Close the console and run, turn and stop on normal ground. /ice_test off when done."
                                   : mode == 2 ? "Ice test: floor on. Close the console and run, turn and stop on normal ground. /ice_test off when done."
@@ -484,6 +494,7 @@ void ClientRuntime::handle_commands()
                                   : mode == 10 ? "Ice test: kick on. Stand still on normal ground and follow the messages. /ice_test off when done."
                                   : mode == 11 ? "Ice test: track on. Stand still on the snow and follow the messages. /ice_test off when done."
                                   : mode == 12 || mode == 13 ? "Ice test: who on. Walk onto the ice, then back onto the snow. /ice_test off when done."
+                                  : mode == 14 ? "Ice test: contact on. Walk ice -> snow -> ice -> snow, stopping a second on each. /ice_test off when done."
                                               : "Ice test off.");
                 }
                 else

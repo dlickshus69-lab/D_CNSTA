@@ -46,6 +46,8 @@ Markers normally show unchecked selected crates that are in logic. `/outoflogic 
 `/tint_opacity` shows the current tint strength.  
 Set it from 0 (no tint) to 1 (full tint), for example `/tint_opacity 0.5` for 50%. The default is 0.75.
 `/slow_tilt` sets how far the Slow Trap pushes the stick (0.2 to 1, default 0.71). While Slow is on, the client tunes it itself: if Crash runs it goes down at once and never back up to that tilt, if he stands still for a moment while you push it goes up, and the result is saved. Each change is logged as `Slow tuner: ...`. `/trap_test slow` (or `slippery`, `darkness`, `reverse`, `freeze`, `movelock`, `nitro`) turns that trap on for 30 seconds without AP so you can try it; close the console with F1 first, because the game ignores the controller while it is open. The setting is saved on this computer.
+`/trap_test deathlink` kills Crash as if another player died (nothing is sent to AP), to check how a received DeathLink plays out.
+DeathLink and bonus rounds: dying in a bonus round only ends the bonus round, so it isn't sent to anyone. A DeathLink received during a bonus round fails the bonus round (no life lost), and you can try it again.
 `box_item_spoilers` in the yaml can color markers by item category. Chat and `!` commands go to the AP server.
 
 When item spoilers are enabled, the client scouts selected locations on connection without creating hints. Item flags are cached per seed and slot for offline play. Boxes use the normal marker color until their flags arrive.
