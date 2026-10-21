@@ -1324,6 +1324,13 @@ namespace ingame
             Address entity = 0;
             std::vector<ScanHit> hits;
         } nitro_scan_state;
+        // the last crate /nitro_test moved and the spot it came from: /nitro_scan then also looks for copies that
+        // still hold that old spot (where its hop returns it)
+        struct NitroHome
+        {
+            Address entity = 0;
+            std::array<float, 3> old{};
+        } nitro_home;
         void nitro_scan()
         {
             const auto actor = player();
@@ -1339,26 +1346,40 @@ namespace ingame
                 std::cout << "Nitro scan: no live Nitro crate in this level.\n" << std::flush;
                 return;
             }
-            std::vector<std::array<float, 3>> targets(1);
-            read(pick.entity + 32, targets[0]);
+            // targets: current position, render translation if different, and the pre-test spot
+            std::vector<std::pair<std::array<float, 3>, const char *>> targets(1, {{}, ""});
+            read(pick.entity + 32, targets[0].first);
             Matrix matrix{};
-            if (pick.model && read(pick.model + 48, matrix) && !same_place(&matrix[12], targets[0], 0.05f))
-                targets.push_back({matrix[12], matrix[13], matrix[14]});
+            if (pick.model && read(pick.model + 48, matrix) && !same_place(&matrix[12], targets[0].first, 0.05f))
+                targets.push_back({{matrix[12], matrix[13], matrix[14]}, ""});
+            const bool tested = nitro_home.entity == pick.entity && !same_place(nitro_home.old.data(), targets[0].first, 0.05f);
+            if (tested)
+                targets.push_back({nitro_home.old, " [old spot]"});
             struct Node
             {
                 Address at;
                 std::string path;
                 unsigned depth;
             };
-            constexpr unsigned max_objects = 20000, max_depth = 3, span = 512;
+            constexpr unsigned max_objects = 60000, max_depth = 4, span = 512;
             std::deque<Node> queue;
             std::set<Address> seen, hit_at;
-            const std::pair<Address, const char *> roots[]{{pick.owner, "owner"}, {pick.entity, "entity"},
-                                                           {value<Address>(pick.entity + 176), "model component"}, {pick.model, "model"}};
+            std::vector<std::pair<Address, std::string>> roots{{pick.owner, "owner"}, {pick.entity, "entity"},
+                                                               {value<Address>(pick.entity + 176), "model component"}, {pick.model, "model"}};
+            // every script attached to the spawner or the crate, named by its graph
+            for (const auto &[holder, label] : {std::pair<Address, const char *>{pick.owner, "owner"}, {pick.entity, "entity"}})
+                for (const auto c : list(value<Address>(holder + 24), 64))
+                {
+                    const auto meta = value<Address>(c + 56);
+                    auto name = typed(meta, 0x1745d78) ? string(value<Address>(meta + 16)) : std::string("component");
+                    if (name.rfind("Scripts.Graph.", 0) == 0)
+                        name.erase(0, 14);
+                    roots.push_back({c, std::string(label) + " script " + name});
+                }
             for (const auto &[root, label] : roots)
                 if (root && seen.insert(root).second)
                     queue.push_back({root, label, 0});
-            std::vector<ScanHit> hits;
+            std::vector<ScanHit> hits, old_hits;
             unsigned visited = 0;
             const auto image_start = base(), image_end = module_end();
             std::vector<unsigned char> bytes(span);
@@ -1379,7 +1400,7 @@ namespace ingame
                 {
                     float v[3];
                     std::memcpy(v, bytes.data() + o, sizeof(v));
-                    for (const auto &t : targets)
+                    for (const auto &[t, tag] : targets)
                         if (same_place(v, t, 0.05f))
                         {
                             if (hit_at.insert(node.at + o).second)
@@ -1387,7 +1408,7 @@ namespace ingame
                                 float w = 0;
                                 if (o + 16 <= size)
                                     std::memcpy(&w, bytes.data() + o + 12, sizeof(w));
-                                hits.push_back({node.at + o, node.path + " " + hex(o) + (w == 1.0f ? " (w 1)" : "")});
+                                (*tag ? old_hits : hits).push_back({node.at + o, node.path + " " + hex(o) + (w == 1.0f ? " (w 1)" : "") + tag});
                             }
                             break;
                         }
@@ -1398,24 +1419,40 @@ namespace ingame
                 {
                     Address p = 0;
                     std::memcpy(&p, bytes.data() + o, sizeof(p));
-                    if (p < 0x10000 || p > 0x7ffffffeffffULL || (p & 7) || (p >= image_start && p < image_end) || !seen.insert(p).second)
+                    if (visited + queue.size() >= max_objects || p < 0x10000 || p > 0x7ffffffeffffULL || (p & 7) ||
+                        (p >= image_start && p < image_end) || !seen.insert(p).second)
                         continue;
                     queue.push_back({p, node.path + " " + hex(o) + " ->", node.depth + 1});
                 }
             }
-            std::cout << "Nitro scan: " << pick.name << " (" << static_cast<int>(pick.distance) << " from Crash) at " << triple(targets[0])
-                      << ": searched " << visited << " objects, " << hits.size() << " copies of its position\n";
+            std::cout << "Nitro scan: " << pick.name << " (" << static_cast<int>(pick.distance) << " from Crash) at " << triple(targets[0].first)
+                      << ": searched " << visited << " objects, " << hits.size() << " copies of its position"
+                      << (tested ? ", " + std::to_string(old_hits.size()) + " still holding its old spot " + triple(nitro_home.old) : std::string())
+                      << "\n";
+            for (unsigned i = 0; i < old_hits.size() && i < 30; ++i)
+                std::cout << "Nitro scan:   " << old_hits[i].path << "\n";
             for (unsigned i = 0; i < hits.size() && i < 40; ++i)
                 std::cout << "Nitro scan:   " << hits[i].path << "\n";
             std::cout << "Nitro scan done. Nothing was changed. /nitro_test now also moves these copies.\n" << std::flush;
             nitro_scan_state = {pick.entity, std::move(hits)};
         }
+        // /nitro_test holds the crate next to Crash for this long so it can be touched, putting back any copy the
+        // game moves and logging when and where each copy was first moved
+        constexpr std::uint64_t nitro_hold_ms = 15000;
         struct NitroTest
         {
-            std::uint64_t check_at = 0;
+            Address entity = 0, actor = 0;
+            std::string level;
+            std::uint64_t started = 0;
+            bool reported = false;
             std::array<float, 3> target{};
             std::vector<ScanHit> written;
+            std::vector<bool> moved;
         } nitro_test_state;
+        bool live_crate(Address entity)
+        {
+            return typed(entity, 0x141d490) && (value<unsigned>(entity + 56) & 4);
+        }
         void nitro_test()
         {
             const auto actor = player();
@@ -1456,27 +1493,63 @@ namespace ingame
                 else
                     ++skipped;
             }
-            nitro_test_state = {GetTickCount64() + 1000, target, written};
-            std::cout << "Nitro test: " << pick.name << " (" << static_cast<int>(pick.distance) << " from Crash) moved to " << triple(target)
-                      << ": " << written.size() << " copies written" << (skipped ? ", " + std::to_string(skipped) + " skipped (no longer matched)" : "")
+            nitro_home = {pick.entity, before};
+            const auto level = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
+            nitro_test_state = {pick.entity, actor, level, GetTickCount64(), false, target, written, std::vector<bool>(written.size())};
+            std::cout << "Nitro test: " << pick.name << " (" << static_cast<int>(pick.distance) << " from Crash) moved from " << triple(before)
+                      << " to " << triple(target) << ": " << written.size() << " copies written"
+                      << (skipped ? ", " + std::to_string(skipped) + " skipped (no longer matched)" : "")
                       << (nitro_scan_state.entity == pick.entity ? "" : ". Tip: run /nitro_scan first to move every copy")
-                      << ". Look around Crash, then touch it carefully.\n" << std::flush;
+                      << ". Held there for 15 seconds: touch it!\n" << std::flush;
         }
         void nitro_test_followup()
         {
             auto &t = nitro_test_state;
-            if (!t.check_at || GetTickCount64() < t.check_at)
+            if (!t.started)
                 return;
-            std::string kept, reverted;
-            for (const auto &copy : t.written)
+            const auto now = GetTickCount64(), elapsed = now - t.started;
+            if (!live_crate(t.entity))
             {
-                std::array<float, 3> now{};
-                const bool held = read(copy.at, now) && same_place(now.data(), t.target, 1.0f);
-                (held ? kept : reverted) += (((held ? kept : reverted).empty()) ? "" : "; ") + copy.path;
+                std::cout << "Nitro test: the Nitro is gone after " << elapsed << " ms (broken or exploded)\n" << std::flush;
+                t = {};
+                return;
             }
-            std::cout << "Nitro test after 1 second: kept [" << (kept.empty() ? "none" : kept) << "], changed back ["
-                      << (reverted.empty() ? "none" : reverted) << "]\n" << std::flush;
-            t = {};
+            // a respawn or level change can free the copies: stop writing at once
+            if (player() != t.actor || level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))) != t.level)
+            {
+                std::cout << "Nitro test: stopped holding after " << elapsed << " ms (Crash respawned or the level changed)\n" << std::flush;
+                t = {};
+                return;
+            }
+            // hold: put back any copy the game moved, logging the first move of each
+            for (unsigned i = 0; i < t.written.size(); ++i)
+            {
+                std::array<float, 3> at{};
+                if (!read(t.written[i].at, at) || same_place(at.data(), t.target, 1.0f))
+                    continue;
+                if (!t.moved[i])
+                {
+                    t.moved[i] = true;
+                    std::cout << "Nitro test: at " << elapsed << " ms the game moved " << t.written[i].path << " to " << triple(at)
+                              << (same_place(at.data(), nitro_home.old, 1.0f) ? " (its old spot)" : "") << "; putting it back\n" << std::flush;
+                }
+                write(t.written[i].at, t.target);
+            }
+            if (!t.reported && elapsed >= 1000)
+            {
+                t.reported = true;
+                const auto moved = static_cast<unsigned>(std::count(t.moved.begin(), t.moved.end(), true));
+                std::cout << "Nitro test after 1 second: " << t.written.size() - moved << " of " << t.written.size()
+                          << " copies untouched by the game\n" << std::flush;
+            }
+            if (elapsed >= nitro_hold_ms)
+            {
+                const auto moved = static_cast<unsigned>(std::count(t.moved.begin(), t.moved.end(), true));
+                std::cout << "Nitro test: stopped holding after 15 seconds; the game tried to move " << moved << " of "
+                          << t.written.size() << " copies. Run /nitro_scan to look for copies that still hold its old spot.\n"
+                          << std::flush;
+                t = {};
+            }
         }
         void update_c3_buttons(Shared &state, const std::string &zone)
         {
