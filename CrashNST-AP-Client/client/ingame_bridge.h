@@ -43,6 +43,7 @@ public:
     void move_probe(bool on);
     void ice_test(unsigned mode);
     void request_ice_find();
+    void request_nitro_drop();
     std::string take_ice_note(); // a new console message from the game thread, or empty
     void request_nitro_spawn();
     bool nitro_ready();

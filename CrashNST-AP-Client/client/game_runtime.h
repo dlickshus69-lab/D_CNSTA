@@ -25,6 +25,8 @@ namespace ingame
     void configure_movement(const std::map<std::string, unsigned> &styles, bool move_shuffle = false);
     void update_gameplay(Shared &state);
     unsigned take_observed_deaths();
+    // the Slippery Trap is using the game's own ice (the floor under Crash is ice); otherwise it moves the stick
+    bool real_ice_active();
     void restore_gameplay(bool game_thread = false);
     void inherit_license();
     unsigned movement_campaign(std::uintptr_t manager);

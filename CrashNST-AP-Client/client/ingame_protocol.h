@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 21, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 22, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -138,6 +138,8 @@ namespace ingame
         char ice_note[200]{};
         // /nitro_spawn (experimental): the game spawns a Nitro next to Crash
         unsigned nitro_spawn_request = 0, nitro_spawn_ack = 0;
+        // /nitro_drop (experimental): a Nitro spawns high above Crash, to see whether it falls
+        unsigned nitro_drop_request = 0, nitro_drop_ack = 0;
         // set by the game thread: a Nitro Trap can spawn here now (level with a ready Nitro spawner, not a
         // gimmick stage, and a spot on Crash's recent path)
         unsigned nitro_ready = 0;

@@ -440,6 +440,16 @@ void ClientRuntime::handle_commands()
                 else
                     print_console("Nitro probe needs the in-game adapter. Load into a level first.");
             }
+            else if (command == "/nitro_drop")
+            {
+                if (box_markers)
+                {
+                    box_markers->request_nitro_drop();
+                    print_console("Nitro drop test: a Nitro spawns high above Crash. Close the console (F1) and stand still; the log says whether it fell.");
+                }
+                else
+                    print_console("Nitro drop needs the in-game adapter. Load into a level first.");
+            }
             else if (command == "/nitro_spawn")
             {
                 if (box_markers)

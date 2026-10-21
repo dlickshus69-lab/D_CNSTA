@@ -2006,8 +2006,14 @@ namespace ingame
             s = {};
         }
         void nitro_spawn_followup();
-        // starts a spawn; false with a reason when it cannot right now
-        bool nitro_spawn(std::string &why)
+        // a dropped Nitro (/nitro_drop): its height is logged for 3 seconds, to see whether a crate in the air falls
+        struct NitroDrop
+        {
+            std::uint64_t started = 0, next = 0;
+            float start_z = 0;
+        } nitro_drop;
+        // starts a spawn (ahead of Crash, or at `forced`); false with a reason when it cannot right now
+        bool nitro_spawn(std::string &why, const std::array<float, 3> *forced = nullptr)
         {
             if (nitro_spawn_state.component)
                 return why = "one is still spawning", false;
@@ -2016,7 +2022,9 @@ namespace ingame
             std::array<float, 3> crash{}, spot{};
             if (!crash_position(crash))
                 return why = "Crash not found", false;
-            if (!ahead_spot(spot))
+            if (forced)
+                spot = *forced;
+            else if (!ahead_spot(spot))
                 return why = "no spot ahead yet: Crash needs to be running on the ground", false;
             const auto spawner = nitro_spawner_near(spot);
             if (!spawner.component)
@@ -2070,7 +2078,35 @@ namespace ingame
         {
             record_crash_path(level);
             nitro_spawn_followup();
+            if (nitro_drop.started && trap_nitro.entity)
+            {
+                const auto t = GetTickCount64();
+                std::array<float, 3> at{}, crash{};
+                if (t >= nitro_drop.next && read(trap_nitro.entity + 32, at))
+                {
+                    crash_position(crash);
+                    std::cout << "Nitro drop: after " << (t - nitro_drop.started) << " ms it is " << static_cast<int>(at[2] - crash[2])
+                              << " above Crash (fell " << static_cast<int>(nitro_drop.start_z - at[2]) << ")\n" << std::flush;
+                    nitro_drop.next = t + 250;
+                }
+                if (t - nitro_drop.started > 3000)
+                    nitro_drop = {};
+            }
             watch_trap_nitro();
+            if (state.nitro_drop_request != state.nitro_drop_ack)
+            {
+                state.nitro_drop_ack = state.nitro_drop_request;
+                std::array<float, 3> crash{};
+                std::string why;
+                if (crash_position(crash))
+                {
+                    const std::array<float, 3> above{crash[0], crash[1], crash[2] + 350};
+                    if (nitro_spawn(why, &above) && trap_nitro.entity)
+                        nitro_drop = {GetTickCount64(), 0, above[2]};
+                    else
+                        std::cout << "Nitro drop: " << (why.empty() ? std::string("it did not appear at once") : why) << "\n" << std::flush;
+                }
+            }
             const auto now = GetTickCount64();
             static std::uint64_t next_ready = 0, give_up = 0;
             if (now >= next_ready)
@@ -4187,6 +4223,103 @@ namespace ingame
             w.contact_at.push_back(std::move(c)), w.actor_at.push_back(std::move(a));
             ice_note("contact: on " + w.kinds.back() + " (" + std::to_string(w.kinds.size()) + "). Keep walking ice <-> snow.");
         }
+        // Slippery Trap: the game's own ice. Every floor type (SnowSurface, MetalSurface, ...) has a movement kind at
+        // +0x28 ("Ice", "Snow", "Metal", ...) that Crash_IceSlide checks whenever the game tells it Crash's floor
+        // changed. The IceSurface, kept with every floor type in the game's CollisionMaterials (loaded in every level),
+        // has the "Ice" kind. While the trap runs, each floor type Crash stands on gets the Ice kind, and Crash +0x198
+        // (the floor the game compared last, in +0x510b70, run every frame from Crash's update) is cleared, so the game
+        // re-checks his floor on the next frame and the ice starts at once. When the trap ends the kinds go back and
+        // his floor is re-checked again, so he stops sliding at once. Without the IceSurface or Crash_IceSlide (not
+        // found yet, or a character without it) the stick-momentum Slippery in ingame.cpp runs instead.
+        struct IceFloor
+        {
+            Address kind = 0;                                  // the Ice kind
+            std::vector<std::pair<Address, Address>> changed;  // floor type, its own kind
+            std::uint64_t search_time = 0;
+            std::string search_level;
+            Address actor = 0;
+            bool has_slide = false;
+        } ice_floor;
+        std::atomic_bool ice_floor_engaged{false};
+        bool ice_kind_valid(Address kind) { return kind && typed(kind, 0x13ea438) && string(value<Address>(kind + 0x10), 16) == "Ice"; }
+        bool floor_type(Address surface)
+        {
+            return surface && readable(surface, 0x30) && string(value<Address>(surface + 0x18), 32) == "CollisionMaterials";
+        }
+        Address find_ice_kind(const std::string &level)
+        {
+            auto &f = ice_floor;
+            if (ice_kind_valid(f.kind))
+                return f.kind;
+            f.kind = 0;
+            if (const auto s = ice_surface_seen.surface; s && readable(s, 0x30) && string(value<Address>(s + 8), 32) == "IceSurface")
+                if (const auto k = value<Address>(s + 0x28); ice_kind_valid(k))
+                {
+                    std::cout << "Slippery Trap: the game's ice is ready\n" << std::flush;
+                    return f.kind = k;
+                }
+            // look for it once per level, at most once a minute (a few seconds in the background)
+            const auto now = GetTickCount64();
+            if (!level.empty() && !ice_name_search_running && level != f.search_level && (!f.search_time || now - f.search_time > 60000))
+            {
+                f.search_time = now, f.search_level = level;
+                ice_surface_by_name(level);
+            }
+            return 0;
+        }
+        // makes the game re-check Crash's floor on the next frame
+        void kick_floor(Address actor)
+        {
+            if (!typed(actor, 0x1592220))
+                return;
+            const auto handle = value<Address>(actor + 0x198);
+            if (handle && typed(resolve(handle), 0x13ea4d8))
+                write(actor + 0x198, Address{0});
+        }
+        void restore_ice_floor(Address actor)
+        {
+            auto &f = ice_floor;
+            if (f.changed.empty())
+                return;
+            for (auto it = f.changed.rbegin(); it != f.changed.rend(); ++it)
+                if (floor_type(it->first) && value<Address>(it->first + 0x28) == f.kind)
+                    write(it->first + 0x28, it->second);
+            std::cout << "Slippery Trap: " << f.changed.size() << " floor types back to normal\n" << std::flush;
+            f.changed.clear();
+            kick_floor(actor);
+        }
+        void update_ice_floor(const Shared &state, Address actor, const std::string &level)
+        {
+            auto &f = ice_floor;
+            const auto now = GetTickCount64();
+            const auto kind = level.empty() ? 0 : find_ice_kind(level);
+            // Crash_IceSlide can load a moment after Crash: look again every second until it is there
+            static std::uint64_t slide_checked = 0;
+            if (actor != f.actor || (!f.has_slide && now - slide_checked > 1000))
+                f.actor = actor, slide_checked = now, f.has_slide = actor && crash_script(actor, "Scripts.Graph.Crash_IceSlide");
+            const bool want = !level.empty() && !state.traps_paused && !trap_gimmick_level(level) && timer_active(state.slippery_until, now);
+            const bool can = want && kind && actor && f.has_slide;
+            ice_floor_engaged = can;
+            if (!can)
+            {
+                restore_ice_floor(actor);
+                return;
+            }
+            // the floor type under Crash (none while he is in the air, or for a frame after a re-check)
+            const auto record = resolve(value<Address>(actor + 0x198));
+            if (!typed(record, 0x13ea4d8))
+                return;
+            const auto surface = value<Address>(record + 0x18);
+            if (!floor_type(surface) || value<Address>(surface + 0x28) == kind)
+                return;
+            if (std::none_of(f.changed.begin(), f.changed.end(), [&](const auto &c) { return c.first == surface; }))
+                f.changed.push_back({surface, value<Address>(surface + 0x28)});
+            if (write(surface + 0x28, kind))
+            {
+                std::cout << "Slippery Trap: " << string(value<Address>(surface + 8), 48) << " is ice now\n" << std::flush;
+                kick_floor(actor);
+            }
+        }
         void update_ice_test(unsigned mode)
         {
             static unsigned announced = 0;
@@ -4750,6 +4883,7 @@ namespace ingame
         update_ice_watch(state.ice_watch != 0);
         update_move_probe(state.move_probe != 0);
         update_ice_test(state.ice_test <= 14 ? state.ice_test : 0);
+        update_ice_floor(state, actor, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         if (!ice_note_text.empty())
         {
             copy(state.ice_note, ice_note_text);
@@ -4855,6 +4989,7 @@ namespace ingame
         }
     }
     unsigned take_observed_deaths() { return observed_deaths.exchange(0); }
+    bool real_ice_active() { return ice_floor_engaged.load(); }
     void restore_gameplay(bool game_thread)
     {
         std::lock_guard lock(crate_mutex);
@@ -4865,6 +5000,8 @@ namespace ingame
         vanilla_movement = true;
         const auto actor = player(), controller = value<Address>(actor + 424);
         blocked_crouch_controller = actor && typed(controller, 0x1589128) && scene_campaign() == 1 ? controller : 0;
+        restore_ice_floor(actor);
+        ice_floor_engaged = false;
         death_handle = 0;
         death_hook.restore();
         observed_deaths = 0;

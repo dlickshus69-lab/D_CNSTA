@@ -293,10 +293,9 @@ class LifeLossTrapWeight(Range):
 
 
 class SlipperyTrapWeight(Range):
-    """How often Slippery Traps appear compared to other traps. Ice for the Trap Duration, at the speeds
-    of the game's own ice: Crash speeds up slowly, turns in wide slides and slides on after you let go.
-    Strongest on a controller (stick and d-pad). No effect in gimmick levels or the Crash 2 jet-board
-    levels."""
+    """How often Slippery Traps appear compared to other traps. For the Trap Duration every floor Crash
+    stands on turns into the game's own ice, exactly like the ice in Snow Go, and goes back to normal
+    when it ends. No effect in gimmick levels or the Crash 2 jet-board levels."""
 
     display_name = "Slippery Trap Weight"
     range_start = 0

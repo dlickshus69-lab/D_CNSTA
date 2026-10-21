@@ -40,7 +40,8 @@ namespace
     std::atomic_bool darkness_exempt{false};
     bool frozen() { return active && !menu_open && timer_active(freeze_until, GetTickCount64()); }
     bool reversed() { return active && !menu_open && timer_active(reverse_until, GetTickCount64()); }
-    bool slippery() { return active && !menu_open && timer_active(slippery_until, GetTickCount64()); }
+    // the stick-momentum Slippery: only while the game's own ice can't be used
+    bool slippery() { return active && !menu_open && !real_ice_active() && timer_active(slippery_until, GetTickCount64()); }
     bool slowed() { return active && !menu_open && timer_active(slow_until, GetTickCount64()); }
     // Slippery momentum per XInput pad and for keyboard scan codes / virtual keys
     std::mutex momentum_mutex;
