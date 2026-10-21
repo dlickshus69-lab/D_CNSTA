@@ -422,16 +422,31 @@ namespace ingame
         // Aku watch (research for an Aku Aku filler): the AkuAkuCount and WumpaCount game variables; their first
         // bytes are logged whenever they change, to see where the game keeps the mask count
         std::atomic<Address> aku_variable{0}, wumpa_variable{0};
+        // the variable's first 0x100 bytes, then 0x80 bytes where its +0x28 points (its value may live there)
+        using AkuWords = std::array<std::uint64_t, 48>;
+        bool read_aku_words(Address variable, AkuWords &out)
+        {
+            out = {};
+            std::array<std::uint64_t, 32> head{};
+            if (!read(variable, head))
+                return false;
+            std::copy(head.begin(), head.end(), out.begin());
+            std::array<std::uint64_t, 16> tail{};
+            const auto external = static_cast<Address>(head[5]);
+            if (external > 0x10000 && external < 0x7ffffffeffffULL && read(external, tail))
+                std::copy(tail.begin(), tail.end(), out.begin() + 32);
+            return true;
+        }
         void update_aku_watch()
         {
-            static std::array<std::uint64_t, 8> last_aku{}, last_wumpa{};
+            static AkuWords last_aku{}, last_wumpa{};
             static Address last_aku_at = 0, last_wumpa_at = 0;
-            const auto watch = [](const char *name, Address variable, std::array<std::uint64_t, 8> &last, Address &last_at)
+            const auto watch = [](const char *name, Address variable, AkuWords &last, Address &last_at)
             {
                 if (!variable)
                     return;
-                std::array<std::uint64_t, 8> now{};
-                if (!read(variable, now))
+                AkuWords now{};
+                if (!read_aku_words(variable, now))
                     return;
                 if (variable != last_at)
                 {
@@ -449,8 +464,13 @@ namespace ingame
                 out << "Aku watch: " << name << " changed:";
                 for (unsigned i = 1; i < now.size(); ++i)
                     if (now[i] != last[i])
-                        out << " +0x" << std::hex << i * 8 << " 0x" << last[i] << " -> 0x" << now[i] << std::dec << " (as numbers "
-                            << static_cast<int>(last[i] & 0xffffffff) << " -> " << static_cast<int>(now[i] & 0xffffffff) << ")";
+                    {
+                        float f[2];
+                        std::memcpy(f, &now[i], 8);
+                        out << (i < 32 ? " +0x" : " ext+0x") << std::hex << (i < 32 ? i * 8 : (i - 32) * 8) << " 0x" << last[i] << " -> 0x" << now[i]
+                            << std::dec << " (int " << static_cast<int>(last[i] & 0xffffffff) << " -> " << static_cast<int>(now[i] & 0xffffffff)
+                            << ", float " << f[0] << ")";
+                    }
                 std::cout << out.str() << "\n" << std::flush;
                 last = now;
             };
@@ -2140,9 +2160,10 @@ namespace ingame
         static constexpr float drop_height = 420;
         struct NitroDropTrap
         {
-            enum Stage { Idle, Countdown, Spawning, Falling } stage = Idle;
+            enum Stage { Idle, Countdown, Spawning, Settling, Falling } stage = Idle;
             std::uint64_t start = 0, spawned = 0, fall_start = 0;
-            int ticks = 0;
+            int ticks = 0, settle_frames = 0;
+            float drop = 0; // how far it falls
             std::string level;
             std::array<float, 3> spot{};
             Address entity = 0;
@@ -2213,7 +2234,8 @@ namespace ingame
         {
             MEMORY_BASIC_INFORMATION info{};
             if (at < 0x10000 || !VirtualQuery(reinterpret_cast<void *>(at), &info, sizeof(info)) || info.State != MEM_COMMIT ||
-                info.Type != MEM_PRIVATE || info.Protect != PAGE_READWRITE)
+                info.Type != MEM_PRIVATE || !(info.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) ||
+                (info.Protect & (PAGE_GUARD | PAGE_NOCACHE | PAGE_WRITECOMBINE)))
                 return false;
             return at + size <= reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize;
         }
@@ -2224,13 +2246,26 @@ namespace ingame
         {
             std::vector<std::pair<Address, std::array<float, 3>>> out;
             std::set<Address> seen;
+            std::ostringstream log;
+            const char *label = "";
             const auto add = [&](Address at)
             {
                 std::array<float, 3> v{};
-                if (!at || !seen.insert(at).second || !heap_page(at, 12) || !read(at, v))
+                if (!at || !seen.insert(at).second)
                     return;
+                if (!heap_page(at, 12) || !read(at, v))
+                {
+                    log << " " << label << "(unreadable)";
+                    return;
+                }
                 if (std::abs(v[0] - ground[0]) < 0.05f && std::abs(v[1] - ground[1]) < 0.05f && v[2] > ground[2] - 30 && v[2] < ground[2] + 110)
+                {
                     out.push_back({at, v});
+                    log << " " << label << "(+" << static_cast<int>(v[2] - ground[2]) << ")";
+                }
+                else
+                    log << " " << label << "(no: " << static_cast<int>(v[0] - ground[0]) << "," << static_cast<int>(v[1] - ground[1]) << ","
+                        << static_cast<int>(v[2] - ground[2]) << ")";
             };
             // a pointer read from a checked heap page
             const auto hop = [&](Address from, unsigned offset) -> Address
@@ -2246,16 +2281,25 @@ namespace ingame
                     from = hop(from, h);
                 if (from)
                     add(from + last);
+                else
+                    log << " " << label << "(no path)";
             };
+            label = "entity";
             add(entity + 0x20);
+            label = "modelcomponent";
             if (const auto component = hop(entity, 176))
                 add(component + 0xf8);
             if (model)
             {
+                label = "model";
                 add(model + 0x60);
+                label = "model-a";
                 path(model, {0x180, 0x178}, 0x1e0);
+                label = "model-b";
                 path(model, {0x180, 0x1d8}, 0x20);
             }
+            else
+                log << " model(none)";
             for (const auto c : list(value<Address>(entity + 24), 64))
             {
                 if (!heap_page(c, 0x160))
@@ -2265,22 +2309,34 @@ namespace ingame
                 const auto name = graph ? string(value<Address>(meta + 16)) : std::string();
                 if (!graph)
                 {
+                    label = "component";
                     add(c + 0x120);
+                    label = "component-a";
                     path(c, {0x158}, 0x48);
+                    label = "component-b";
                     path(c, {0x158, 0x108, 0x170}, 0xf0);
+                    label = "component-c";
                     path(c, {0x158, 0x108, 0x170}, 0x114);
                 }
                 else if (name == "Scripts.Graph.common_Crate")
                 {
+                    label = "crate-a";
                     path(c, {0xd0}, 0x118);
+                    label = "crate-b";
                     path(c, {0xd0}, 0x13c);
+                    label = "crate-c";
                     path(c, {0xd0, 0x50}, 0xf0);
+                    label = "crate-d";
                     path(c, {0xd0, 0x50}, 0x114);
+                    label = "crate-e";
                     path(c, {0x98, 0x28}, 0x20);
+                    label = "crate-f";
                     path(c, {0x98, 0xd0, 0x108}, 0x1f0);
+                    label = "crate-g";
                     path(c, {0x98, 0xd0, 0x138}, 0x1c4);
                 }
             }
+            std::cout << "Nitro drop: copies" << log.str() << "\n" << std::flush;
             return out;
         }
         void update_nitro_drop(Shared &state, const std::string &level)
@@ -2332,11 +2388,13 @@ namespace ingame
                 }
                 if (d.ticks < 3 && elapsed >= static_cast<std::uint64_t>(d.ticks) * 1000)
                     ++d.ticks, play_tick();
-                if (elapsed < drop_countdown_ms - drop_fall_ms)
+                if (elapsed < drop_countdown_ms)
                     return;
+                // the countdown is over: the Nitro appears high above the spot (the game creates it there, whole)
                 d.spot = drop_spot();
+                const std::array<float, 3> high{d.spot[0], d.spot[1], d.spot[2] + drop_height};
                 std::string why;
-                if (!nitro_spawn(why, &d.spot))
+                if (!nitro_spawn(why, &high))
                 {
                     stop_nitro_drop(state, ("no Nitro: " + why).c_str());
                     return;
@@ -2353,20 +2411,34 @@ namespace ingame
                     return;
                 }
                 d.entity = trap_nitro.entity;
-                std::array<float, 3> ground{};
-                read(d.entity + 32, ground);
-                std::cout << "Nitro drop: the Nitro is at " << triple(ground) << "; finding its copies\n" << std::flush;
-                d.copies = nitro_copies(d.entity, crate_model(d.entity), ground);
-                std::cout << "Nitro drop: " << d.copies.size() << " copies; lifting it\n" << std::flush;
-                for (const auto &[at, g] : d.copies)
-                    write(at, std::array<float, 3>{g[0], g[1], g[2] + drop_height});
+                d.stage = NitroDropTrap::Settling, d.settle_frames = 0;
+                return;
+            }
+            if (d.stage == NitroDropTrap::Settling)
+            {
+                // the game fills in a new crate's display copies over its first frames: wait for them
+                if (++d.settle_frames < 3 || now - d.spawned < 60)
+                    return;
+                if (!live_crate(d.entity))
+                {
+                    stop_nitro_drop(state, "the Nitro went away before falling");
+                    return;
+                }
+                std::array<float, 3> high{};
+                read(d.entity + 32, high);
+                d.drop = std::max(0.0f, high[2] - d.spot[2]);
+                std::cout << "Nitro drop: the Nitro is at " << triple(high) << ", " << static_cast<int>(d.drop) << " above the spot\n" << std::flush;
+                // every copy, kept with where it ends up (its own offset from the crate, on the ground)
+                d.copies.clear();
+                for (const auto &[at, v] : nitro_copies(d.entity, crate_model(d.entity), high))
+                    d.copies.push_back({at, std::array<float, 3>{v[0], v[1], v[2] - d.drop}});
                 d.stage = NitroDropTrap::Falling, d.fall_start = now;
-                std::cout << "Nitro drop: falling onto " << triple(ground) << "\n" << std::flush;
+                std::cout << "Nitro drop: " << d.copies.size() << " copies; falling onto " << triple(d.spot) << "\n" << std::flush;
                 return;
             }
             // falling: speeding up like a dropped crate, landing a second later
             const float p = std::min(1.0f, static_cast<float>(now - d.fall_start) / drop_fall_ms);
-            const float height = drop_height * (1 - p * p);
+            const float height = d.drop * (1 - p * p);
             if (!live_crate(d.entity))
             {
                 d.copies.clear(); // it exploded (or the game removed it): nothing left to move
