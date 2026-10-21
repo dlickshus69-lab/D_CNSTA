@@ -2769,9 +2769,27 @@ namespace ingame
                     std::lock_guard lock(ice_swap_mutex);
                     ice_surface_seen = {found, value<Address>(found), level};
                 }
-                std::cout << (found ? "Ice test: found the IceSurface in this level's memory\n"
-                                    : "Ice test: this level has no IceSurface loaded (the swap only works where it exists)\n")
-                          << std::flush;
+                std::ostringstream out;
+                out << (found ? "Ice test: found the IceSurface in this level's memory\n"
+                              : "Ice test: this level has no IceSurface loaded (the swap only works where it exists)\n")
+                    << "Ice test: the text \"IceSurface\" is in memory " << texts.size() << " times; " << names.size()
+                    << " things point at it\n";
+                for (std::size_t i = 0; i < names.size() && i < 12; ++i)
+                {
+                    const auto at = names[i];
+                    Address object = 0;
+                    for (Address q = at; q + 1024 > at && q >= 0x10000; q -= 8)
+                        if (const auto v = value<Address>(q); v >= base() && v < module_end())
+                        {
+                            object = q;
+                            break;
+                        }
+                    out << "Ice test:   0x" << std::hex << at;
+                    if (object)
+                        out << " in type +0x" << (value<Address>(object) - base()) << " +0x" << (at - object);
+                    out << std::dec << " (+0x18 says \"" << string(value<Address>(at + 0x10), 32) << "\")\n";
+                }
+                std::cout << out.str() << std::flush;
                 ice_name_search_running = false; })
                 .detach();
         }
@@ -2857,6 +2875,21 @@ namespace ingame
             std::cout << "Ice test: copy: " << string(value<Address>(other + 8), 48) << " took " << ice_copied.size()
                       << " values from the IceSurface:" << out.str() << "\n" << std::flush;
         }
+        //  name:    the normal floor's surface takes the IceSurface's name (+8), in case the game compares names
+        //  copyall: the normal floor's surface takes every value of the IceSurface after its first word
+        void ice_copy_words(unsigned from, unsigned to, const char *what)
+        {
+            const auto ice = ice_surface_seen.surface, other = ice_other_surface;
+            const auto name = string(value<Address>(other + 8), 48);
+            unsigned copied = 0;
+            for (unsigned off = from; off < to; off += 8)
+            {
+                const auto mine = value<std::uint64_t>(other + off), theirs = value<std::uint64_t>(ice + off);
+                if (mine != theirs && write(other + off, theirs))
+                    ice_copied.push_back({other + off, mine}), ++copied;
+            }
+            std::cout << "Ice test: " << what << ": " << name << " took " << copied << " values from the IceSurface\n" << std::flush;
+        }
         void ice_copy_restore()
         {
             for (auto it = ice_copied.rbegin(); it != ice_copied.rend(); ++it)
@@ -2878,8 +2911,8 @@ namespace ingame
             static std::chrono::steady_clock::time_point last{};
             const auto actor = player();
             const auto level = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
-            // remember the IceSurface whenever Crash stands on it
-            if (actor)
+            // remember the IceSurface whenever Crash stands on it (not while name/copyall dress the snow up as ice)
+            if (actor && mode != 7 && mode != 8)
                 if (const auto info = crash_floor_info(actor))
                 {
                     const auto surface = value<Address>(info + 0x18);
@@ -2902,6 +2935,8 @@ namespace ingame
                               : mode == 4 ? "Ice test: push on. Crash's position now moves with momentum.\n"
                               : mode == 5 ? "Ice test: const on.\n"
                               : mode == 6 ? "Ice test: copy on.\n"
+                              : mode == 7 ? "Ice test: name on.\n"
+                              : mode == 8 ? "Ice test: copyall on.\n"
                                           : "Ice test: off\n")
                           << std::flush;
                 announced = mode;
@@ -2917,16 +2952,20 @@ namespace ingame
                 ice_swap_restore();
             if (previous == 5 && mode != 5)
                 ice_const_restore();
-            if (previous == 6 && mode != 6)
+            if ((previous == 6 || previous == 7 || previous == 8) && mode != previous)
                 ice_copy_restore();
-            if ((mode == 5 || mode == 6) && previous != mode)
+            if (mode >= 5 && mode <= 8 && previous != mode)
             {
                 if (!(ice_surface_seen.level == level && ice_surface_valid()) || !ice_other_surface)
                     std::cout << "Ice test: stand on the ice and on the snow once in this level first, then try again\n" << std::flush;
                 else if (mode == 5)
                     ice_const_start();
-                else
+                else if (mode == 6)
                     ice_copy_start();
+                else if (mode == 7)
+                    ice_copy_words(8, 16, "name");
+                else
+                    ice_copy_words(8, 0x100, "copyall");
             }
             previous = mode;
             if (mode == 3 && actor && (ice_surface_seen.level != level || !ice_surface_valid()) && ice_name_searched_level != level)
@@ -3397,7 +3436,7 @@ namespace ingame
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         update_ice_watch(state.ice_watch != 0);
         update_move_probe(state.move_probe != 0);
-        update_ice_test(state.ice_test <= 6 ? state.ice_test : 0);
+        update_ice_test(state.ice_test <= 8 ? state.ice_test : 0);
         if (state.ice_find_request != state.ice_find_ack)
         {
             state.ice_find_ack = state.ice_find_request;
