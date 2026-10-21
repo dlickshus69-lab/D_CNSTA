@@ -2775,6 +2775,96 @@ namespace ingame
                 ice_name_search_running = false; })
                 .detach();
         }
+        //  const: the references to the IceSurface that are not floor contacts (the level's ice patches, and maybe the
+        //         ice script's own "this is ice" reference) are pointed at the normal floor instead.
+        //  copy:  the normal floor's surface gets the IceSurface's own values (everything in it that is not a pointer).
+        // Both test how the game recognizes ice, for an Ice Trap that works in levels without ice.
+        std::vector<std::pair<Address, Address>> ice_const_swapped; // reference, IceSurface ^ ice_mask
+        std::vector<std::pair<Address, std::uint64_t>> ice_copied;   // surface word, original value
+        Address ice_other_surface = 0;                                // the last normal floor Crash stood on
+        std::atomic_bool ice_const_running{false};
+        bool pointer_like(std::uint64_t v) { return v >= 0x10000 && v < 0x7fffffffffffULL && readable(static_cast<Address>(v), 8); }
+        void ice_const_start()
+        {
+            if (ice_const_running.exchange(true))
+                return;
+            const Address ice_masked = ice_surface_seen.surface ^ ice_mask, other_masked = ice_other_surface ^ ice_mask;
+            std::cout << "Ice test: const: looking for the IceSurface's references (a few seconds)\n" << std::flush;
+            std::thread([ice_masked, other_masked]
+                        {
+                const Address ice = ice_masked ^ ice_mask, other = other_masked ^ ice_mask;
+                std::vector<Address> hits;
+                ice_scan(ValueHits{ice, &hits});
+                std::ostringstream out;
+                unsigned switched = 0;
+                {
+                    std::lock_guard lock(ice_swap_mutex);
+                    for (const auto at : hits)
+                    {
+                        if (value<Address>(at - 0x18) == base() + 0x13ea4d8)
+                            continue; // a floor contact
+                        // what holds it: the nearest type word up to 1 KB before, and the words around it
+                        Address object = 0;
+                        for (Address q = at; q + 1024 > at && q >= 0x10000; q -= 8)
+                            if (const auto v = value<Address>(q); v >= base() && v < module_end())
+                            {
+                                object = q;
+                                break;
+                            }
+                        out << "Ice test: const:   0x" << std::hex << at;
+                        if (object)
+                            out << " in type +0x" << (value<Address>(object) - base()) << " +0x" << (at - object);
+                        out << " | around:";
+                        for (int k = -2; k <= 2; ++k)
+                            out << " " << value<Address>(at + k * 8);
+                        out << std::dec << "\n";
+                        if (value<Address>(at) == ice && write(at, other))
+                            ice_const_swapped.push_back({at, ice ^ ice_mask}), ++switched;
+                    }
+                }
+                std::cout << "Ice test: const: the IceSurface had " << hits.size() << " references; " << switched
+                          << " that are not floor contacts now point at the normal floor\n"
+                          << out.str() << std::flush;
+                ice_const_running = false; })
+                .detach();
+        }
+        void ice_const_restore()
+        {
+            std::lock_guard lock(ice_swap_mutex);
+            unsigned restored = 0;
+            for (const auto &[at, ice] : ice_const_swapped)
+                if (readable(at, 8) && value<Address>(at) == ice_other_surface && write(at, ice ^ ice_mask))
+                    ++restored;
+            if (!ice_const_swapped.empty())
+                std::cout << "Ice test: const undone: " << restored << " of " << ice_const_swapped.size() << " put back\n" << std::flush;
+            ice_const_swapped.clear();
+        }
+        void ice_copy_start()
+        {
+            const auto ice = ice_surface_seen.surface, other = ice_other_surface;
+            std::ostringstream out;
+            for (unsigned off = 0x10; off < 0x100; off += 8)
+            {
+                const auto mine = value<std::uint64_t>(other + off), theirs = value<std::uint64_t>(ice + off);
+                if (mine == theirs || pointer_like(mine) || pointer_like(theirs))
+                    continue;
+                if (write(other + off, theirs))
+                {
+                    ice_copied.push_back({other + off, mine});
+                    out << " +0x" << std::hex << off << std::dec;
+                }
+            }
+            std::cout << "Ice test: copy: " << string(value<Address>(other + 8), 48) << " took " << ice_copied.size()
+                      << " values from the IceSurface:" << out.str() << "\n" << std::flush;
+        }
+        void ice_copy_restore()
+        {
+            for (auto it = ice_copied.rbegin(); it != ice_copied.rend(); ++it)
+                write(it->first, it->second);
+            if (!ice_copied.empty())
+                std::cout << "Ice test: copy undone: " << ice_copied.size() << " values put back\n" << std::flush;
+            ice_copied.clear();
+        }
         void update_ice_test(unsigned mode)
         {
             static unsigned announced = 0;
@@ -2796,6 +2886,11 @@ namespace ingame
                     if (surface && readable(surface, 16) && string(value<Address>(surface + 8), 32) == "IceSurface")
                         ice_surface_seen = {surface, value<Address>(surface), level};
                 }
+            if (actor)
+                if (const auto info = crash_floor_info(actor))
+                    if (const auto surface = value<Address>(info + 0x18);
+                        surface && surface != ice_surface_seen.surface && readable(surface, 16) && string(value<Address>(surface + 8), 32) != "IceSurface")
+                        ice_other_surface = surface;
             if (mode != announced)
             {
                 const bool have_ice = ice_surface_seen.surface && ice_surface_seen.level == level;
@@ -2805,6 +2900,8 @@ namespace ingame
                               : mode == 3 ? (have_ice ? "Ice test: swap on. Floors Crash steps on are switched to the IceSurface (each takes a few seconds to find).\n"
                                                       : "Ice test: swap on. No IceSurface seen in this level yet: looking for it by name.\n")
                               : mode == 4 ? "Ice test: push on. Crash's position now moves with momentum.\n"
+                              : mode == 5 ? "Ice test: const on.\n"
+                              : mode == 6 ? "Ice test: copy on.\n"
                                           : "Ice test: off\n")
                           << std::flush;
                 announced = mode;
@@ -2818,6 +2915,19 @@ namespace ingame
             }
             if (previous == 3 && mode != 3)
                 ice_swap_restore();
+            if (previous == 5 && mode != 5)
+                ice_const_restore();
+            if (previous == 6 && mode != 6)
+                ice_copy_restore();
+            if ((mode == 5 || mode == 6) && previous != mode)
+            {
+                if (!(ice_surface_seen.level == level && ice_surface_valid()) || !ice_other_surface)
+                    std::cout << "Ice test: stand on the ice and on the snow once in this level first, then try again\n" << std::flush;
+                else if (mode == 5)
+                    ice_const_start();
+                else
+                    ice_copy_start();
+            }
             previous = mode;
             if (mode == 3 && actor && (ice_surface_seen.level != level || !ice_surface_valid()) && ice_name_searched_level != level)
                 ice_surface_by_name(level);
@@ -3287,7 +3397,7 @@ namespace ingame
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         update_ice_watch(state.ice_watch != 0);
         update_move_probe(state.move_probe != 0);
-        update_ice_test(state.ice_test <= 4 ? state.ice_test : 0);
+        update_ice_test(state.ice_test <= 6 ? state.ice_test : 0);
         if (state.ice_find_request != state.ice_find_ack)
         {
             state.ice_find_ack = state.ice_find_request;
