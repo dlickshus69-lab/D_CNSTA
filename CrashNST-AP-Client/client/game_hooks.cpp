@@ -1113,6 +1113,18 @@ void LevelRouting::lock_entrances(const std::set<std::string> &locked)
         entrance.locked = lock;
     }
 }
+void LevelRouting::prefer_hub_spawn(const std::string &source)
+{
+    // the hub-spawn query returns the entrance at +144 when the hub being entered matches +152
+    const auto entrance = std::find_if(entrances_.begin(), entrances_.end(), [&](const Entrance &e) { return e.source == source; });
+    if (entrance == entrances_.end() || !installed_ || read<unsigned char>(process_, state() + 4) != 1)
+        return;
+    const auto previous = read<std::uintptr_t>(process_, state() + 144), hub = read<std::uintptr_t>(process_, state() + 152);
+    if (previous == entrance->source_zone && hub == entrance->hub)
+        return;
+    write(process_, state() + 144, previous, entrance->source_zone);
+    write(process_, state() + 152, hub, entrance->hub);
+}
 std::string LevelRouting::refused_entrance() const
 {
     const auto destination = read<std::uintptr_t>(process_, state() + 16);

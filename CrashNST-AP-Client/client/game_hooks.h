@@ -28,6 +28,9 @@ public:
     void lock_entrances(const std::set<std::string> &locked);
     // the locked entrance the last load was turned away from while that hub is the destination, if any
     std::string refused_entrance() const;
+    // the next fresh visit to this entrance's hub (a campaign start) spawns Crash at this entrance instead of the
+    // last spot the save remembers
+    void prefer_hub_spawn(const std::string &source);
 
 private:
     struct Entrance

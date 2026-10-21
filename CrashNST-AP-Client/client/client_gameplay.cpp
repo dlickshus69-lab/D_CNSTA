@@ -94,6 +94,16 @@ void ClientRuntime::update_routing(ClientTick &tick)
                     locked.insert(source);
             }
             level_routing->lock_entrances(locked);
+            // on the title screen: a fresh Crash 1 start spawns at the earliest unlocked entrance, not at the last map
+            // node the save remembers (which can be a locked level far along the map)
+            if (ingame::main_menu(read_scene(GetCurrentProcess()).zone))
+                for (const auto &placement : tick.placements)
+                    if (placement.first.size() == 4 && placement.first[0] == 'L' && placement.first[1] == '1' && !locked.count(placement.first) &&
+                        std::none_of(secret_stages.begin(), secret_stages.end(), [&](const auto &s) { return s.first == placement.first; }))
+                    {
+                        level_routing->prefer_hub_spawn(placement.first);
+                        break;
+                    }
             const auto refused = level_routing->refused_entrance();
             if (refused != routing_refused)
             {
