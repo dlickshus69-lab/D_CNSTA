@@ -1,3 +1,4 @@
+#include "trap_rules.h"
 #include "session.h"
 #include "collectibles.h"
 #include "seed_config.h"
@@ -193,6 +194,9 @@ void Session::open(const std::filesystem::path &directory, const std::string &se
                 validate_item(item);
             if (!data_["filler_cursor"].isUInt() || filler_cursor() > max_items)
                 throw std::runtime_error("Invalid saved filler cursor");
+            // sessions from before traps have no trap cursor
+            if (data_.isMember("trap_cursor") && (!data_["trap_cursor"].isUInt() || trap_cursor() > max_items))
+                throw std::runtime_error("Invalid saved trap cursor");
             if (!data_["server_reset_pending"].isBool())
                 throw std::runtime_error("Invalid server reset marker");
             for (const auto &key : data_["bindings"].getMemberNames())
@@ -214,6 +218,7 @@ void Session::open(const std::filesystem::path &directory, const std::string &se
             data_["location_flags"] = Json::Value(Json::objectValue);
             data_["local_collectibles"] = Json::Value(Json::arrayValue);
             data_["filler_cursor"] = 0u;
+            data_["trap_cursor"] = 0u;
             data_["server_reset_pending"] = false;
             data_["pending"] = data_["checked"] = data_["items"] = Json::Value(Json::arrayValue);
         }
@@ -353,6 +358,7 @@ void Session::reset_server_state()
     data_["local_collectibles"] = Json::Value(Json::arrayValue);
     data_["bindings"] = Json::Value(Json::objectValue);
     data_["filler_cursor"] = 0u;
+    data_["trap_cursor"] = 0u;
     data_["server_reset_pending"] = true;
     dirty_ = true;
     flush();
@@ -492,6 +498,29 @@ std::map<char, std::string> Session::bind_saves(const std::filesystem::path &sav
     }
     flush();
     return result;
+}
+bool Session::reserve_trap(unsigned index)
+{
+    if (!ready() || index >= data_["items"].size())
+        throw std::runtime_error("Invalid trap receipt index");
+    if (index < trap_cursor())
+        return false;
+    if (ingame::trap_kind(data_["items"][index]["item"].asInt64()) < 0)
+        throw std::runtime_error("Receipt is not a trap");
+    const auto old = trap_cursor();
+    data_["trap_cursor"] = index + 1;
+    dirty_ = true;
+    try
+    {
+        flush();
+    }
+    catch (...)
+    {
+        data_["trap_cursor"] = old;
+        dirty_ = true;
+        throw;
+    }
+    return true;
 }
 Json::Value Session::cloud_progress() const
 {

@@ -29,7 +29,9 @@ public:
     void feed(ingame::Line line, bool popup = true);
     void completion(const std::vector<std::string> &items, const std::vector<std::string> &locations);
     void configure(const std::map<std::string, unsigned> &styles, bool death_link, bool move_shuffle = false,
-                   unsigned owned_moves = 0);
+                   unsigned owned_moves = 0, bool trap_kills = false);
+    // start a trap now; timed traps last `seconds` (Freeze always lasts freeze_trap_ms)
+    void apply_trap(unsigned kind, unsigned seconds);
     void c3_buttons(bool ready, const std::set<std::string> &allowed = {});
     unsigned collectibles(std::vector<ingame::Collectible> config, unsigned relic_min_rank = 1);
     std::vector<ingame::CollectibleObservation> collectible_observations();

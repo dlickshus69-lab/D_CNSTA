@@ -175,6 +175,9 @@ HUB_ITEM_COUNTS = {HUB_ITEMS[1, 2]: 2, HUB_ITEMS[2, 2]: 4}
 # Ability Shuffle: one item per basic move, shared by all three campaigns
 BASIC_MOVES = ("Spin", "Body Slam", "Crouch Jump", "Slide")
 ITEMS.update({name: BASE + 2400 + index for index, name in enumerate(BASIC_MOVES)})
+# traps replace junk items; the client applies them once you are in a level and in control
+TRAPS = ("Death Trap", "Move Lock Trap", "Reverse Controls Trap", "Freeze Trap")
+ITEMS.update({name: BASE + 2500 + index for index, name in enumerate(TRAPS)})
 
 
 def valid_requirement_counts(items):

@@ -119,6 +119,7 @@ class ClientRuntime
     bool names_loaded = false, render_announced = false;
     std::string completion_error;
     unsigned last_deaths = 0, last_collectible_awards = 0;
+    std::chrono::steady_clock::time_point next_trap{};
     std::unique_ptr<LevelRouting> level_routing;
     unsigned routing_start_count = 0, routing_secret_return_count = 0;
     std::string routing_error;

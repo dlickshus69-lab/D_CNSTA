@@ -38,9 +38,12 @@ void ClientRuntime::update_bridge(AP_ConnectionStatus status)
             {
                 // the save gate waits after executable unpacking and before the first hub loads
                 ingame::preserve_shared_ui_audio();
+                // movement hooks serve Crashsanity, Ability Shuffle and Move Lock Traps
                 const auto &ability_shuffle = session.slot_data()["ability_shuffle"];
+                const auto &move_lock_traps = session.slot_data()["trap_counts"]["Move Lock Trap"];
                 ingame::configure_movement(seed->movement_styles,
-                                           ability_shuffle.isIntegral() && ability_shuffle.asInt64() > 0);
+                                           (ability_shuffle.isIntegral() && ability_shuffle.asInt64() > 0) ||
+                                               (move_lock_traps.isIntegral() && move_lock_traps.asInt64() > 0));
             }
             cloud->tick(status == AP_ConnectionStatus::Authenticated);
         }
@@ -259,7 +262,10 @@ void ClientRuntime::update_display(ClientTick &tick)
             for (unsigned i = 0; i < 4; ++i)
                 if (item.first == ingame::move_item(i))
                     owned_moves |= 1u << i;
-        box_markers->configure(seed->movement_styles, death_link, move_shuffle, owned_moves);
+        // Death Traps reuse the DeathLink kill even when DeathLink is off
+        const auto &death_traps = session.slot_data()["trap_counts"]["Death Trap"];
+        const bool trap_kills = death_traps.isIntegral() && death_traps.asInt64() > 0;
+        box_markers->configure(seed->movement_styles, death_link, move_shuffle, owned_moves, trap_kills);
         auto collectible_checked = tick.checked;
         collectible_checked.insert(pending.begin(), pending.end());
         // relic_requirement: 0 any tier, 1 gold or platinum, 2 platinum only. older seeds omit it.

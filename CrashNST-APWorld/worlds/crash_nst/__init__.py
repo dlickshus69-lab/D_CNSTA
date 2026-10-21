@@ -35,6 +35,7 @@ from .data import (
     SECRET_SOURCES,
     C3_VEHICLE_LEVELS,
     BASIC_MOVES,
+    TRAPS,
     move_requirements,
     easiest_start,
     lock_requirements,
@@ -80,6 +81,8 @@ class CrashWorld(World):
         )
         if name in VANILLA_ITEMS:
             classification = ItemClassification.useful
+        if name in TRAPS:
+            classification = ItemClassification.trap
         return CrashItem(name, classification, ITEMS[name], self.player)
 
     def get_filler_item_name(self):
@@ -715,6 +718,20 @@ class CrashWorld(World):
                 tokens * self.options.token_required_percentage.value + 99
             ) // 100
         pool.extend(self.create_item(TOKEN) for _ in range(tokens))
+        # traps replace a share of the remaining junk, picked by their weights
+        weights = {
+            "Death Trap": self.options.death_trap_weight.value,
+            "Move Lock Trap": self.options.move_lock_trap_weight.value,
+            "Reverse Controls Trap": self.options.reverse_controls_trap_weight.value,
+            "Freeze Trap": self.options.freeze_trap_weight.value,
+        }
+        junk = capacity - len(pool)
+        traps = (junk * self.options.trap_fill_percentage.value + 99) // 100 if any(weights.values()) else 0
+        self.trap_counts = dict.fromkeys(TRAPS, 0)
+        for _ in range(traps):
+            name = self.random.choices(list(weights), weights=list(weights.values()))[0]
+            self.trap_counts[name] += 1
+            pool.append(self.create_item(name))
         pool.extend(
             self.create_item(self.get_filler_item_name())
             for _ in range(capacity - len(pool))
@@ -810,6 +827,9 @@ class CrashWorld(World):
         result["box_item_spoilers"] = bool(self.options.box_item_spoilers.value)
         # 0 off, 1 start with Spin, 2 Spin shuffled. Move item IDs are BASE + 2400 + index of BASIC_MOVES.
         result["ability_shuffle"] = self.ability_shuffle
+        # trap item IDs are BASE + 2500 + index of TRAPS. counts tell the client which hooks it needs.
+        result["trap_counts"] = getattr(self, "trap_counts", dict.fromkeys(TRAPS, 0))
+        result["trap_duration"] = self.options.trap_duration.value
         # 0 = any tier, 1 = gold or platinum, 2 = platinum only
         result["relic_requirement"] = self.options.relic_requirement.value
         return result

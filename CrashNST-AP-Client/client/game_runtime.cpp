@@ -2,6 +2,7 @@
 #include "engine_memory.h"
 #include "function_hook.h"
 #include "movement_rules.h"
+#include "trap_rules.h"
 #include "game_pickups.h"
 #include "game_memory.h"
 #include "crate_specs.h"
@@ -275,6 +276,12 @@ namespace ingame
             // hog, polar bear, jetpack and vehicle stages keep vanilla controls, as with Crashsanity
             return special_level(level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         }
+        // Move Lock Trap end time (GetTickCount64). F10 does not lift it; it simply runs out.
+        std::atomic<std::uint64_t> move_lock_until{0};
+        bool move_lock_active()
+        {
+            return timer_active(move_lock_until, GetTickCount64()) && !gimmick_level();
+        }
         bool crouch_locked()
         {
             return move_blocked(MoveCrouch, move_shuffle, vanilla_movement, owned_moves) && !gimmick_level();
@@ -307,7 +314,8 @@ namespace ingame
             if (selected < 4)
             {
                 const auto style = effective_movement();
-                const bool moves = move_shuffle && !vanilla_movement && !gimmick_level();
+                const bool lock = move_lock_active();
+                const bool moves = (move_shuffle && !vanilla_movement && !gimmick_level()) || lock;
                 const auto actor = value<Address>(component + 24);
                 if ((style == 1 || moves) && typed(component, 0x1427ae0) && actor && actor == player() && typed(value<Address>(actor + 424), 0x1589128))
                 {
@@ -325,7 +333,8 @@ namespace ingame
                                           << (move == MoveSpin ? "Spin" : move == MoveSlide ? "Slide" : move == MoveBodySlam ? "Body Slam" : "not shuffled")
                                           << std::endl;
                         }
-                        if (move_blocked(move, true, false, owned_moves))
+                        // a Move Lock Trap blocks every shuffled attack; Ability Shuffle blocks unowned ones
+                        if (move && (lock || move_blocked(move, move_shuffle, vanilla_movement, owned_moves)))
                             return 4;
                     }
                     if (style == 1)
@@ -1392,12 +1401,14 @@ namespace ingame
         vanilla_movement = state.vanilla_controls != 0;
         move_shuffle = state.move_shuffle != 0;
         owned_moves = state.owned_moves;
+        move_lock_until = state.move_lock_until;
         const auto world = value<Address>(base() + 0x1a64690);
         const auto key = level_key(string(value<Address>(world + 184)));
         // mixed vehicle levels retain normal controls until their active form is mapped
         const bool walking = actor && typed(value<Address>(actor + 424), 0x1589128) && !special_level(key);
         const auto desired = walking && !vanilla_movement ? assigned_movement() : 0;
-        blocked_crouch_controller = walking && movement_style(desired, scene_campaign(), false) == 1
+        // Crash 1 controls and Move Lock Traps block crouch/slide input live
+        blocked_crouch_controller = walking && (movement_style(desired, scene_campaign(), false) == 1 || move_lock_active())
                                         ? value<Address>(actor + 424) : 0;
         active_style = 0;
         state.applied_style = 0;
@@ -1421,7 +1432,8 @@ namespace ingame
                 copy(state.error, "Crashsanity waiting for crouch/slide component. Re-enter the level.");
             }
         }
-        if (key.empty() || !state.death_link)
+        // Death Traps use the same scripted death, so it also runs without DeathLink
+        if (key.empty() || !(state.death_link || state.trap_kills))
         {
             last_actor = 0;
             death_handle = 0;
@@ -1469,6 +1481,7 @@ namespace ingame
         std::lock_guard lock(crate_mutex);
         restore_tints(game_thread);
         active_style = 0;
+        move_lock_until = 0;
         // these guards remain active because an existing actor could retain its crouch component
         vanilla_movement = true;
         const auto actor = player(), controller = value<Address>(actor + 424);

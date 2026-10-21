@@ -100,6 +100,10 @@ namespace ingame
         unsigned relic_min_rank = 1;
         // Ability Shuffle: whether basic moves are items, and the owned Move* bits
         unsigned move_shuffle = 0, owned_moves = 0;
+        // traps: deaths reuse death_request (trap_kills enables it without DeathLink);
+        // timed traps store GetTickCount64() end times
+        unsigned trap_kills = 0;
+        std::uint64_t move_lock_until = 0, reverse_until = 0, freeze_until = 0;
         unsigned c3_buttons_ready = 0;
         std::uint64_t c3_buttons_active = 0;
         float box_half_size = 50;
@@ -172,7 +176,7 @@ namespace ingame
     inline bool valid(const Shared &s)
     {
         if (!(s.version == protocol && s.bytes == sizeof(Shared) && s.box_count <= max_boxes &&
-              s.marker_mode <= MarkersTint && s.level_count <= max_levels && s.entrance_count <= max_levels && s.line_count <= max_lines && s.line_begin < max_lines && s.line_write >= s.line_count && s.collectible_count <= max_levels && s.collectible_observation_count <= max_levels && s.relic_min_rank >= 1 && s.relic_min_rank <= 3 && s.move_shuffle <= 1 && s.owned_moves <= 15 && s.c3_buttons_ready <= 1 && !(s.c3_buttons_active >> 36) &&
+              s.marker_mode <= MarkersTint && s.level_count <= max_levels && s.entrance_count <= max_levels && s.line_count <= max_lines && s.line_begin < max_lines && s.line_write >= s.line_count && s.collectible_count <= max_levels && s.collectible_observation_count <= max_levels && s.relic_min_rank >= 1 && s.relic_min_rank <= 3 && s.move_shuffle <= 1 && s.owned_moves <= 15 && s.trap_kills <= 1 && s.c3_buttons_ready <= 1 && !(s.c3_buttons_active >> 36) &&
               s.completion_bytes <= sizeof(s.completion) && s.item_start <= s.location_start &&
               s.location_start <= s.completion_bytes && s.command_write - s.command_read <= max_commands &&
               std::isfinite(s.box_half_size) && s.box_half_size >= 10 && s.box_half_size <= 250 &&

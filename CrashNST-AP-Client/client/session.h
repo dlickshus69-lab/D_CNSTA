@@ -41,6 +41,9 @@ public:
     unsigned received_count() const { return ready() ? data_["items"].size() : 0; }
     unsigned filler_cursor() const { return ready() ? data_["filler_cursor"].asUInt() : 0; }
     bool reserve_filler(unsigned index); // persist before game-thread reward dispatch
+    // traps are applied once each; the cursor stays local (cloud progress keeps its two fields)
+    unsigned trap_cursor() const { return ready() && data_["trap_cursor"].isUInt() ? data_["trap_cursor"].asUInt() : 0; }
+    bool reserve_trap(unsigned index);
     std::map<char, std::string> bind_saves(const std::filesystem::path &save_directory,
                                            const std::set<std::string> &levels);
     std::filesystem::path profile_directory() const

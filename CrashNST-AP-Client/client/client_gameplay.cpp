@@ -1,4 +1,5 @@
 #include "client_runtime.h"
+#include "trap_rules.h"
 #include <algorithm>
 #include <iostream>
 using save_probe::level_key;
@@ -405,6 +406,42 @@ void ClientRuntime::update_ownership(ClientTick &tick)
         catch (const std::exception &e)
         {
             std::cerr << "Filler delivery: " << e.what() << std::endl;
+        }
+    }
+    // traps fire one at a time, only in an accessible level with the camera active, trap_gap_ms apart.
+    // each is saved as applied before it starts, so reconnecting never replays it.
+    if (tick.room_ready && box_markers && seed && std::chrono::steady_clock::now() >= next_trap)
+    {
+        try
+        {
+            for (unsigned index = session.trap_cursor(); index < tick.items.size(); ++index)
+            {
+                const auto kind = ingame::trap_kind(tick.items[index].first);
+                if (kind < 0)
+                    continue;
+                const auto scene = read_scene(GetCurrentProcess());
+                const auto level = level_key(scene.zone);
+                if (!scene.camera_active || level.empty() || !level_accessible(*seed, tick.items, level))
+                    break;
+                if (session.reserve_trap(index))
+                {
+                    const auto &duration = session.slot_data()["trap_duration"];
+                    const unsigned seconds = duration.isUInt() && duration.asUInt() >= 10 && duration.asUInt() <= 120
+                                                 ? duration.asUInt()
+                                                 : 30;
+                    box_markers->apply_trap(static_cast<unsigned>(kind), seconds);
+                    const auto timed = kind == ingame::TrapMoveLock || kind == ingame::TrapReverse;
+                    print_console(std::string(ingame::trap_names[kind]) +
+                                      (timed ? " for " + std::to_string(seconds) + " seconds!" : "!"),
+                                  true);
+                    next_trap = std::chrono::steady_clock::now() + std::chrono::milliseconds(ingame::trap_gap_ms);
+                }
+                break; // one trap per pass
+            }
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Trap delivery: " << e.what() << std::endl;
         }
     }
     if (previous_gems != desired_gems)

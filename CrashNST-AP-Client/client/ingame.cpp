@@ -3,6 +3,7 @@
 #include "console.h"
 #include "game_font.h"
 #include "game_memory.h"
+#include "trap_rules.h"
 #include <d3d11.h>
 #include <dxgi1_5.h>
 #include <d3dcompiler.h>
@@ -30,6 +31,10 @@ namespace
     std::atomic_bool active{false}, console_open{false};
     std::atomic_bool worker_running{false};
     std::atomic_bool startup_mode{false}, startup_check{false};
+    // Reverse Controls and Freeze Trap end times (GetTickCount64), copied from the shared block each tick
+    std::atomic<std::uint64_t> reverse_until{0}, freeze_until{0};
+    bool frozen() { return active && timer_active(freeze_until, GetTickCount64()); }
+    bool reversed() { return active && timer_active(reverse_until, GetTickCount64()); }
     HANDLE worker_thread = nullptr;
     std::recursive_mutex render_mutex;
     HWND game_window = nullptr;
@@ -193,6 +198,22 @@ namespace
                 return hook.original;
         return nullptr;
     }
+    bool keyboard_device(IUnknown *device)
+    {
+        // buffered mouse offsets overlap keyboard scan codes, so only keyboards get Reverse Controls
+        static std::mutex mutex;
+        static std::map<IUnknown *, bool> known;
+        std::lock_guard<std::mutex> guard(mutex);
+        const auto found = known.find(device);
+        if (found != known.end())
+            return found->second;
+        // IDirectInputDevice8 vtable slot 3 is GetCapabilities in both ANSI and Unicode interfaces
+        DIDEVCAPS caps{};
+        caps.dwSize = sizeof(caps);
+        const auto get_caps = reinterpret_cast<HRESULT(STDMETHODCALLTYPE *)(IUnknown *, DIDEVCAPS *)>((*reinterpret_cast<void ***>(device))[3]);
+        const bool keyboard = SUCCEEDED(get_caps(device, &caps)) && GET_DIDEVICE_TYPE(caps.dwDevType) == DI8DEVTYPE_KEYBOARD;
+        return known[device] = keyboard;
+    }
     HRESULT STDMETHODCALLTYPE device_state(IUnknown *device, DWORD bytes, void *data)
     {
         // IDirectInputDevice8 vtable slots 9/10 are GetDeviceState/GetDeviceData in both ANSI and Unicode interfaces
@@ -200,8 +221,10 @@ namespace
         if (!original)
             return DIERR_GENERIC;
         const auto result = original(device, bytes, data);
-        if (active && console_open && SUCCEEDED(result) && data && (bytes == 256 || bytes == sizeof(DIMOUSESTATE) || bytes == sizeof(DIMOUSESTATE2)))
+        if (active && (console_open || frozen()) && SUCCEEDED(result) && data && (bytes == 256 || bytes == sizeof(DIMOUSESTATE) || bytes == sizeof(DIMOUSESTATE2)))
             std::memset(data, 0, bytes);
+        else if (reversed() && SUCCEEDED(result) && data && bytes == 256)
+            reverse_keyboard(static_cast<unsigned char *>(data));
         return result;
     }
     HRESULT STDMETHODCALLTYPE device_data(IUnknown *device, DWORD bytes, DIDEVICEOBJECTDATA *data, DWORD *count, DWORD flags)
@@ -209,15 +232,24 @@ namespace
         const auto original = reinterpret_cast<HRESULT(STDMETHODCALLTYPE *)(IUnknown *, DWORD, DIDEVICEOBJECTDATA *, DWORD *, DWORD)>(input_original(*reinterpret_cast<void ***>(device) + 10));
         if (!original)
             return DIERR_GENERIC;
-        const bool capture = active && console_open;
+        const bool capture = active && (console_open || frozen());
         const auto result = original(device, bytes, data, count, capture ? 0 : flags);
         if (capture && SUCCEEDED(result) && count)
             *count = 0;
+        else if (reversed() && SUCCEEDED(result) && data && count && bytes >= sizeof(DWORD) && keyboard_device(device))
+            for (DWORD i = 0; i < *count; ++i)
+            {
+                // dwOfs is the first field and holds the scan code for keyboard events
+                auto &offset = reinterpret_cast<DIDEVICEOBJECTDATA *>(reinterpret_cast<unsigned char *>(data) + i * bytes)->dwOfs;
+                offset = reverse_scan_code(offset);
+            }
         return result;
     }
     SHORT WINAPI async_key(int key)
     {
-        return active && console_open ? 0 : GetAsyncKeyState(key);
+        if (active && (console_open || frozen()))
+            return 0;
+        return GetAsyncKeyState(reversed() ? reverse_virtual_key(key) : key);
     }
     DWORD WINAPI controller_state(DWORD index, XINPUT_STATE *state)
     {
@@ -235,8 +267,14 @@ namespace
         if (!query)
             return ERROR_DEVICE_NOT_CONNECTED;
         const auto result = query(index, state);
-        if (active && console_open && result == ERROR_SUCCESS && state)
+        if (active && (console_open || frozen()) && result == ERROR_SUCCESS && state)
             std::memset(&state->Gamepad, 0, sizeof(state->Gamepad));
+        else if (reversed() && result == ERROR_SUCCESS && state)
+        {
+            state->Gamepad.sThumbLX = reverse_axis(state->Gamepad.sThumbLX);
+            state->Gamepad.sThumbLY = reverse_axis(state->Gamepad.sThumbLY);
+            state->Gamepad.wButtons = reverse_dpad(state->Gamepad.wButtons);
+        }
         return result;
     }
     void add_input_hook(void **slot, void *replacement)
@@ -1139,6 +1177,24 @@ namespace
                     const float width = r.text_width(snapshot->goal_counts) + 16, x = std::max(4.0f, r.width - width - 16);
                     r.quad(x, goal_y, width, 26, 0xbb181818);
                     r.text(x + 8, goal_y + 2, snapshot->goal_counts, 0xff20d8ff);
+                    goal_y += 32;
+                }
+                {
+                    // running trap timers
+                    const auto now = GetTickCount64();
+                    std::string traps;
+                    const std::pair<std::uint64_t, const char *> timers[]{{snapshot->move_lock_until, "Move Lock"},
+                                                                          {snapshot->reverse_until, "Reversed"},
+                                                                          {snapshot->freeze_until, "Frozen"}};
+                    for (const auto &[until, label] : timers)
+                        if (timer_active(until, now))
+                            traps += (traps.empty() ? "" : "  ") + std::string(label) + " " + std::to_string(seconds_left(until, now)) + "s";
+                    if (!traps.empty())
+                    {
+                        const float width = r.text_width(traps) + 16, x = std::max(4.0f, r.width - width - 16);
+                        r.quad(x, goal_y, width, 26, 0xbb181818);
+                        r.text(x + 8, goal_y + 2, traps, 0xff4040ff);
+                    }
                 }
                 for (const auto &box : live_boxes(*snapshot, scene.zone))
                 {
@@ -1665,13 +1721,21 @@ extern "C" __declspec(dllexport) void NST_Tick()
         if (!startup_mode)
         {
             if (active && valid(*shared) && !shared->stop)
+            {
+                reverse_until = shared->reverse_until;
+                freeze_until = shared->freeze_until;
                 update_gameplay(*shared);
+            }
             else
+            {
+                reverse_until = freeze_until = 0;
                 restore_gameplay(true);
+            }
         }
     }
     catch (const std::exception &e)
     {
+        reverse_until = freeze_until = 0;
         shared->vanilla_controls = 1;
         copy(shared->error, e.what());
         restore_gameplay(true);

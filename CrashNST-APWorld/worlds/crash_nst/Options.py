@@ -218,6 +218,67 @@ class AbilityShuffle(Choice):
     default = option_off
 
 
+class TrapFillPercentage(Range):
+    """Replace a percentage of junk items in the item pool with random traps.
+
+    Traps need the updated client. Each one waits until you are in a level and in control.
+    The trap weights below decide how often each kind appears.
+    """
+
+    display_name = "Trap Fill Percentage"
+    range_start = 0
+    range_end = 100
+    default = 0
+
+
+class DeathTrapWeight(Range):
+    """How often Death Traps appear compared to other traps. Crash dies, like receiving a
+    DeathLink, but no DeathLink is sent to other players."""
+
+    display_name = "Death Trap Weight"
+    range_start = 0
+    range_end = 100
+    default = 20
+
+
+class MoveLockTrapWeight(Range):
+    """How often Move Lock Traps appear compared to other traps. Spin, slide, body slam and
+    crouch stop working for the Trap Duration."""
+
+    display_name = "Move Lock Trap Weight"
+    range_start = 0
+    range_end = 100
+    default = 30
+
+
+class ReverseControlsTrapWeight(Range):
+    """How often Reverse Controls Traps appear compared to other traps. Left/right and
+    forward/back swap for the Trap Duration, on the controller and on WASD and the arrow keys."""
+
+    display_name = "Reverse Controls Trap Weight"
+    range_start = 0
+    range_end = 100
+    default = 30
+
+
+class FreezeTrapWeight(Range):
+    """How often Freeze Traps appear compared to other traps. All input stops for 3 seconds."""
+
+    display_name = "Freeze Trap Weight"
+    range_start = 0
+    range_end = 100
+    default = 20
+
+
+class TrapDuration(Range):
+    """Seconds that Move Lock and Reverse Controls Traps last. A new trap of the same kind adds its time."""
+
+    display_name = "Trap Duration"
+    range_start = 10
+    range_end = 120
+    default = 30
+
+
 class RelicRequirement(Choice):
     """Minimum relic tier that sends a level's relic check.
 
@@ -354,4 +415,10 @@ class CrashOptions(PerGameCommonOptions):
     box_item_spoilers: BoxItemSpoilers
     crashsanity: Crashsanity
     ability_shuffle: AbilityShuffle
+    trap_fill_percentage: TrapFillPercentage
+    death_trap_weight: DeathTrapWeight
+    move_lock_trap_weight: MoveLockTrapWeight
+    reverse_controls_trap_weight: ReverseControlsTrapWeight
+    freeze_trap_weight: FreezeTrapWeight
+    trap_duration: TrapDuration
     death_link: DeathLink

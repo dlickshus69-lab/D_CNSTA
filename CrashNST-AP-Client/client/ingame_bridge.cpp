@@ -1,4 +1,5 @@
 #include "ingame_bridge.h"
+#include "trap_rules.h"
 #include "game_memory.h"
 #include "game_hooks.h"
 #include "console.h"
@@ -299,10 +300,11 @@ void BoxMarkers::progress(const CheckProgress &counts, const std::map<std::strin
     unlock();
 }
 void BoxMarkers::configure(const std::map<std::string, unsigned> &styles, bool death_link, bool move_shuffle,
-                           unsigned owned_moves)
+                           unsigned owned_moves, bool trap_kills)
 {
     lock();
     shared_->death_link = death_link;
+    shared_->trap_kills = trap_kills;
     shared_->move_shuffle = move_shuffle;
     shared_->owned_moves = owned_moves & 15;
     for (unsigned i = 0; i < shared_->level_count; ++i)
@@ -392,6 +394,29 @@ std::vector<std::string> BoxMarkers::commands()
     if (!error.empty())
         std::cerr << "In-game adapter: " << error << std::endl;
     return result;
+}
+void BoxMarkers::apply_trap(unsigned kind, unsigned seconds)
+{
+    const auto now = GetTickCount64();
+    const std::uint64_t ms = seconds * 1000ull;
+    lock();
+    switch (kind)
+    {
+    case ingame::TrapDeath:
+        ++shared_->death_request;
+        break;
+    case ingame::TrapMoveLock:
+        shared_->move_lock_until = ingame::extend_timer(shared_->move_lock_until, now, ms);
+        break;
+    case ingame::TrapReverse:
+        shared_->reverse_until = ingame::extend_timer(shared_->reverse_until, now, ms);
+        break;
+    case ingame::TrapFreeze:
+        shared_->freeze_until = ingame::extend_timer(shared_->freeze_until, now, ingame::freeze_trap_ms);
+        break;
+    }
+    ++shared_->revision;
+    unlock();
 }
 void BoxMarkers::receive_death()
 {
