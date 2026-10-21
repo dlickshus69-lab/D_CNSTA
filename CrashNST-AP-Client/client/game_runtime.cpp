@@ -17,6 +17,7 @@
 #include <sstream>
 #include <set>
 #include <deque>
+#include <thread>
 #include <chrono>
 #include <unordered_map>
 #include <string_view>
@@ -2664,6 +2665,121 @@ namespace ingame
                 value<Address>(ice_surface_seen.surface) == ice_surface_seen.type && value<Address>(info + 0x18) != ice_surface_seen.surface)
                 write(info + 0x18, ice_surface_seen.surface);
         }
+        // /ice_find (research): searches all of the game's memory, on a background thread, for references to the
+        // IceSurface asset (seen when Crash stood on ice) and to the surface Crash stands on now, and says what kind
+        // of object holds each one. The ice script decides "ice" by comparing the floor's surface with a reference it
+        // keeps; pointing that reference at the floor Crash stands on would switch the game's own ice on anywhere.
+        std::atomic_bool ice_find_running{false};
+        void ice_find()
+        {
+            if (ice_find_running.exchange(true))
+            {
+                std::cout << "Ice find: a search is already running\n" << std::flush;
+                return;
+            }
+            struct Target
+            {
+                Address value;
+                std::string name;
+            };
+            std::vector<Target> targets;
+            const auto actor = player();
+            const auto level = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
+            if (ice_surface_seen.surface && ice_surface_seen.level == level)
+                targets.push_back({ice_surface_seen.surface, "IceSurface"});
+            if (const auto info = actor ? crash_floor_info(actor) : 0)
+                if (const auto surface = value<Address>(info + 0x18); surface && surface != ice_surface_seen.surface)
+                    targets.push_back({surface, "floor now (" + string(value<Address>(surface + 8), 48) + ")"});
+            const auto slide = actor ? crash_script(actor, "Scripts.Graph.Crash_IceSlide") : 0;
+            const Address slide_end = slide ? slide + value<std::uint16_t>(value<Address>(slide + 56) + 90) : 0;
+            const auto slide_data = slide ? value<Address>(slide + 0x10) : 0, slide_meta = slide ? value<Address>(slide + 56) : 0;
+            if (targets.empty())
+            {
+                std::cout << "Ice find: stand on real ice once in this level (or stand anywhere in a level), then try again\n" << std::flush;
+                ice_find_running = false;
+                return;
+            }
+            std::cout << "Ice find: searching all game memory in the background (a few seconds) for " << targets.size()
+                      << " surfaces. Crash_IceSlide is at 0x" << std::hex << slide << ", its data 0x" << slide_data << ", its graph 0x"
+                      << slide_meta << std::dec << "\n" << std::flush;
+            std::thread([this_targets = targets, slide, slide_end, slide_data, slide_meta]
+                        {
+                const auto lo = base(), hi = module_end();
+                std::vector<std::vector<Address>> hits(this_targets.size());
+                std::vector<std::uint64_t> chunk(1 << 17); // 1 MB
+                std::uint64_t scanned = 0;
+                MEMORY_BASIC_INFORMATION info{};
+                for (Address at = 0x10000; at < 0x7ffffffe0000ULL && VirtualQuery(reinterpret_cast<void *>(at), &info, sizeof(info));
+                     at = reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize)
+                {
+                    if (info.State != MEM_COMMIT || info.Type != MEM_PRIVATE || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+                        !(info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY)))
+                        continue;
+                    const Address start = reinterpret_cast<Address>(info.BaseAddress), end = start + info.RegionSize;
+                    for (Address p = start; p < end; p += chunk.size() * 8)
+                    {
+                        const auto bytes = std::min<std::uint64_t>(chunk.size() * 8, end - p);
+                        SIZE_T got = 0;
+                        if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(p), chunk.data(), bytes, &got))
+                            continue;
+                        scanned += got;
+                        for (std::size_t i = 0; i < got / 8; ++i)
+                            for (std::size_t t = 0; t < this_targets.size(); ++t)
+                                if (chunk[i] == this_targets[t].value && hits[t].size() < 4000)
+                                    hits[t].push_back(p + i * 8);
+                    }
+                }
+                std::ostringstream out;
+                out << "Ice find: searched " << scanned / (1024 * 1024) << " MB\n";
+                for (std::size_t t = 0; t < this_targets.size(); ++t)
+                {
+                    out << "Ice find: " << this_targets[t].name << " (0x" << std::hex << this_targets[t].value << std::dec << ") is referenced in "
+                        << hits[t].size() << " places\n";
+                    std::map<std::string, unsigned> kinds;
+                    unsigned listed = 0;
+                    for (const auto at : hits[t])
+                    {
+                        // the object holding it: the nearest type word up to 1 KB before
+                        Address object = 0, type = 0;
+                        for (Address q = at; q + 1024 >= at && q >= 0x10000; q -= 8)
+                        {
+                            const auto v = value<Address>(q);
+                            if (v >= lo && v < hi)
+                            {
+                                object = q, type = v - lo;
+                                break;
+                            }
+                            if (q == at - 1024)
+                                break;
+                        }
+                        std::ostringstream kind;
+                        kind << (object ? "type +0x" : "no type") << std::hex << (object ? type : 0);
+                        const bool special = (slide && at >= slide && at < slide_end) || (slide_data && at >= slide_data && at < slide_data + 0x400) ||
+                                             (slide_meta && at >= slide_meta && at < slide_meta + 0x400);
+                        if (++kinds[kind.str()] <= 2 || special)
+                        {
+                            if (listed++ < 120)
+                            {
+                                out << "Ice find:   0x" << std::hex << at << std::dec;
+                                if (object)
+                                    out << " = " << kind.str() << " +0x" << std::hex << (at - object) << std::dec;
+                                if (slide && at >= slide && at < slide_end)
+                                    out << "  [in Crash_IceSlide +0x" << std::hex << (at - slide) << std::dec << "]";
+                                if (slide_data && at >= slide_data && at < slide_data + 0x400)
+                                    out << "  [in Crash_IceSlide's data +0x" << std::hex << (at - slide_data) << std::dec << "]";
+                                if (slide_meta && at >= slide_meta && at < slide_meta + 0x400)
+                                    out << "  [in Crash_IceSlide's graph +0x" << std::hex << (at - slide_meta) << std::dec << "]";
+                                out << "\n";
+                            }
+                        }
+                    }
+                    for (const auto &[kind, count] : kinds)
+                        out << "Ice find:   " << count << " in objects of " << kind << "\n";
+                }
+                std::cout << out.str() << std::flush;
+                ice_find_running = false; })
+                .detach();
+        }
         void update_c3_buttons(Shared &state, const std::string &zone)
         {
             static std::uint64_t next = 0, pending_triggers = 0;
@@ -2906,6 +3022,11 @@ namespace ingame
         update_ice_watch(state.ice_watch != 0);
         update_move_probe(state.move_probe != 0);
         update_ice_test(state.ice_test <= 2 ? state.ice_test : 0);
+        if (state.ice_find_request != state.ice_find_ack)
+        {
+            state.ice_find_ack = state.ice_find_request;
+            ice_find();
+        }
         if (state.ice_probe_request != state.ice_probe_ack)
         {
             state.ice_probe_ack = state.ice_probe_request;

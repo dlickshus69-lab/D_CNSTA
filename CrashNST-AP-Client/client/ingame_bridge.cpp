@@ -487,6 +487,12 @@ void BoxMarkers::ice_test(unsigned mode)
     shared_->ice_test = mode;
     unlock();
 }
+void BoxMarkers::request_ice_find()
+{
+    lock();
+    ++shared_->ice_find_request;
+    unlock();
+}
 void BoxMarkers::request_ice_probe()
 {
     lock();

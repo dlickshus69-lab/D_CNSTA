@@ -42,6 +42,7 @@ public:
     void ice_watch(bool on);
     void move_probe(bool on);
     void ice_test(unsigned mode);
+    void request_ice_find();
     void request_nitro_spawn();
     bool nitro_ready();
     void pause_traps(bool paused, std::uint64_t elapsed_ms);

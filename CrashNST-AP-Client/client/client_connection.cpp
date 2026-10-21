@@ -479,6 +479,16 @@ void ClientRuntime::handle_commands()
                 else
                     print_console("Ice test needs the in-game adapter. Load into a level first.");
             }
+            else if (command == "/ice_find")
+            {
+                if (box_markers)
+                {
+                    box_markers->request_ice_find();
+                    print_console("Ice find: searching game memory for where the ice surface is referenced. The results appear in the log after a few seconds.");
+                }
+                else
+                    print_console("Ice find needs the in-game adapter. Load into a level first.");
+            }
             else if (command == "/ice_probe")
             {
                 if (box_markers)
