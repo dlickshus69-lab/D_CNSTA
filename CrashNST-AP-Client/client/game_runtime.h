@@ -31,6 +31,8 @@ namespace ingame
     unsigned movement_double_jump(unsigned owned);
     // gimmick stages (vanilla controls) and chase stages, where walking would be certain death
     bool slow_trap_exempt();
+    // gimmick levels except the scuba levels Under Pressure and Deep Trouble
+    bool darkness_trap_exempt();
     // gimmick stages (hog, polar bear, jetpack, Crash 3 vehicles): no Darkness there
     bool gimmick_stage();
     // Crash's position (x, y horizontal, z up) when he is loaded

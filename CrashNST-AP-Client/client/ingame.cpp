@@ -1187,7 +1187,7 @@ namespace
                 try
                 {
                     menu_open = !startup_mode && pause_menu_visible();
-                    darkness_exempt = !startup_mode && gimmick_stage();
+                    darkness_exempt = !startup_mode && darkness_trap_exempt();
                 }
                 catch (...)
                 {

@@ -2814,6 +2814,11 @@ namespace ingame
         const auto key = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
         return special_level(key) || chases.count(key);
     }
+    bool darkness_trap_exempt()
+    {
+        const auto key = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
+        return special_level(key) && key != "L302" && key != "L312"; // Darkness stays on underwater
+    }
     unsigned movement_double_jump(unsigned owned)
     {
         if (!owned)
