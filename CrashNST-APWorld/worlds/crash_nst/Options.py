@@ -287,6 +287,18 @@ class DarknessTrapWeight(Range):
     default = 20
 
 
+class NitroTrapWeight(Range):
+    """How often Nitro Traps appear compared to other traps. The game spawns a real Nitro crate a few
+    steps behind Crash on the path he just took. It only happens in levels that have Nitro crates (it
+    borrows one of their spawners) and never in gimmick levels; until then it waits without holding up
+    other traps."""
+
+    display_name = "Nitro Trap Weight"
+    range_start = 0
+    range_end = 100
+    default = 20
+
+
 class MoveLockTrapWeight(Range):
     """How often Move Lock Traps appear compared to other traps. Spin, slide, body slam and
     crouch stop working for the Trap Duration."""
@@ -470,6 +482,7 @@ class CrashOptions(PerGameCommonOptions):
     slippery_trap_weight: SlipperyTrapWeight
     slow_trap_weight: SlowTrapWeight
     darkness_trap_weight: DarknessTrapWeight
+    nitro_trap_weight: NitroTrapWeight
     death_trap_weight: DeathTrapWeight
     trap_duration: TrapDuration
     death_link: DeathLink

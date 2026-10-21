@@ -348,14 +348,20 @@ void ClientRuntime::handle_commands()
                 // local trap preview: nothing is sent to AP
                 static const std::pair<const char *, unsigned> kinds[]{{"slow", ingame::TrapSlow}, {"slippery", ingame::TrapSlippery},
                                                                         {"darkness", ingame::TrapDarkness}, {"reverse", ingame::TrapReverse},
-                                                                        {"freeze", ingame::TrapFreeze}, {"movelock", ingame::TrapMoveLock}};
+                                                                        {"freeze", ingame::TrapFreeze}, {"movelock", ingame::TrapMoveLock},
+                                                                        {"nitro", ingame::TrapNitro}};
                 std::string name = command == "/slow_test" ? "slow" : argument;
                 std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 const auto kind = std::find_if(std::begin(kinds), std::end(kinds), [&](const auto &k) { return name == k.first; });
                 if (kind == std::end(kinds))
-                    print_console("Use /trap_test slow, slippery, darkness, reverse, freeze or movelock. Close the console (F1) to play.");
+                    print_console("Use /trap_test slow, slippery, darkness, reverse, freeze, movelock or nitro. Close the console (F1) to play.");
                 else if (!box_markers)
                     print_console("Trap test needs the in-game adapter. Load into a level first.");
+                else if (kind->second == ingame::TrapNitro)
+                {
+                    box_markers->request_nitro_spawn();
+                    print_console("Nitro Trap test. Not sent to AP. Close the console (F1); it spawns within 5 seconds once Crash has walked a few steps.");
+                }
                 else
                 {
                     box_markers->apply_trap(kind->second, 30);

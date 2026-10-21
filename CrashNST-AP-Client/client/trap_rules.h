@@ -18,11 +18,12 @@ namespace ingame
         TrapSlippery = 5,
         TrapSlow = 6,
         TrapDarkness = 7,
-        TrapCount = 8
+        TrapNitro = 8,
+        TrapCount = 9
     };
     inline constexpr const char *trap_names[TrapCount]{"Death Trap", "Move Lock Trap", "Reverse Controls Trap",
                                                        "Freeze Trap", "Life Loss Trap", "Slippery Trap",
-                                                       "Slow Trap", "Darkness Trap"};
+                                                       "Slow Trap", "Darkness Trap", "Nitro Trap"};
     inline constexpr bool timed_trap(unsigned kind)
     {
         return kind == TrapMoveLock || kind == TrapReverse || kind == TrapSlippery || kind == TrapSlow ||

@@ -459,6 +459,14 @@ void BoxMarkers::request_nitro_spawn()
     ++shared_->nitro_spawn_request;
     unlock();
 }
+bool BoxMarkers::nitro_ready()
+{
+    lock();
+    const bool ready = shared_->nitro_ready && shared_->nitro_spawn_request == shared_->nitro_spawn_ack && !shared_->traps_paused &&
+                       !shared_->menu_paused;
+    unlock();
+    return ready;
+}
 void BoxMarkers::request_ice_probe()
 {
     lock();

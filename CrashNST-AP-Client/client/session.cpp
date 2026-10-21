@@ -197,6 +197,8 @@ void Session::open(const std::filesystem::path &directory, const std::string &se
             // sessions from before traps have no trap cursor
             if (data_.isMember("trap_cursor") && (!data_["trap_cursor"].isUInt() || trap_cursor() > max_items))
                 throw std::runtime_error("Invalid saved trap cursor");
+            if (data_.isMember("nitro_pending") && (!data_["nitro_pending"].isUInt() || nitro_pending() > max_items))
+                throw std::runtime_error("Invalid saved Nitro Trap count");
             if (!data_["server_reset_pending"].isBool())
                 throw std::runtime_error("Invalid server reset marker");
             for (const auto &key : data_["bindings"].getMemberNames())
@@ -219,6 +221,7 @@ void Session::open(const std::filesystem::path &directory, const std::string &se
             data_["local_collectibles"] = Json::Value(Json::arrayValue);
             data_["filler_cursor"] = 0u;
             data_["trap_cursor"] = 0u;
+            data_["nitro_pending"] = 0u;
             data_["server_reset_pending"] = false;
             data_["pending"] = data_["checked"] = data_["items"] = Json::Value(Json::arrayValue);
         }
@@ -359,6 +362,7 @@ void Session::reset_server_state()
     data_["bindings"] = Json::Value(Json::objectValue);
     data_["filler_cursor"] = 0u;
     data_["trap_cursor"] = 0u;
+    data_["nitro_pending"] = 0u;
     data_["server_reset_pending"] = true;
     dirty_ = true;
     flush();
@@ -521,6 +525,38 @@ bool Session::reserve_trap(unsigned index)
         throw;
     }
     return true;
+}
+bool Session::defer_nitro(unsigned index)
+{
+    if (!ready() || index >= data_["items"].size())
+        throw std::runtime_error("Invalid trap receipt index");
+    if (index < trap_cursor())
+        return false;
+    const auto old_cursor = trap_cursor(), old_pending = nitro_pending();
+    data_["trap_cursor"] = index + 1;
+    data_["nitro_pending"] = old_pending + 1;
+    dirty_ = true;
+    try
+    {
+        flush();
+    }
+    catch (...)
+    {
+        data_["trap_cursor"] = old_cursor;
+        data_["nitro_pending"] = old_pending;
+        dirty_ = true;
+        throw;
+    }
+    return true;
+}
+void Session::take_nitro()
+{
+    const auto pending = nitro_pending();
+    if (!pending)
+        return;
+    data_["nitro_pending"] = pending - 1;
+    dirty_ = true;
+    flush();
 }
 Json::Value Session::cloud_progress() const
 {

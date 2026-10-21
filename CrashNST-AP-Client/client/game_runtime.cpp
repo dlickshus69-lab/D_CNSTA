@@ -1699,10 +1699,86 @@ namespace ingame
                 t = {};
             }
         }
-        // /nitro_spawn (experimental): have the game spawn a real Nitro next to Crash. A Nitro spawner's routine only
-        // runs while its crate is out, so the spawner's current crate is set aside (it stays where it is), the
-        // spawner is pointed next to Crash, the game's own spawn routine runs, and the spawner is put back once the
-        // new crate exists.
+        // Nitro Trap: the game spawns a real Nitro a few steps behind Crash. A Nitro spawner's routine only runs
+        // while its crate is out, so the farthest ready spawner's crate is set aside, the spawner is pointed at the
+        // spot, the game's own spawn routine runs (the one the Crash 3 secret platform uses), and then the spawner
+        // gets its position and its own crate back, so that crate stays normal and dying never doubles it.
+        // The spot is somewhere Crash stood on flat ground in the last few seconds, 150-320 units away: real floor,
+        // never inside a wall or over a pit.
+        struct PathSample
+        {
+            std::array<float, 3> at;
+            std::uint64_t time;
+        };
+        std::deque<PathSample> crash_path;
+        std::string crash_path_level;
+        void record_crash_path(const std::string &level)
+        {
+            const auto now = GetTickCount64();
+            if (level != crash_path_level)
+                crash_path.clear(), crash_path_level = level;
+            if (!crash_path.empty() && now - crash_path.back().time < 100)
+                return;
+            std::array<float, 3> at{};
+            if (!crash_position(at))
+                return;
+            // a respawn or teleport starts a new path
+            if (!crash_path.empty() && std::hypot(at[0] - crash_path.back().at[0], at[1] - crash_path.back().at[1]) > 1500)
+                crash_path.clear();
+            crash_path.push_back({at, now});
+            while (crash_path.size() > 80)
+                crash_path.pop_front();
+        }
+        bool path_spot(std::array<float, 3> &spot)
+        {
+            if (crash_path.size() < 5)
+                return false;
+            const auto &now = crash_path.back().at;
+            for (std::size_t i = crash_path.size() - 3; i >= 2; --i)
+            {
+                const auto &at = crash_path[i].at;
+                const float d = std::hypot(at[0] - now[0], at[1] - now[1]);
+                if (d < 150 || d > 320 || std::abs(at[2] - now[2]) > 80)
+                    continue;
+                // flat ground: height steady for 0.2 s either side (not a jump, a fall or a steep slope)
+                float low = at[2], high = at[2];
+                for (std::size_t j = i - 2; j <= i + 2; ++j)
+                    low = std::min(low, crash_path[j].at[2]), high = std::max(high, crash_path[j].at[2]);
+                if (high - low < 15)
+                {
+                    spot = at;
+                    return true;
+                }
+            }
+            return false;
+        }
+        struct NitroSpawner
+        {
+            Address component = 0, owner = 0, method = 0;
+            float distance = -1;
+            std::string name;
+        };
+        NitroSpawner farthest_nitro_spawner(const std::array<float, 3> &from)
+        {
+            NitroSpawner best;
+            for (const auto owner : event_owners())
+            {
+                const auto name = string(value<Address>(owner + 128));
+                if (name.rfind("Crate_Nitro", 0) != 0)
+                    continue;
+                std::array<float, 3> at{};
+                if (!read(owner + 32, at))
+                    continue;
+                for (const auto c : list(value<Address>(owner + 24), 64))
+                {
+                    const auto m = spawner_method(c, owner, true);
+                    const float d = std::hypot(at[0] - from[0], at[1] - from[1]);
+                    if (m && d > best.distance)
+                        best = {c, owner, m, d, name};
+                }
+            }
+            return best;
+        }
         struct NitroSpawn
         {
             Address component = 0, owner = 0, old_handle = 0;
@@ -1715,72 +1791,42 @@ namespace ingame
             auto &s = nitro_spawn_state;
             for (const auto &[at, original] : s.restore)
                 write(at, original);
-            std::cout << "Nitro spawn: " << how << "; " << s.name << "'s spawner is back in place\n" << std::flush;
+            write(s.component + 232, s.old_handle); // the spawner keeps its own crate
+            std::cout << "Nitro spawn: " << how << "; " << s.name << "'s spawner is back to normal\n" << std::flush;
             s = {};
         }
-        void nitro_spawn()
+        // starts a spawn; false with a reason when it cannot right now
+        bool nitro_spawn(std::string &why)
         {
             if (nitro_spawn_state.component)
-            {
-                std::cout << "Nitro spawn: one is already in progress\n" << std::flush;
-                return;
-            }
-            std::array<float, 3> crash{};
+                return why = "one is still spawning", false;
+            if (gimmick_stage())
+                return why = "gimmick level", false;
+            std::array<float, 3> crash{}, spot{};
             if (!crash_position(crash))
-            {
-                std::cout << "Nitro spawn: Crash not found. Run it inside a level.\n" << std::flush;
-                return;
-            }
-            // the farthest Nitro spawner that is ready: its own crate keeps its place
-            Address best_component = 0, best_owner = 0, method = 0;
-            float best = -1;
-            std::string best_name, why_not;
-            for (const auto owner : event_owners())
-            {
-                const auto name = string(value<Address>(owner + 128));
-                if (name.rfind("Crate_Nitro", 0) != 0)
-                    continue;
-                std::array<float, 3> at{};
-                if (!read(owner + 32, at))
-                    continue;
-                for (const auto c : list(value<Address>(owner + 24), 64))
-                {
-                    const char *why = nullptr;
-                    const auto m = spawner_method(c, owner, true, &why);
-                    if (!m)
-                    {
-                        if (why && typed(value<Address>(c + 56), 0x1745d78) &&
-                            string(value<Address>(value<Address>(c + 56) + 16)) == "Scripts.Graph.common_Spawner_Template")
-                            why_not = why;
-                        continue;
-                    }
-                    const float d = std::hypot(at[0] - crash[0], at[1] - crash[1]);
-                    if (d > best)
-                        best = d, best_component = c, best_owner = owner, method = m, best_name = name;
-                }
-            }
-            if (!best_component)
-            {
-                std::cout << "Nitro spawn: no ready Nitro spawner in this level" << (why_not.empty() ? "" : " (" + why_not + ")") << "\n" << std::flush;
-                return;
-            }
-            // the spawner's position copies: its entity position and its scene node
+                return why = "Crash not found", false;
+            if (!path_spot(spot))
+                return why = "no spot yet: Crash needs to have walked a few steps on flat ground", false;
+            const auto spawner = farthest_nitro_spawner(crash);
+            if (!spawner.component)
+                return why = "no Nitro crates in this level", false;
             auto &s = nitro_spawn_state;
-            s = {best_component, best_owner, value<Address>(best_component + 232), {}, GetTickCount64(),
-                 level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))), best_name};
-            std::array<float, 3> spot{};
-            read(best_owner + 32, spot);
-            const std::array<float, 3> target{crash[0] + 150, crash[1], crash[2]};
-            for (const auto at : {best_owner + 32, value<Address>(best_owner + 16) + 0xc0})
+            s = {spawner.component, spawner.owner, value<Address>(spawner.component + 232), {}, GetTickCount64(),
+                 level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))), spawner.name};
+            std::array<float, 3> home{};
+            read(spawner.owner + 32, home);
+            for (const auto at : {spawner.owner + 32, value<Address>(spawner.owner + 16) + 0xc0})
             {
                 std::array<float, 3> now{};
-                if (at > 0x10000 && read(at, now) && crate_copy(now.data(), spot) && write(at, target))
+                if (at > 0x10000 && read(at, now) && crate_copy(now.data(), home) && write(at, spot))
                     s.restore.push_back({at, now});
             }
-            write(best_component + 232, Address{0}); // the old crate is set aside, not destroyed
-            reinterpret_cast<void (*)(Address, Address, unsigned, Address)>(base() + 0xc988c0)(method, best_component, 0, 0);
-            std::cout << "Nitro spawn: asked " << best_name << "'s spawner (" << static_cast<int>(best) << " away, " << s.restore.size()
-                      << " position copies moved) to spawn at " << triple(target) << "\n" << std::flush;
+            write(spawner.component + 232, Address{0}); // its own crate is set aside, not destroyed
+            reinterpret_cast<void (*)(Address, Address, unsigned, Address)>(base() + 0xc988c0)(spawner.method, spawner.component, 0, 0);
+            std::cout << "Nitro spawn: " << spawner.name << "'s spawner (" << static_cast<int>(spawner.distance)
+                      << " away) spawns at " << triple(spot) << ", " << static_cast<int>(std::hypot(spot[0] - crash[0], spot[1] - crash[1]))
+                      << " from Crash\n" << std::flush;
+            return true;
         }
         void nitro_spawn_followup()
         {
@@ -1802,11 +1848,36 @@ namespace ingame
                 finish_nitro_spawn("done");
             }
             else if (elapsed > 2000)
-            {
-                // nothing spawned: give the spawner its old crate back
-                if (!value<Address>(s.component + 232))
-                    write(s.component + 232, s.old_handle);
                 finish_nitro_spawn("nothing spawned within 2 seconds");
+        }
+        // requests from /nitro_spawn and the Nitro Trap; a request waits up to 5 seconds for a spot
+        void update_nitro_trap(Shared &state, const std::string &level)
+        {
+            record_crash_path(level);
+            nitro_spawn_followup();
+            const auto now = GetTickCount64();
+            static std::uint64_t next_ready = 0, give_up = 0;
+            if (now >= next_ready)
+            {
+                next_ready = now + 500;
+                std::array<float, 3> crash{}, spot{};
+                state.nitro_ready = !level.empty() && !gimmick_stage() && !nitro_spawn_state.component && crash_position(crash) &&
+                                    path_spot(spot) && farthest_nitro_spawner(crash).component;
+            }
+            if (state.nitro_spawn_request == state.nitro_spawn_ack)
+            {
+                give_up = 0;
+                return;
+            }
+            if (!give_up)
+                give_up = now + 5000;
+            std::string why;
+            if (nitro_spawn(why))
+                state.nitro_spawn_ack = state.nitro_spawn_request, give_up = 0;
+            else if (now > give_up)
+            {
+                state.nitro_spawn_ack = state.nitro_spawn_request, give_up = 0;
+                std::cout << "Nitro spawn: gave up (" << why << ")\n" << std::flush;
             }
         }
         // /ice_probe research (read-only): every script setting on Crash. Two runs, one standing on normal ground and
@@ -2239,12 +2310,7 @@ namespace ingame
             state.nitro_probe_ack = state.nitro_probe_request;
             nitro_probe();
         }
-        if (state.nitro_spawn_request != state.nitro_spawn_ack)
-        {
-            state.nitro_spawn_ack = state.nitro_spawn_request;
-            nitro_spawn();
-        }
-        nitro_spawn_followup();
+        update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         if (state.ice_probe_request != state.ice_probe_ack)
         {
             state.ice_probe_ack = state.ice_probe_request;

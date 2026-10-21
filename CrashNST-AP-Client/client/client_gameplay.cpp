@@ -496,6 +496,13 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                 const auto level = level_key(scene.zone);
                 if (!scene.camera_active || level.empty())
                     break;
+                // a Nitro Trap joins the waiting count and fires when the game has a Nitro to borrow
+                if (kind == ingame::TrapNitro)
+                {
+                    if (session.defer_nitro(index) && !box_markers->nitro_ready())
+                        print_console("Nitro Trap incoming! It strikes in the next level with Nitro crates.", true);
+                    continue;
+                }
                 // Life Loss uses the game's lives reward, which must be attached and idle
                 if (kind == ingame::TrapLifeLoss &&
                     (!ability_access || ability_refresh_pending || !ability_access->filler_ready() ||
@@ -525,6 +532,23 @@ void ClientRuntime::update_ownership(ClientTick &tick)
             std::cerr << "Trap delivery: " << e.what() << std::endl;
         }
     }
+    // waiting Nitro Traps fire one at a time, in the trap rhythm, once the game reports a Nitro can spawn here
+    if (tick.room_ready && box_markers && session.ready() && session.nitro_pending() && std::chrono::steady_clock::now() >= next_trap)
+        try
+        {
+            const auto scene = read_scene(GetCurrentProcess());
+            if (scene.camera_active && !level_key(scene.zone).empty() && box_markers->nitro_ready())
+            {
+                session.take_nitro();
+                box_markers->request_nitro_spawn();
+                print_console("Nitro Trap!", true);
+                next_trap = std::chrono::steady_clock::now() + std::chrono::milliseconds(ingame::trap_gap_ms);
+            }
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Nitro Trap: " << e.what() << std::endl;
+        }
     if (previous_gems != desired_gems)
     {
         gem_refresh_pending = true;

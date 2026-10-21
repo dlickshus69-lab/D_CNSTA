@@ -124,6 +124,9 @@ namespace ingame
         unsigned ice_probe_request = 0, ice_probe_ack = 0;
         // /nitro_spawn (experimental): the game spawns a Nitro next to Crash
         unsigned nitro_spawn_request = 0, nitro_spawn_ack = 0;
+        // set by the game thread: a Nitro Trap can spawn here now (level with a ready Nitro spawner, not a
+        // gimmick stage, and a spot on Crash's recent path)
+        unsigned nitro_ready = 0;
         unsigned c3_buttons_ready = 0;
         std::uint64_t c3_buttons_active = 0;
         float box_half_size = 50;
