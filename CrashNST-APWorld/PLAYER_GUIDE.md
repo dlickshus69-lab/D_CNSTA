@@ -52,6 +52,8 @@ When item spoilers are enabled, the client scouts selected locations on connecti
 
 ## World options
 
+On the options page and in generated YAMLs the options are grouped: Game Options, Goal, Levels, Crystals / Gems / Relics, Sanity Options, Traps, then Item & Location Options.
+
 Secret destinations include required source levels automatically.
 
 - Choose any campaign combination, level pool and level counts.

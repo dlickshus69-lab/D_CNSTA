@@ -4,8 +4,8 @@ import hashlib
 from collections import Counter
 
 from BaseClasses import Item, ItemClassification, Location, Region
-from worlds.AutoWorld import World
-from .Options import CrashOptions
+from worlds.AutoWorld import WebWorld, World
+from .Options import CrashOptions, crash_option_groups
 from .data import (
     GAME,
     PROTOCOL,
@@ -63,10 +63,15 @@ CAMPAIGN_SETS = {
 }
 
 
+class CrashWeb(WebWorld):
+    option_groups = crash_option_groups
+
+
 class CrashWorld(World):
     """NST integration with selectable campaigns and checks"""
 
     game = GAME
+    web = CrashWeb()
     options_dataclass = CrashOptions
     item_name_to_id = ITEMS
     location_name_to_id = LOCATIONS

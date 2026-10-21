@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from Options import (
     Visibility,
     Choice,
+    OptionGroup,
     DefaultOnToggle,
     OptionDict,
     PerGameCommonOptions,
@@ -446,6 +447,58 @@ class LevelPool(OptionDict):
         from .data import level_pools
 
         level_pools(self.value)
+
+
+# sections on the options page and in generated YAMLs, in this order. Archipelago puts Progression Balancing and
+# Accessibility in "Game Options" first and adds "Item & Location Options" last.
+crash_option_groups = [
+    OptionGroup("Goal", [
+        Goal,
+        Campaigns,
+        LevelAccessLocks,
+        HubAreaLocks,
+        RequireAllBosses,
+        GoalCount,
+        TokenPercentage,
+        TokenRequiredPercentage,
+    ]),
+    OptionGroup("Levels", [
+        Crash1Levels,
+        Crash2Levels,
+        Crash3Levels,
+        LevelShuffle,
+        LevelPool,
+        StartingLevels,
+    ]),
+    OptionGroup("Crystals / Gems / Relics", [
+        CollectibleRewards,
+        WhiteGemChecks,
+        ColoredGemChecks,
+        CrystalChecks,
+        RelicChecks,
+        RelicRequirement,
+    ]),
+    OptionGroup("Sanity Options", [
+        Crashsanity,
+        Boxsanity,
+        BoxItemSpoilers,
+        AbilityShuffle,
+    ]),
+    OptionGroup("Traps", [
+        TrapFillPercentage,
+        LifeLossTrapWeight,
+        MoveLockTrapWeight,
+        ReverseControlsTrapWeight,
+        FreezeTrapWeight,
+        SlipperyTrapWeight,
+        SlowTrapWeight,
+        DarknessTrapWeight,
+        NitroTrapWeight,
+        DeathTrapWeight,
+        TrapDuration,
+        DeathLink,
+    ]),
+]
 
 
 @dataclass
