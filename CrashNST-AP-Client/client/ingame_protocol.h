@@ -112,6 +112,8 @@ namespace ingame
         // set by the client while you are in a hub, menu or loading screen: timers are pushed back and
         // trap effects are off
         unsigned traps_paused = 0;
+        // set by the renderer while the pause menu is on screen; the client then pauses traps too
+        unsigned menu_paused = 0;
         // /nitro_probe: the client bumps the request, the game thread logs once and acknowledges
         unsigned nitro_probe_request = 0, nitro_probe_ack = 0;
         // /nitro_test (experimental): moves the nearest Nitro crate next to Crash once

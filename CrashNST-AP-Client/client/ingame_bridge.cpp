@@ -444,6 +444,7 @@ void BoxMarkers::pause_traps(bool paused, std::uint64_t elapsed_ms)
 {
     const auto now = GetTickCount64();
     lock();
+    paused = paused || shared_->menu_paused; // the pause menu pauses traps as well
     shared_->traps_paused = paused ? 1u : 0u;
     if (paused && elapsed_ms)
         for (auto *until : {&shared_->move_lock_until, &shared_->reverse_until, &shared_->freeze_until,

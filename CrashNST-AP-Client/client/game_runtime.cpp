@@ -550,6 +550,66 @@ namespace ingame
         }
     }
     bool campaign_menu_visible() { return campaign_menu_visible_at(value<Address>(base() + 0x1a8feb8)); }
+    bool pause_menu_visible()
+    {
+        const auto manager = value<Address>(base() + 0x1a8feb8);
+        if (!typed(manager, 0x1556d90))
+            return false;
+        std::set<std::string> names;
+        for (unsigned c = 0; c < 5; ++c)
+        {
+            const auto context = value<Address>(manager + 48 + c * 8);
+            if (!typed(context, 0x161bb18) || value<unsigned char>(context + 209))
+                continue;
+            for (auto project : list(value<Address>(context + 72), 64))
+            {
+                if (!typed(project, 0x161d3e8))
+                    continue;
+                const auto flags = value<unsigned char>(project + 52);
+                auto root = value<Address>(project + 16);
+                if (!(flags & 0x20) || (flags & 0x10) || value<Address>(project + 144) != context || !typed(root, 0x161cf98))
+                    continue;
+                const auto asset = resolve(value<Address>(root + 64));
+                if (typed(asset, 0x161be40))
+                {
+                    const auto composed = value<Address>(asset + 32);
+                    if (composed != root && value<Address>(composed + 72) == root && value<Address>(root + 40) == project &&
+                        !(value<unsigned>(root + 16) & 0x4800))
+                        root = composed;
+                }
+                if (!visible_placeable(root, project, root))
+                    continue;
+                const auto root_name = string(value<Address>(root + 48));
+                if (!root_name.empty())
+                    names.insert(root_name);
+                for (const auto child : list(value<Address>(root + 80), 64))
+                {
+                    if (value<Address>(child + 72) != root || !visible_placeable(child, project, root))
+                        continue;
+                    const auto name = string(value<Address>(child + 48));
+                    if (!name.empty())
+                        names.insert(name);
+                }
+            }
+        }
+        // log what is on screen when it changes (rarely, and only so often), to learn the pause menu's names
+        static std::set<std::string> logged;
+        static std::uint64_t next_log = 0;
+        static unsigned lines = 0;
+        const auto now = GetTickCount64();
+        if (names != logged && now >= next_log && lines < 60)
+        {
+            logged = names, next_log = now + 2000, ++lines;
+            std::string text;
+            for (const auto &name : names)
+                text += (text.empty() ? "" : ", ") + name;
+            std::cout << "Screen panels: " << (text.empty() ? "(none)" : text) << "\n" << std::flush;
+        }
+        return std::any_of(names.begin(), names.end(), [](std::string name)
+                           {
+                               std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                               return name.find("pause") != std::string::npos || name.find("resume") != std::string::npos; });
+    }
     SceneView scene()
     {
         // resolve the live camera through its system and metadata. validate the matrix field before reading +512.
@@ -2168,6 +2228,10 @@ namespace ingame
     {
         const auto actor = player();
         return actor && read(actor + 32, at);
+    }
+    bool gimmick_stage()
+    {
+        return special_level(level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
     }
     bool slow_trap_exempt()
     {

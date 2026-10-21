@@ -278,7 +278,8 @@ class SlowTrapWeight(Range):
 
 class DarknessTrapWeight(Range):
     """How often Darkness Traps appear compared to other traps. The screen goes dark except for a
-    small lit area in the middle, like Lights Out, for the Trap Duration."""
+    soft spotlight on Crash, like Lights Out, for the Trap Duration. No effect in gimmick levels
+    (hog, polar bear, jetpack, Crash 3 vehicles)."""
 
     display_name = "Darkness Trap Weight"
     range_start = 0

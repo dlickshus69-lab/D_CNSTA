@@ -34,10 +34,14 @@ namespace
     // input trap end times (GetTickCount64), copied from the shared block each tick
     std::atomic<std::uint64_t> reverse_until{0}, freeze_until{0}, slippery_until{0}, slow_until{0};
     std::atomic<float> walk_tilt{default_slow_tilt};
-    bool frozen() { return active && timer_active(freeze_until, GetTickCount64()); }
-    bool reversed() { return active && timer_active(reverse_until, GetTickCount64()); }
-    bool slippery() { return active && timer_active(slippery_until, GetTickCount64()); }
-    bool slowed() { return active && timer_active(slow_until, GetTickCount64()); }
+    // the pause menu is on screen: no trap touches the controls (checked by the renderer, which keeps running)
+    std::atomic_bool menu_open{false};
+    // Darkness does nothing in gimmick stages
+    std::atomic_bool darkness_exempt{false};
+    bool frozen() { return active && !menu_open && timer_active(freeze_until, GetTickCount64()); }
+    bool reversed() { return active && !menu_open && timer_active(reverse_until, GetTickCount64()); }
+    bool slippery() { return active && !menu_open && timer_active(slippery_until, GetTickCount64()); }
+    bool slowed() { return active && !menu_open && timer_active(slow_until, GetTickCount64()); }
     // Slippery momentum per XInput pad and for keyboard scan codes / virtual keys
     std::mutex momentum_mutex;
     StickMomentum stick_momentum[4];
@@ -1173,6 +1177,24 @@ namespace
         }
         if (game_window != desc.OutputWindow)
             return;
+        {
+            // is the pause menu up? checked a few times a second, outside the lock
+            static std::uint64_t next_menu_check = 0;
+            const auto now = GetTickCount64();
+            if (now >= next_menu_check)
+            {
+                next_menu_check = now + 100;
+                try
+                {
+                    menu_open = !startup_mode && pause_menu_visible();
+                    darkness_exempt = !startup_mode && gimmick_stage();
+                }
+                catch (...)
+                {
+                    menu_open = false;
+                }
+            }
+        }
         if (bridge_lock())
         {
             if (!valid(*shared) || shared->stop || GetTickCount64() - shared->heartbeat > 15000)
@@ -1181,6 +1203,7 @@ namespace
                 ReleaseMutex(bridge_mutex);
                 return;
             }
+            shared->menu_paused = menu_open ? 1u : 0u;
             const auto previous_lines = snapshot->line_write, previous_clear = snapshot->line_clear;
             const auto deaths = take_observed_deaths();
             if (!startup_mode && shared->death_link)
@@ -1244,7 +1267,7 @@ namespace
             r.text(24, r.height - 44, "/server host:port   /slot name   /password value   /connect", 0xffeeeeee);
         }
         // Darkness Trap: a spotlight that follows Crash, drawn under the AP HUD even when F7 hides markers
-        if (!startup_mode && scene.camera_active && !snapshot->traps_paused && timer_active(snapshot->darkness_until, GetTickCount64()))
+        if (!startup_mode && scene.camera_active && !snapshot->traps_paused && !menu_open && !darkness_exempt && timer_active(snapshot->darkness_until, GetTickCount64()))
         {
             const float side = static_cast<float>(std::min(r.width, r.height));
             float cx = r.width / 2.0f, cy = r.height * 0.55f, px = 0, py = 0;
@@ -1293,7 +1316,7 @@ namespace
                                                                           {snapshot->slippery_until, "Slippery"},
                                                                           // the timer keeps running in gimmick/chase levels, where Slow does nothing
                                                                           {snapshot->slow_until, slow_until.load() || snapshot->traps_paused ? "Slow" : "Slow (off here)"},
-                                                                          {snapshot->darkness_until, "Darkness"}};
+                                                                          {snapshot->darkness_until, darkness_exempt && !snapshot->traps_paused ? "Darkness (off here)" : "Darkness"}};
                     for (const auto &[until, label] : timers)
                         if (timer_active(until, now))
                             traps += (traps.empty() ? "" : "  ") + std::string(label) + " " + std::to_string(seconds_left(until, now)) + "s";
