@@ -2604,9 +2604,73 @@ namespace ingame
             const auto info = value<Address>(c + 0x60);
             return info && readable(info, 0x40) && typed(info, 0x13ea4d8) ? info : 0;
         }
+        //  swap:  every reference to the surface Crash stands on (the level's floor data, /ice_find) is pointed at the
+        //         IceSurface, so stepping onto that floor goes through the game's own ice check. New floors he steps
+        //         on are swapped too. /ice_test off puts them all back.
+        //  push:  Crash's position (actor +0x20) moves with momentum: each frame his movement is replaced by a velocity
+        //         that follows the game's at the ice rate.
+        std::mutex ice_swap_mutex;
+        std::vector<std::pair<Address, Address>> ice_swapped; // reference, original surface
+        std::set<Address> ice_swap_surfaces;                   // surfaces already swapped (or being searched)
+        std::atomic_uint ice_swap_running{0};
+        void ice_swap_surface(Address surface, Address ice, std::string name)
+        {
+            ++ice_swap_running;
+            std::thread([surface, ice, name]
+                        {
+                std::vector<Address> hits;
+                std::vector<std::uint64_t> chunk(1 << 17);
+                MEMORY_BASIC_INFORMATION info{};
+                for (Address at = 0x10000; at < 0x7ffffffe0000ULL && VirtualQuery(reinterpret_cast<void *>(at), &info, sizeof(info));
+                     at = reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize)
+                {
+                    if (info.State != MEM_COMMIT || info.Type != MEM_PRIVATE || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+                        !(info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)))
+                        continue;
+                    const Address start = reinterpret_cast<Address>(info.BaseAddress), end = start + info.RegionSize;
+                    for (Address p = start; p < end; p += chunk.size() * 8)
+                    {
+                        const auto bytes = std::min<std::uint64_t>(chunk.size() * 8, end - p);
+                        SIZE_T got = 0;
+                        if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(p), chunk.data(), bytes, &got))
+                            continue;
+                        for (std::size_t i = 0; i < got / 8; ++i)
+                            if (chunk[i] == surface && hits.size() < 20000)
+                                hits.push_back(p + i * 8);
+                    }
+                }
+                unsigned swapped = 0;
+                {
+                    std::lock_guard lock(ice_swap_mutex);
+                    for (const auto at : hits)
+                        if (value<Address>(at) == surface && write(at, ice))
+                            ice_swapped.push_back({at, surface}), ++swapped;
+                }
+                std::cout << "Ice test: swap: " << name << " was referenced in " << hits.size() << " places; " << swapped
+                          << " now point at the IceSurface\n"
+                          << std::flush;
+                --ice_swap_running; })
+                .detach();
+        }
+        void ice_swap_restore()
+        {
+            std::lock_guard lock(ice_swap_mutex);
+            unsigned restored = 0;
+            for (auto it = ice_swapped.rbegin(); it != ice_swapped.rend(); ++it)
+                if (readable(it->first, 8) && value<Address>(it->first) == ice_surface_seen.surface && write(it->first, it->second))
+                    ++restored;
+            if (!ice_swapped.empty())
+                std::cout << "Ice test: swap undone: " << restored << " of " << ice_swapped.size() << " floor references put back\n" << std::flush;
+            ice_swapped.clear(), ice_swap_surfaces.clear();
+        }
         void update_ice_test(unsigned mode)
         {
             static unsigned announced = 0;
+            static unsigned previous = 0;
+            static std::array<float, 3> expect{};
+            static float mx = 0, my = 0;
+            static Address push_actor = 0;
+            static std::chrono::steady_clock::time_point push_last{};
             static Address slide_actor = 0;
             static float vx = 0, vy = 0;
             static std::chrono::steady_clock::time_point last{};
@@ -2622,14 +2686,74 @@ namespace ingame
                 }
             if (mode != announced)
             {
+                const bool have_ice = ice_surface_seen.surface && ice_surface_seen.level == level;
                 std::cout << (mode == 1   ? "Ice test: slide on. Crash's speed now follows you slowly, like on ice.\n"
-                              : mode == 2 ? (ice_surface_seen.surface && ice_surface_seen.level == level
-                                                 ? "Ice test: floor on. The floor under Crash gets ice grip and the IceSurface.\n"
-                                                 : "Ice test: floor on. The floor under Crash gets ice grip (no IceSurface yet: stand on real ice once in this level).\n")
+                              : mode == 2 ? (have_ice ? "Ice test: floor on. The floor under Crash gets ice grip and the IceSurface.\n"
+                                                      : "Ice test: floor on. The floor under Crash gets ice grip (no IceSurface yet: stand on real ice once in this level).\n")
+                              : mode == 3 ? (have_ice ? "Ice test: swap on. Floors Crash steps on are switched to the IceSurface (each takes a few seconds to find).\n"
+                                                      : "Ice test: swap needs the IceSurface: stand on real ice once in this level, then /ice_test swap again.\n")
+                              : mode == 4 ? "Ice test: push on. Crash's position now moves with momentum.\n"
                                           : "Ice test: off\n")
                           << std::flush;
                 announced = mode;
             }
+            // a new level frees the old one's floors: forget them instead of writing to memory that is gone
+            static std::string swap_level;
+            if (level != swap_level)
+            {
+                std::lock_guard lock(ice_swap_mutex);
+                ice_swapped.clear(), ice_swap_surfaces.clear(), swap_level = level;
+            }
+            if (previous == 3 && mode != 3)
+                ice_swap_restore();
+            previous = mode;
+            if (mode == 3 && actor && ice_surface_seen.surface && ice_surface_seen.level == level && readable(ice_surface_seen.surface, 16) &&
+                value<Address>(ice_surface_seen.surface) == ice_surface_seen.type)
+                if (const auto info = crash_floor_info(actor))
+                {
+                    const auto surface = value<Address>(info + 0x18);
+                    bool fresh = false;
+                    {
+                        std::lock_guard lock(ice_swap_mutex);
+                        fresh = surface && surface != ice_surface_seen.surface && readable(surface, 16) && ice_swap_surfaces.insert(surface).second;
+                    }
+                    if (fresh && ice_swap_running < 2)
+                        ice_swap_surface(surface, ice_surface_seen.surface, string(value<Address>(surface + 8), 48));
+                    else if (fresh)
+                    {
+                        std::lock_guard lock(ice_swap_mutex);
+                        ice_swap_surfaces.erase(surface); // try again once a search finishes
+                    }
+                }
+            if (mode == 4 && actor)
+            {
+                std::array<float, 3> p{};
+                if (!read(actor + 32, p) || !std::isfinite(p[0]) || !std::isfinite(p[1]))
+                    return;
+                const auto now = std::chrono::steady_clock::now();
+                const float dt = std::chrono::duration<float>(now - push_last).count();
+                push_last = now;
+                if (actor != push_actor || dt > 0.25f || dt <= 0 || std::hypot(p[0] - expect[0], p[1] - expect[1]) > 300)
+                {
+                    push_actor = actor, mx = my = 0, expect = p;
+                    return;
+                }
+                // how the game moved him this frame, from where we put him
+                const float gx = (p[0] - expect[0]) / dt, gy = (p[1] - expect[1]) / dt;
+                const float dx = gx - mx, dy = gy - my, gap = std::hypot(dx, dy), step = ice_test_accel * dt;
+                if (gap <= step)
+                    mx = gx, my = gy;
+                else
+                    mx += dx / gap * step, my += dy / gap * step;
+                const std::array<float, 2> moved{expect[0] + mx * dt, expect[1] + my * dt};
+                write(actor + 32, moved);
+                expect = {moved[0], moved[1], p[2]};
+                return;
+            }
+            if (mode != 4)
+                push_actor = 0;
+            if (mode >= 3)
+                return;
             if (mode != 1 || !actor)
                 slide_actor = 0;
             if (!actor || !mode)
@@ -3021,7 +3145,7 @@ namespace ingame
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
         update_ice_watch(state.ice_watch != 0);
         update_move_probe(state.move_probe != 0);
-        update_ice_test(state.ice_test <= 2 ? state.ice_test : 0);
+        update_ice_test(state.ice_test <= 4 ? state.ice_test : 0);
         if (state.ice_find_request != state.ice_find_ack)
         {
             state.ice_find_ack = state.ice_find_request;

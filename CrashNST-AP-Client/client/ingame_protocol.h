@@ -128,7 +128,8 @@ namespace ingame
         unsigned ice_watch = 0;
         // /move_probe on: look for where the game keeps Crash's movement speed
         unsigned move_probe = 0;
-        // /ice_test: 0 off, 1 slide (Crash's velocity keeps momentum), 2 floor (the floor under Crash says ice)
+        // /ice_test: 0 off, 1 slide (Crash's velocity keeps momentum), 2 floor (the floor under Crash says ice),
+        // 3 swap (the level's floor references point at the IceSurface), 4 push (Crash's position keeps momentum)
         unsigned ice_test = 0;
         // /ice_find (research): search memory for references to the IceSurface
         unsigned ice_find_request = 0, ice_find_ack = 0;

@@ -468,12 +468,14 @@ void ClientRuntime::handle_commands()
             {
                 if (box_markers)
                 {
-                    const unsigned mode = argument == "slide" ? 1u : argument == "floor" ? 2u : 0u;
+                    const unsigned mode = argument == "slide" ? 1u : argument == "floor" ? 2u : argument == "swap" ? 3u : argument == "push" ? 4u : 0u;
                     if (!mode && argument != "off")
-                        print_console("Use /ice_test slide, /ice_test floor or /ice_test off.");
+                        print_console("Use /ice_test swap, /ice_test push, /ice_test slide, /ice_test floor or /ice_test off.");
                     box_markers->ice_test(mode);
                     print_console(mode == 1 ? "Ice test: slide on. Close the console and run, turn and stop on normal ground. /ice_test off when done."
                                   : mode == 2 ? "Ice test: floor on. Close the console and run, turn and stop on normal ground. /ice_test off when done."
+                                  : mode == 3 ? "Ice test: swap on. Close the console, wait a few seconds, then walk onto normal ground (and off and on again). /ice_test off when done."
+                                  : mode == 4 ? "Ice test: push on. Close the console and run, turn and stop on normal ground. /ice_test off when done."
                                               : "Ice test off.");
                 }
                 else
