@@ -1693,6 +1693,12 @@ namespace ingame
         const auto desired = active_style.load();
         return desired ? desired : reinterpret_cast<unsigned (*)(Address)>(base() + 0x131400)(manager);
     }
+    bool slow_trap_exempt()
+    {
+        static const std::set<std::string> chases{"L104", "L113", "L304", "L311"}; // Boulders, Boulder Dash, Bone Yard, Dino Might!
+        const auto key = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
+        return special_level(key) || chases.count(key);
+    }
     unsigned movement_double_jump(unsigned owned)
     {
         if (!owned)

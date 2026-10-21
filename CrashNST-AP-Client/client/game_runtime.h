@@ -26,5 +26,7 @@ namespace ingame
     void inherit_license();
     unsigned movement_campaign(std::uintptr_t manager);
     unsigned movement_double_jump(unsigned owned);
+    // gimmick stages (vanilla controls) and chase stages, where walking would be certain death
+    bool slow_trap_exempt();
     std::uintptr_t crate_identity_owner(std::uintptr_t owner, const char **name);
 }

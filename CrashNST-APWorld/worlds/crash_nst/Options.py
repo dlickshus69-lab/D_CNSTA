@@ -264,8 +264,10 @@ class SlipperyTrapWeight(Range):
 
 
 class SlowTrapWeight(Range):
-    """How often Slow Traps appear compared to other traps. Crash moves at reduced speed for the
-    Trap Duration. Strongest on a controller."""
+    """How often Slow Traps appear compared to other traps. Crash can only walk for the Trap Duration:
+    the stick and d-pad become a steady walking tilt. Controller only (keys cannot be half pressed).
+    No effect in gimmick levels (hog, polar bear, jetpack, Crash 3 vehicles) or the chase levels
+    Boulders, Boulder Dash, Bone Yard and Dino Might!"""
 
     display_name = "Slow Trap Weight"
     range_start = 0

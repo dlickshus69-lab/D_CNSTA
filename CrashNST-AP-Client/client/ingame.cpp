@@ -242,9 +242,6 @@ namespace
                 for (const auto code : direction_scan_codes)
                     keys[code] = scan_momentum.apply(code, keys[code] & 0x80, now) ? 0x80 : 0;
             }
-            if (slowed() && !slow_keys_down(now))
-                for (const auto code : direction_scan_codes)
-                    keys[code] = 0;
         }
         return result;
     }
@@ -280,8 +277,6 @@ namespace
                 if (virtual_momentum.apply(static_cast<unsigned>(key), state & 0x8000, now))
                     state = static_cast<SHORT>(state | 0x8000);
             }
-            if (slowed() && !slow_keys_down(now))
-                state = static_cast<SHORT>(state & 0x7fff);
         }
         return state;
     }
@@ -323,10 +318,9 @@ namespace
             }
             if (slowed())
             {
-                pad.sThumbLX = scale_axis(pad.sThumbLX, slow_stick_scale);
-                pad.sThumbLY = scale_axis(pad.sThumbLY, slow_stick_scale);
-                if (!slow_keys_down(now))
-                    pad.wButtons = static_cast<WORD>(pad.wButtons & ~0xF); // pulse the d-pad like keys
+                std::uint16_t buttons = pad.wButtons;
+                walk_stick(pad.sThumbLX, pad.sThumbLY, buttons);
+                pad.wButtons = buttons;
             }
         }
         return result;
@@ -1258,7 +1252,8 @@ namespace
                                                                           {snapshot->reverse_until, "Reversed"},
                                                                           {snapshot->freeze_until, "Frozen"},
                                                                           {snapshot->slippery_until, "Slippery"},
-                                                                          {snapshot->slow_until, "Slow"},
+                                                                          // the timer keeps running in gimmick/chase levels, where Slow does nothing
+                                                                          {snapshot->slow_until, slow_until.load() ? "Slow" : "Slow (off here)"},
                                                                           {snapshot->darkness_until, "Darkness"}};
                     for (const auto &[until, label] : timers)
                         if (timer_active(until, now))
@@ -1799,7 +1794,8 @@ extern "C" __declspec(dllexport) void NST_Tick()
                 reverse_until = shared->reverse_until;
                 freeze_until = shared->freeze_until;
                 slippery_until = shared->slippery_until;
-                slow_until = shared->slow_until;
+                // Slow has no effect in gimmick and chase levels
+                slow_until = slow_trap_exempt() ? 0 : shared->slow_until;
                 update_gameplay(*shared);
             }
             else

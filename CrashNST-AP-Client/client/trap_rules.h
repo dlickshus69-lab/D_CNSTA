@@ -97,14 +97,28 @@ namespace ingame
         return (key >= 0x25 && key <= 0x28) || key == 'W' || key == 'A' || key == 'S' || key == 'D';
     }
 
-    // Slow Trap: the stick is scaled down; movement keys are pulsed on and off
-    inline constexpr float slow_stick_scale = 0.45f;
-    inline constexpr unsigned slow_pulse_ms = 70;
-    inline std::int16_t scale_axis(std::int16_t value, float scale)
+    // Slow Trap: Crash walks. Any stick push becomes a steady walking tilt in the same direction, and the
+    // d-pad becomes that same tilt on the stick. A constant tilt never crosses the game's walk/run threshold,
+    // so there is no jitter. The keyboard is left alone: keys cannot be half pressed.
+    inline constexpr float slow_walk_tilt = 0.40f;
+    inline constexpr float stick_deadzone = 7849; // XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE
+    inline void walk_stick(std::int16_t &x, std::int16_t &y, std::uint16_t &buttons)
     {
-        return static_cast<std::int16_t>(std::lround(value * scale));
+        float fx = x, fy = y, length = std::hypot(fx, fy);
+        if (length <= stick_deadzone)
+        {
+            // stick at rest: walk in the d-pad's direction instead
+            fx = static_cast<float>(((buttons & 8u) ? 1 : 0) - ((buttons & 4u) ? 1 : 0));
+            fy = static_cast<float>(((buttons & 1u) ? 1 : 0) - ((buttons & 2u) ? 1 : 0));
+            length = std::hypot(fx, fy);
+        }
+        buttons = static_cast<std::uint16_t>(buttons & ~0xFu);
+        if (length == 0)
+            return; // neither is pushed: leave the resting stick as it is
+        const float scale = slow_walk_tilt * 32767 / length;
+        x = static_cast<std::int16_t>(std::lround(fx * scale));
+        y = static_cast<std::int16_t>(std::lround(fy * scale));
     }
-    inline bool slow_keys_down(std::uint64_t now) { return (now / slow_pulse_ms) % 2 == 0; }
 
     // Slippery Trap: the stick eases toward the real input like momentum on ice;
     // released movement keys keep reporting "held" briefly
