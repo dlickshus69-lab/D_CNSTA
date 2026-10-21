@@ -1210,6 +1210,10 @@ namespace
             r.text(24, r.height - 68, "Waiting for this seed's saves. /quit: close NST", 0xffeeeeee);
             r.text(24, r.height - 44, "/server host:port   /slot name   /password value   /connect", 0xffeeeeee);
         }
+        // Darkness Trap: drawn under the AP HUD, even when F7 hides markers
+        if (!startup_mode && scene.camera_active && timer_active(snapshot->darkness_until, GetTickCount64()))
+            darkness_bands(r.width, r.height, [&](const DarkBand &b)
+                           { if (b.w > 0 && b.h > 0) r.quad(b.x, b.y, b.w, b.h, b.color); });
         if (snapshot->visible && !startup_mode)
         {
             if (scene.camera_active)
@@ -1241,7 +1245,8 @@ namespace
                                                                           {snapshot->reverse_until, "Reversed"},
                                                                           {snapshot->freeze_until, "Frozen"},
                                                                           {snapshot->slippery_until, "Slippery"},
-                                                                          {snapshot->slow_until, "Slow"}};
+                                                                          {snapshot->slow_until, "Slow"},
+                                                                          {snapshot->darkness_until, "Darkness"}};
                     for (const auto &[until, label] : timers)
                         if (timer_active(until, now))
                             traps += (traps.empty() ? "" : "  ") + std::string(label) + " " + std::to_string(seconds_left(until, now)) + "s";

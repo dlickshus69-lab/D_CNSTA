@@ -82,7 +82,7 @@ namespace ingame
     {
         static const std::vector<std::string> names{
             "/help", "/server", "/port", "/slot", "/password", "/connect", "/disconnect", "/status", "/quit",
-            "/crashsanity", "/markers", "/boxmarkers", "/outoflogic", "/hubdistance", "/hubdistance_c1", "/hubdistance_c2", "/hubdistance_c3", "/tint_opacity", "/clear", "!help", "!license", "!options", "!admin", "!players", "!getitem", "!hint", "!hint_location", "!remaining",
+            "/crashsanity", "/markers", "/boxmarkers", "/outoflogic", "/nitro_probe", "/hubdistance", "/hubdistance_c1", "/hubdistance_c2", "/hubdistance_c3", "/tint_opacity", "/clear", "!help", "!license", "!options", "!admin", "!players", "!getitem", "!hint", "!hint_location", "!remaining",
             "!missing", "!checked", "!status", "!release", "!collect", "!countdown", "!alias"};
         return names;
     }

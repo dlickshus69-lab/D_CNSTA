@@ -420,8 +420,17 @@ void BoxMarkers::apply_trap(unsigned kind, unsigned seconds)
     case ingame::TrapSlow:
         shared_->slow_until = ingame::extend_timer(shared_->slow_until, now, ms);
         break;
+    case ingame::TrapDarkness:
+        shared_->darkness_until = ingame::extend_timer(shared_->darkness_until, now, ms);
+        break;
     }
     ++shared_->revision;
+    unlock();
+}
+void BoxMarkers::request_nitro_probe()
+{
+    lock();
+    ++shared_->nitro_probe_request;
     unlock();
 }
 void BoxMarkers::receive_death()

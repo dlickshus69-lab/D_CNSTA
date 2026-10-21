@@ -273,6 +273,16 @@ class SlowTrapWeight(Range):
     default = 20
 
 
+class DarknessTrapWeight(Range):
+    """How often Darkness Traps appear compared to other traps. The screen goes dark except for a
+    small lit area in the middle, like Lights Out, for the Trap Duration."""
+
+    display_name = "Darkness Trap Weight"
+    range_start = 0
+    range_end = 100
+    default = 20
+
+
 class MoveLockTrapWeight(Range):
     """How often Move Lock Traps appear compared to other traps. Spin, slide, body slam and
     crouch stop working for the Trap Duration."""
@@ -303,8 +313,8 @@ class FreezeTrapWeight(Range):
 
 
 class TrapDuration(Range):
-    """Seconds that Move Lock, Reverse Controls, Slippery and Slow Traps last. A new trap of the same kind
-    adds its time."""
+    """Seconds that Move Lock, Reverse Controls, Slippery, Slow and Darkness Traps last. A new trap of the
+    same kind adds its time."""
 
     display_name = "Trap Duration"
     range_start = 10
@@ -455,6 +465,7 @@ class CrashOptions(PerGameCommonOptions):
     freeze_trap_weight: FreezeTrapWeight
     slippery_trap_weight: SlipperyTrapWeight
     slow_trap_weight: SlowTrapWeight
+    darkness_trap_weight: DarknessTrapWeight
     death_trap_weight: DeathTrapWeight
     trap_duration: TrapDuration
     death_link: DeathLink

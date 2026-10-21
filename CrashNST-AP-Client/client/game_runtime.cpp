@@ -13,6 +13,8 @@
 #include <mutex>
 #include <memory>
 #include <iostream>
+#include <iomanip>
+#include <sstream>
 #include <set>
 #include <string_view>
 #ifdef _MSC_VER
@@ -1169,6 +1171,95 @@ namespace ingame
                 return 0;
             return method;
         }
+        // /nitro_probe research: a read-only report of the level's Nitro and TNT crates and their spawners.
+        // It only reads (every read is a checked ReadProcessMemory) and never calls game code.
+        std::string spawner_report(Address component)
+        {
+            const auto meta = value<Address>(component + 56);
+            if (!typed(meta, 0x1745d78) || string(value<Address>(meta + 16)) != "Scripts.Graph.common_Spawner_Template")
+                return {};
+            const auto size = value<std::uint16_t>(meta + 90);
+            const bool fields = field_at(meta, "SpawnedEntity", 232, 8) && field_at(meta, "isSpawningEnabled", 69, 1) &&
+                                field_at(meta, "used", 67, 1) && field_at(meta, "pendingUsed", 66, 1);
+            // the spawn routine layout the Crash 3 secret platform call verifies
+            bool routine = false;
+            if (size == 344 && meta >= 45808)
+            {
+                const auto method = meta - 45808 + 67320, nodes = method + 24, entry = nodes + 48;
+                routine = typed(method, 0x17473c8) && value<Address>(method + 16) == nodes && typed(nodes, 0x1746090) &&
+                          value<Address>(nodes + 40) == entry && typed(entry, 0x1746848) &&
+                          value<Address>(entry + 48) == meta - 45808 + 67544 && typed(value<Address>(entry + 48), 0x13bc390);
+            }
+            std::ostringstream out;
+            out << "spawner size " << size << (fields ? ", fields ok" : ", fields differ");
+            if (fields)
+                out << ", enabled " << unsigned(value<unsigned char>(component + 69)) << ", used "
+                    << unsigned(value<unsigned char>(component + 67)) << ", pending "
+                    << unsigned(value<unsigned char>(component + 66)) << ", crate "
+                    << (resolve(value<Address>(component + 232)) ? "present" : "none");
+            out << ", spawn routine " << (routine ? "KNOWN" : "unknown");
+            return out.str();
+        }
+        void nitro_probe()
+        {
+            const auto world = value<Address>(base() + 0x1a64690);
+            const auto key = level_key(string(value<Address>(world + 184)));
+            const auto actor = player();
+            std::array<float, 3> crash{};
+            const bool located = actor && read(actor + 32, crash);
+            std::cout << std::fixed << std::setprecision(1) << "Nitro probe: level " << (key.empty() ? "(hub or menu)" : key)
+                      << ", Crash " << (located ? "at " + std::to_string(crash[0]) + ", " + std::to_string(crash[1]) + ", " + std::to_string(crash[2]) : "not found")
+                      << "\n";
+            unsigned nitros = 0, tnts = 0, shown = 0, routines = 0;
+            bool listed_components = false;
+            for (const auto owner : event_owners())
+            {
+                const auto name = string(value<Address>(owner + 128));
+                const bool nitro = name.find("Nitro") != std::string::npos, tnt = name.find("TNT") != std::string::npos;
+                if (!nitro && !tnt)
+                    continue;
+                ++(nitro ? nitros : tnts);
+                std::string spawners;
+                std::vector<std::string> graphs;
+                for (const auto c : list(value<Address>(owner + 24), 64))
+                {
+                    if (!typed(c, 0x13bbbd0) || value<Address>(c + 24) != owner)
+                        continue;
+                    const auto meta = value<Address>(c + 56);
+                    if (typed(meta, 0x1745d78))
+                        graphs.push_back(string(value<Address>(meta + 16)));
+                    const auto report = spawner_report(c);
+                    if (report.empty())
+                        continue;
+                    routines += report.find("KNOWN") != std::string::npos;
+                    spawners += (spawners.empty() ? "" : " | ") + report;
+                }
+                if (shown >= 12)
+                    continue;
+                ++shown;
+                std::array<float, 3> at{};
+                const bool placed = read(owner + 32, at);
+                float distance = -1;
+                if (placed && located)
+                    distance = std::sqrt((at[0] - crash[0]) * (at[0] - crash[0]) + (at[1] - crash[1]) * (at[1] - crash[1]) +
+                                         (at[2] - crash[2]) * (at[2] - crash[2]));
+                std::cout << "Nitro probe: " << name << (placed ? " at " + std::to_string(at[0]) + ", " + std::to_string(at[1]) + ", " + std::to_string(at[2]) : "")
+                          << (distance >= 0 ? " (" + std::to_string(static_cast<int>(distance)) + " from Crash)" : "") << " -> "
+                          << (spawners.empty() ? "no spawner component" : spawners) << "\n";
+                if (nitro && !listed_components)
+                {
+                    // one sample of what else is attached to a Nitro
+                    listed_components = true;
+                    std::string list_text;
+                    for (const auto &g : graphs)
+                        list_text += (list_text.empty() ? "" : ", ") + g;
+                    std::cout << "Nitro probe: " << name << " scripts: " << (list_text.empty() ? "(none)" : list_text) << "\n";
+                }
+            }
+            std::cout << "Nitro probe done: " << nitros << " Nitro and " << tnts << " TNT crates, " << routines
+                      << " spawners with the known spawn routine. Nothing was changed.\n"
+                      << std::flush;
+        }
         void update_c3_buttons(Shared &state, const std::string &zone)
         {
             static std::uint64_t next = 0, pending_triggers = 0;
@@ -1402,6 +1493,11 @@ namespace ingame
         move_shuffle = state.move_shuffle != 0;
         owned_moves = state.owned_moves;
         move_lock_until = state.move_lock_until;
+        if (state.nitro_probe_request != state.nitro_probe_ack)
+        {
+            state.nitro_probe_ack = state.nitro_probe_request;
+            nitro_probe();
+        }
         const auto world = value<Address>(base() + 0x1a64690);
         const auto key = level_key(string(value<Address>(world + 184)));
         // mixed vehicle levels retain normal controls until their active form is mapped

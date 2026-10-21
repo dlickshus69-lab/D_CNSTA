@@ -373,6 +373,16 @@ void ClientRuntime::handle_commands()
                 print_console(std::string("Out-of-logic crate markers: ") + (out_of_logic_markers ? "on" : "off") +
                               ". Use /outoflogic on or off. Check counts and AP logic are unchanged.");
             }
+            else if (command == "/nitro_probe")
+            {
+                if (box_markers)
+                {
+                    box_markers->request_nitro_probe();
+                    print_console("Nitro probe requested (read-only, changes nothing). Run it inside a level that has Nitro crates.");
+                }
+                else
+                    print_console("Nitro probe needs the in-game adapter. Load into a level first.");
+            }
             else if (command == "/markers" || command == "/crashsanity")
             {
                 if (box_markers)

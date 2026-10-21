@@ -185,6 +185,7 @@ TRAP_IDS = {
     "Life Loss Trap": 2504,
     "Slippery Trap": 2505,
     "Slow Trap": 2506,
+    "Darkness Trap": 2507,
 }
 TRAPS = tuple(TRAP_IDS)
 ITEMS.update({name: BASE + offset for name, offset in TRAP_IDS.items()})

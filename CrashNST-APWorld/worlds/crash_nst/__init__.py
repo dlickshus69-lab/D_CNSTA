@@ -726,6 +726,7 @@ class CrashWorld(World):
             "Freeze Trap": self.options.freeze_trap_weight.value,
             "Slippery Trap": self.options.slippery_trap_weight.value,
             "Slow Trap": self.options.slow_trap_weight.value,
+            "Darkness Trap": self.options.darkness_trap_weight.value,
         }
         junk = capacity - len(pool)
         traps = (junk * self.options.trap_fill_percentage.value + 99) // 100 if any(weights.values()) else 0

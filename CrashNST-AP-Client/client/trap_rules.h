@@ -15,14 +15,16 @@ namespace ingame
         TrapLifeLoss = 4,
         TrapSlippery = 5,
         TrapSlow = 6,
-        TrapCount = 7
+        TrapDarkness = 7,
+        TrapCount = 8
     };
     inline constexpr const char *trap_names[TrapCount]{"Death Trap", "Move Lock Trap", "Reverse Controls Trap",
                                                        "Freeze Trap", "Life Loss Trap", "Slippery Trap",
-                                                       "Slow Trap"};
+                                                       "Slow Trap", "Darkness Trap"};
     inline constexpr bool timed_trap(unsigned kind)
     {
-        return kind == TrapMoveLock || kind == TrapReverse || kind == TrapSlippery || kind == TrapSlow;
+        return kind == TrapMoveLock || kind == TrapReverse || kind == TrapSlippery || kind == TrapSlow ||
+               kind == TrapDarkness;
     }
     inline constexpr std::int64_t trap_item(unsigned kind) { return 0xCB0000 + 2500 + kind; }
     inline int trap_kind(std::int64_t item)
@@ -139,6 +141,37 @@ namespace ingame
             return down || (last_down[code & 255] && now - last_down[code & 255] < slippery_key_hold_ms);
         }
     };
+
+    // Darkness Trap: a lit square around the screen point, fading out in steps to near black
+    struct DarkBand
+    {
+        float x, y, w, h;
+        unsigned color; // ABGR
+    };
+    template <class Emit>
+    void darkness_bands(float width, float height, Emit emit)
+    {
+        const float side = width < height ? width : height, cx = width / 2, cy = height * 0.58f;
+        constexpr unsigned steps = 10;
+        const float lit = side * 0.12f, edge = side * 0.42f;
+        const auto alpha = [](float t) { return static_cast<unsigned>(250 * t * t) << 24; };
+        // each ring is the gap between two squares, drawn as four bands
+        const auto ring = [&](float inner, float outer, unsigned color)
+        {
+            emit(DarkBand{cx - outer, cy - outer, 2 * outer, outer - inner, color});
+            emit(DarkBand{cx - outer, cy + inner, 2 * outer, outer - inner, color});
+            emit(DarkBand{cx - outer, cy - inner, outer - inner, 2 * inner, color});
+            emit(DarkBand{cx + inner, cy - inner, outer - inner, 2 * inner, color});
+        };
+        for (unsigned i = 0; i < steps; ++i)
+            ring(lit + (edge - lit) * i / steps, lit + (edge - lit) * (i + 1) / steps, alpha((i + 1.0f) / steps));
+        // everything outside the last ring is fully dark
+        const auto dark = alpha(1);
+        emit(DarkBand{0, 0, width, cy - edge, dark});
+        emit(DarkBand{0, cy + edge, width, height - cy - edge, dark});
+        emit(DarkBand{0, cy - edge, cx - edge, 2 * edge, dark});
+        emit(DarkBand{cx + edge, cy - edge, width - cx - edge, 2 * edge, dark});
+    }
 
     inline void reverse_keyboard(unsigned char *keys)
     {

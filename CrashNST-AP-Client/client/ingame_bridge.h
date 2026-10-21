@@ -33,6 +33,8 @@ public:
     // start a trap now; timed traps last `seconds` (Freeze always lasts freeze_trap_ms).
     // Life Loss runs through AbilityAccess instead.
     void apply_trap(unsigned kind, unsigned seconds);
+    // research: log the current level's Nitro crates and their spawners (read-only)
+    void request_nitro_probe();
     void c3_buttons(bool ready, const std::set<std::string> &allowed = {});
     unsigned collectibles(std::vector<ingame::Collectible> config, unsigned relic_min_rank = 1);
     std::vector<ingame::CollectibleObservation> collectible_observations();
