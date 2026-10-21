@@ -2568,9 +2568,9 @@ unsigned wumpa_amount(unsigned receipt_index)
     }
     return amount;
 }
-std::vector<unsigned char> filler_method(const AbilityProbe &method, const FillerProbe &filler, unsigned kind, std::uintptr_t remote, unsigned amount)
+std::vector<unsigned char> filler_method(const AbilityProbe &method, const FillerProbe &filler, unsigned kind, std::uintptr_t remote, unsigned amount, int lives)
 {
-    if (kind > 1 || !filler.meta || amount < 1 || amount > 10)
+    if (kind > 1 || !filler.meta || amount < 1 || amount > 10 || (lives != 1 && lives != -1))
         throw std::invalid_argument("Invalid filler method");
     auto result = ability_refresh_method(method, remote);
     result.resize(312);
@@ -2583,7 +2583,8 @@ std::vector<unsigned char> filler_method(const AbilityProbe &method, const Fille
     pointer(128, remote + 224);
     pointer(296, remote + 144);
     pointer(160, remote + 192);
-    const int added = kind ? amount : 1;
+    // the engine's addLives accumulator takes the signed constant; -1 is the experimental Life Loss Trap
+    const int added = kind ? static_cast<int>(amount) : lives;
     std::memcpy(result.data() + 216, &added, 4);
     return result;
 }

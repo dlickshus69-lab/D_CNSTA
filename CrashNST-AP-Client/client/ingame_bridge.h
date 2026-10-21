@@ -30,7 +30,8 @@ public:
     void completion(const std::vector<std::string> &items, const std::vector<std::string> &locations);
     void configure(const std::map<std::string, unsigned> &styles, bool death_link, bool move_shuffle = false,
                    unsigned owned_moves = 0, bool trap_kills = false);
-    // start a trap now; timed traps last `seconds` (Freeze always lasts freeze_trap_ms)
+    // start a trap now; timed traps last `seconds` (Freeze always lasts freeze_trap_ms).
+    // Life Loss runs through AbilityAccess instead.
     void apply_trap(unsigned kind, unsigned seconds);
     void c3_buttons(bool ready, const std::set<std::string> &allowed = {});
     unsigned collectibles(std::vector<ingame::Collectible> config, unsigned relic_min_rank = 1);

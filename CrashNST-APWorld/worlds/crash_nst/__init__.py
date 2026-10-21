@@ -720,10 +720,12 @@ class CrashWorld(World):
         pool.extend(self.create_item(TOKEN) for _ in range(tokens))
         # traps replace a share of the remaining junk, picked by their weights
         weights = {
-            "Death Trap": self.options.death_trap_weight.value,
+            "Life Loss Trap": self.options.life_loss_trap_weight.value,
             "Move Lock Trap": self.options.move_lock_trap_weight.value,
             "Reverse Controls Trap": self.options.reverse_controls_trap_weight.value,
             "Freeze Trap": self.options.freeze_trap_weight.value,
+            "Slippery Trap": self.options.slippery_trap_weight.value,
+            "Slow Trap": self.options.slow_trap_weight.value,
         }
         junk = capacity - len(pool)
         traps = (junk * self.options.trap_fill_percentage.value + 99) // 100 if any(weights.values()) else 0
@@ -827,7 +829,7 @@ class CrashWorld(World):
         result["box_item_spoilers"] = bool(self.options.box_item_spoilers.value)
         # 0 off, 1 start with Spin, 2 Spin shuffled. Move item IDs are BASE + 2400 + index of BASIC_MOVES.
         result["ability_shuffle"] = self.ability_shuffle
-        # trap item IDs are BASE + 2500 + index of TRAPS. counts tell the client which hooks it needs.
+        # trap item IDs are BASE + TRAP_IDS. counts tell the client which hooks it needs.
         result["trap_counts"] = getattr(self, "trap_counts", dict.fromkeys(TRAPS, 0))
         result["trap_duration"] = self.options.trap_duration.value
         # 0 = any tier, 1 = gold or platinum, 2 = platinum only

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from Options import (
+    Visibility,
     Choice,
     DefaultOnToggle,
     OptionDict,
@@ -232,10 +233,41 @@ class TrapFillPercentage(Range):
 
 
 class DeathTrapWeight(Range):
-    """How often Death Traps appear compared to other traps. Crash dies, like receiving a
-    DeathLink, but no DeathLink is sent to other players."""
+    """No longer used: Death Traps were removed. Kept so older YAMLs still load."""
 
-    display_name = "Death Trap Weight"
+    display_name = "Death Trap Weight (unused)"
+    range_start = 0
+    range_end = 100
+    default = 0
+    visibility = Visibility.none
+
+
+class LifeLossTrapWeight(Range):
+    """How often Life Loss Traps appear compared to other traps. You lose one life.
+
+    Experimental: it runs the game's own extra-life reward with -1."""
+
+    display_name = "Life Loss Trap Weight"
+    range_start = 0
+    range_end = 100
+    default = 20
+
+
+class SlipperyTrapWeight(Range):
+    """How often Slippery Traps appear compared to other traps. Crash drifts and turns slowly, like
+    on ice, for the Trap Duration. Strongest on a controller."""
+
+    display_name = "Slippery Trap Weight"
+    range_start = 0
+    range_end = 100
+    default = 20
+
+
+class SlowTrapWeight(Range):
+    """How often Slow Traps appear compared to other traps. Crash moves at reduced speed for the
+    Trap Duration. Strongest on a controller."""
+
+    display_name = "Slow Trap Weight"
     range_start = 0
     range_end = 100
     default = 20
@@ -248,7 +280,7 @@ class MoveLockTrapWeight(Range):
     display_name = "Move Lock Trap Weight"
     range_start = 0
     range_end = 100
-    default = 30
+    default = 20
 
 
 class ReverseControlsTrapWeight(Range):
@@ -258,7 +290,7 @@ class ReverseControlsTrapWeight(Range):
     display_name = "Reverse Controls Trap Weight"
     range_start = 0
     range_end = 100
-    default = 30
+    default = 20
 
 
 class FreezeTrapWeight(Range):
@@ -271,7 +303,8 @@ class FreezeTrapWeight(Range):
 
 
 class TrapDuration(Range):
-    """Seconds that Move Lock and Reverse Controls Traps last. A new trap of the same kind adds its time."""
+    """Seconds that Move Lock, Reverse Controls, Slippery and Slow Traps last. A new trap of the same kind
+    adds its time."""
 
     display_name = "Trap Duration"
     range_start = 10
@@ -416,9 +449,12 @@ class CrashOptions(PerGameCommonOptions):
     crashsanity: Crashsanity
     ability_shuffle: AbilityShuffle
     trap_fill_percentage: TrapFillPercentage
-    death_trap_weight: DeathTrapWeight
+    life_loss_trap_weight: LifeLossTrapWeight
     move_lock_trap_weight: MoveLockTrapWeight
     reverse_controls_trap_weight: ReverseControlsTrapWeight
     freeze_trap_weight: FreezeTrapWeight
+    slippery_trap_weight: SlipperyTrapWeight
+    slow_trap_weight: SlowTrapWeight
+    death_trap_weight: DeathTrapWeight
     trap_duration: TrapDuration
     death_link: DeathLink

@@ -414,6 +414,12 @@ void BoxMarkers::apply_trap(unsigned kind, unsigned seconds)
     case ingame::TrapFreeze:
         shared_->freeze_until = ingame::extend_timer(shared_->freeze_until, now, ingame::freeze_trap_ms);
         break;
+    case ingame::TrapSlippery:
+        shared_->slippery_until = ingame::extend_timer(shared_->slippery_until, now, ms);
+        break;
+    case ingame::TrapSlow:
+        shared_->slow_until = ingame::extend_timer(shared_->slow_until, now, ms);
+        break;
     }
     ++shared_->revision;
     unlock();

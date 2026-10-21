@@ -1313,7 +1313,7 @@ bool AbilityAccess::update(const AbilityOwnership &owned)
         for (unsigned kind = 0; kind < 2; ++kind)
         {
             const auto address = remote_ + 5120 + kind * 384;
-            const auto bytes = filler_method(before_, filler_, kind, address, kind ? filler_amount_ : 1);
+            const auto bytes = filler_method(before_, filler_, kind, address, kind ? filler_amount_ : 1, lives_amount_);
             std::vector<unsigned char> actual_method(bytes.size());
             if (!ReadProcessMemory(process_, reinterpret_cast<void *>(address), actual_method.data(), actual_method.size(), &count) || count != actual_method.size())
                 throw std::runtime_error("Cannot read filler-reward script method");
@@ -1400,6 +1400,8 @@ void AbilityAccess::queue_filler(unsigned index, std::int64_t item, std::uintptr
         throw std::runtime_error("Filler-reward delivery not ready");
     write(process_, remote_ + 4184, read<std::uintptr_t>(process_, remote_ + 4184), zone);
     const auto amount = wumpa_amount(index);
+    if (item == 0xCB0000 + 2201)
+        set_lives_amount(1);
     if (item == 0xCB0000 + 2202)
     {
         write(process_, remote_ + 5504 + 216, static_cast<int>(filler_amount_), static_cast<int>(amount));
@@ -1407,6 +1409,25 @@ void AbilityAccess::queue_filler(unsigned index, std::int64_t item, std::uintptr
     }
     const auto old = read<unsigned>(process_, remote_ + 4176);
     write(process_, remote_ + 4176, old, static_cast<unsigned>(item - (0xCB0000 + 2201)));
+    const auto ticket = read<std::uint64_t>(process_, remote_ + 4160);
+    write(process_, remote_ + 4160, ticket, static_cast<std::uint64_t>(index) + 1);
+}
+
+void AbilityAccess::set_lives_amount(int lives)
+{
+    if (lives_amount_ == lives)
+        return;
+    write(process_, remote_ + 5120 + 216, lives_amount_, lives);
+    lives_amount_ = lives;
+}
+void AbilityAccess::queue_life_loss(unsigned index, std::uintptr_t zone)
+{
+    if (!installed_ || !filler_.meta || !zone || index >= 100000 || filler_pending())
+        throw std::runtime_error("Life Loss delivery not ready");
+    write(process_, remote_ + 4184, read<std::uintptr_t>(process_, remote_ + 4184), zone);
+    set_lives_amount(-1);
+    // kind 0 runs the lives method, now adding -1
+    write(process_, remote_ + 4176, read<unsigned>(process_, remote_ + 4176), 0u);
     const auto ticket = read<std::uint64_t>(process_, remote_ + 4160);
     write(process_, remote_ + 4160, ticket, static_cast<std::uint64_t>(index) + 1);
 }

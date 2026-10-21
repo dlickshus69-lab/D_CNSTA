@@ -294,7 +294,8 @@ struct FillerProbe
 };
 FillerProbe probe_filler_at(HANDLE process, std::uintptr_t hud_meta);
 unsigned wumpa_amount(unsigned receipt_index);
-std::vector<unsigned char> filler_method(const AbilityProbe &method, const FillerProbe &filler, unsigned kind, std::uintptr_t remote, unsigned amount = 10);
+// lives is +1 for a 1-Up or -1 for a Life Loss Trap
+std::vector<unsigned char> filler_method(const AbilityProbe &method, const FillerProbe &filler, unsigned kind, std::uintptr_t remote, unsigned amount = 10, int lives = 1);
 std::vector<unsigned char> filler_stub(const AbilityProbe &actor, const FillerProbe &filler, std::uintptr_t remote);
 
 struct GemRefreshProbe

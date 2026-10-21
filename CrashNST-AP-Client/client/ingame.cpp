@@ -31,10 +31,17 @@ namespace
     std::atomic_bool active{false}, console_open{false};
     std::atomic_bool worker_running{false};
     std::atomic_bool startup_mode{false}, startup_check{false};
-    // Reverse Controls and Freeze Trap end times (GetTickCount64), copied from the shared block each tick
-    std::atomic<std::uint64_t> reverse_until{0}, freeze_until{0};
+    // input trap end times (GetTickCount64), copied from the shared block each tick
+    std::atomic<std::uint64_t> reverse_until{0}, freeze_until{0}, slippery_until{0}, slow_until{0};
     bool frozen() { return active && timer_active(freeze_until, GetTickCount64()); }
     bool reversed() { return active && timer_active(reverse_until, GetTickCount64()); }
+    bool slippery() { return active && timer_active(slippery_until, GetTickCount64()); }
+    bool slowed() { return active && timer_active(slow_until, GetTickCount64()); }
+    // Slippery momentum per XInput pad and for keyboard scan codes / virtual keys
+    std::mutex momentum_mutex;
+    StickMomentum stick_momentum[4];
+    KeyMomentum scan_momentum, virtual_momentum;
+    void clear_input_traps() { reverse_until = freeze_until = slippery_until = slow_until = 0; }
     HANDLE worker_thread = nullptr;
     std::recursive_mutex render_mutex;
     HWND game_window = nullptr;
@@ -223,8 +230,22 @@ namespace
         const auto result = original(device, bytes, data);
         if (active && (console_open || frozen()) && SUCCEEDED(result) && data && (bytes == 256 || bytes == sizeof(DIMOUSESTATE) || bytes == sizeof(DIMOUSESTATE2)))
             std::memset(data, 0, bytes);
-        else if (reversed() && SUCCEEDED(result) && data && bytes == 256)
-            reverse_keyboard(static_cast<unsigned char *>(data));
+        else if (SUCCEEDED(result) && data && bytes == 256)
+        {
+            auto keys = static_cast<unsigned char *>(data);
+            if (reversed())
+                reverse_keyboard(keys);
+            const auto now = GetTickCount64();
+            if (slippery())
+            {
+                std::lock_guard<std::mutex> guard(momentum_mutex);
+                for (const auto code : direction_scan_codes)
+                    keys[code] = scan_momentum.apply(code, keys[code] & 0x80, now) ? 0x80 : 0;
+            }
+            if (slowed() && !slow_keys_down(now))
+                for (const auto code : direction_scan_codes)
+                    keys[code] = 0;
+        }
         return result;
     }
     HRESULT STDMETHODCALLTYPE device_data(IUnknown *device, DWORD bytes, DIDEVICEOBJECTDATA *data, DWORD *count, DWORD flags)
@@ -249,7 +270,20 @@ namespace
     {
         if (active && (console_open || frozen()))
             return 0;
-        return GetAsyncKeyState(reversed() ? reverse_virtual_key(key) : key);
+        auto state = GetAsyncKeyState(reversed() ? reverse_virtual_key(key) : key);
+        if (direction_virtual_key(key))
+        {
+            const auto now = GetTickCount64();
+            if (slippery())
+            {
+                std::lock_guard<std::mutex> guard(momentum_mutex);
+                if (virtual_momentum.apply(static_cast<unsigned>(key), state & 0x8000, now))
+                    state = static_cast<SHORT>(state | 0x8000);
+            }
+            if (slowed() && !slow_keys_down(now))
+                state = static_cast<SHORT>(state & 0x7fff);
+        }
+        return state;
     }
     DWORD WINAPI controller_state(DWORD index, XINPUT_STATE *state)
     {
@@ -269,11 +303,31 @@ namespace
         const auto result = query(index, state);
         if (active && (console_open || frozen()) && result == ERROR_SUCCESS && state)
             std::memset(&state->Gamepad, 0, sizeof(state->Gamepad));
-        else if (reversed() && result == ERROR_SUCCESS && state)
+        else if (result == ERROR_SUCCESS && state)
         {
-            state->Gamepad.sThumbLX = reverse_axis(state->Gamepad.sThumbLX);
-            state->Gamepad.sThumbLY = reverse_axis(state->Gamepad.sThumbLY);
-            state->Gamepad.wButtons = reverse_dpad(state->Gamepad.wButtons);
+            auto &pad = state->Gamepad;
+            if (reversed())
+            {
+                pad.sThumbLX = reverse_axis(pad.sThumbLX);
+                pad.sThumbLY = reverse_axis(pad.sThumbLY);
+                pad.wButtons = reverse_dpad(pad.wButtons);
+            }
+            const auto now = GetTickCount64();
+            if (index < 4)
+            {
+                std::lock_guard<std::mutex> guard(momentum_mutex);
+                if (slippery())
+                    stick_momentum[index].apply(pad.sThumbLX, pad.sThumbLY, now);
+                else
+                    stick_momentum[index].primed = false;
+            }
+            if (slowed())
+            {
+                pad.sThumbLX = scale_axis(pad.sThumbLX, slow_stick_scale);
+                pad.sThumbLY = scale_axis(pad.sThumbLY, slow_stick_scale);
+                if (!slow_keys_down(now))
+                    pad.wButtons = static_cast<WORD>(pad.wButtons & ~0xF); // pulse the d-pad like keys
+            }
         }
         return result;
     }
@@ -1185,7 +1239,9 @@ namespace
                     std::string traps;
                     const std::pair<std::uint64_t, const char *> timers[]{{snapshot->move_lock_until, "Move Lock"},
                                                                           {snapshot->reverse_until, "Reversed"},
-                                                                          {snapshot->freeze_until, "Frozen"}};
+                                                                          {snapshot->freeze_until, "Frozen"},
+                                                                          {snapshot->slippery_until, "Slippery"},
+                                                                          {snapshot->slow_until, "Slow"}};
                     for (const auto &[until, label] : timers)
                         if (timer_active(until, now))
                             traps += (traps.empty() ? "" : "  ") + std::string(label) + " " + std::to_string(seconds_left(until, now)) + "s";
@@ -1724,18 +1780,20 @@ extern "C" __declspec(dllexport) void NST_Tick()
             {
                 reverse_until = shared->reverse_until;
                 freeze_until = shared->freeze_until;
+                slippery_until = shared->slippery_until;
+                slow_until = shared->slow_until;
                 update_gameplay(*shared);
             }
             else
             {
-                reverse_until = freeze_until = 0;
+                clear_input_traps();
                 restore_gameplay(true);
             }
         }
     }
     catch (const std::exception &e)
     {
-        reverse_until = freeze_until = 0;
+        clear_input_traps();
         shared->vanilla_controls = 1;
         copy(shared->error, e.what());
         restore_gameplay(true);

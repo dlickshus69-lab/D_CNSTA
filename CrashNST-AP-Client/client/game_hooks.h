@@ -137,6 +137,8 @@ public:
     bool filler_ready() const;
     bool filler_pending() const;
     void queue_filler(unsigned index, std::int64_t item, std::uintptr_t zone);
+    // experimental Life Loss Trap: the same lives reward with -1
+    void queue_life_loss(unsigned index, std::uintptr_t zone);
 
 private:
     HANDLE process_ = nullptr;
@@ -154,6 +156,8 @@ private:
     std::array<unsigned char, 5> refresh_call_{};
     unsigned generation_ = 1;
     unsigned filler_amount_ = 10;
+    int lives_amount_ = 1; // constant in the copied lives method: +1 for 1-Ups, -1 for Life Loss Traps
+    void set_lives_amount(int lives);
     bool installed_ = false;
 };
 

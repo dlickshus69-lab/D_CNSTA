@@ -103,7 +103,7 @@ namespace ingame
         // traps: deaths reuse death_request (trap_kills enables it without DeathLink);
         // timed traps store GetTickCount64() end times
         unsigned trap_kills = 0;
-        std::uint64_t move_lock_until = 0, reverse_until = 0, freeze_until = 0;
+        std::uint64_t move_lock_until = 0, reverse_until = 0, freeze_until = 0, slippery_until = 0, slow_until = 0;
         unsigned c3_buttons_ready = 0;
         std::uint64_t c3_buttons_active = 0;
         float box_half_size = 50;

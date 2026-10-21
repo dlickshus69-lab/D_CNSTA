@@ -175,9 +175,19 @@ HUB_ITEM_COUNTS = {HUB_ITEMS[1, 2]: 2, HUB_ITEMS[2, 2]: 4}
 # Ability Shuffle: one item per basic move, shared by all three campaigns
 BASIC_MOVES = ("Spin", "Body Slam", "Crouch Jump", "Slide")
 ITEMS.update({name: BASE + 2400 + index for index, name in enumerate(BASIC_MOVES)})
-# traps replace junk items; the client applies them once you are in a level and in control
-TRAPS = ("Death Trap", "Move Lock Trap", "Reverse Controls Trap", "Freeze Trap")
-ITEMS.update({name: BASE + 2500 + index for index, name in enumerate(TRAPS)})
+# traps replace junk items; the client applies them once you are in a level and in control.
+# IDs never change. Death Trap is retired: it stays in the table for older seeds but is never placed.
+TRAP_IDS = {
+    "Death Trap": 2500,
+    "Move Lock Trap": 2501,
+    "Reverse Controls Trap": 2502,
+    "Freeze Trap": 2503,
+    "Life Loss Trap": 2504,
+    "Slippery Trap": 2505,
+    "Slow Trap": 2506,
+}
+TRAPS = tuple(TRAP_IDS)
+ITEMS.update({name: BASE + offset for name, offset in TRAP_IDS.items()})
 
 
 def valid_requirement_counts(items):

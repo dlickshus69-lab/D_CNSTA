@@ -423,14 +423,22 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                 const auto level = level_key(scene.zone);
                 if (!scene.camera_active || level.empty() || !level_accessible(*seed, tick.items, level))
                     break;
+                // Life Loss uses the game's lives reward, which must be attached and idle
+                if (kind == ingame::TrapLifeLoss &&
+                    (!ability_access || ability_refresh_pending || !ability_access->filler_ready() ||
+                     ability_access->filler_pending() || !scene.zone_address))
+                    break;
                 if (session.reserve_trap(index))
                 {
                     const auto &duration = session.slot_data()["trap_duration"];
                     const unsigned seconds = duration.isUInt() && duration.asUInt() >= 10 && duration.asUInt() <= 120
                                                  ? duration.asUInt()
                                                  : 30;
-                    box_markers->apply_trap(static_cast<unsigned>(kind), seconds);
-                    const auto timed = kind == ingame::TrapMoveLock || kind == ingame::TrapReverse;
+                    if (kind == ingame::TrapLifeLoss)
+                        ability_access->queue_life_loss(index, scene.zone_address);
+                    else
+                        box_markers->apply_trap(static_cast<unsigned>(kind), seconds);
+                    const auto timed = ingame::timed_trap(static_cast<unsigned>(kind));
                     print_console(std::string(ingame::trap_names[kind]) +
                                       (timed ? " for " + std::to_string(seconds) + " seconds!" : "!"),
                                   true);
