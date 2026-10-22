@@ -254,7 +254,7 @@ namespace ingame
     }
     void PopupQueue::update(std::uint64_t now)
     {
-        while (!visible.empty() && now - visible.front().started >= 3500)
+        while (!visible.empty() && now - visible.front().started >= popup_total_ms)
             visible.pop_front();
         while (visible.size() < 3 && !pending.empty())
         {
@@ -265,8 +265,8 @@ namespace ingame
     float popup_opacity(std::uint64_t now, std::uint64_t started)
     {
         const auto elapsed = now - started;
-        return elapsed <= 3000 ? 1.0f : elapsed >= 3500 ? 0.0f
-                                                        : static_cast<float>(3500 - elapsed) / 500;
+        return elapsed + popup_fade_ms <= popup_total_ms ? 1.0f : elapsed >= popup_total_ms ? 0.0f
+                                                        : static_cast<float>(popup_total_ms - elapsed) / popup_fade_ms;
     }
     unsigned faded_color(unsigned color, float opacity)
     {

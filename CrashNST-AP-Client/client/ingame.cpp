@@ -73,6 +73,9 @@ namespace
     unsigned history_index = 0, tab_index = 0, scroll = 0;
     bool tab_active = false;
     PopupQueue popups;
+    // the latest popups, shown again while F2 is held
+    std::deque<Line> popup_history;
+    std::atomic_bool history_held{false};
     std::uint64_t popup_seen = 0;
     bool discard_popup_history = false;
     bool secret_input(const std::string &text) { return text.rfind("/password", 0) == 0 || text.rfind("!admin login", 0) == 0; }
@@ -564,6 +567,14 @@ namespace
         }
         if (message == WM_KILLFOCUS && console_open && !startup_mode)
             toggle_console();
+        if (message == WM_KILLFOCUS)
+            history_held = false;
+        // hold F2: the latest popups again (items found and received, traps, ...)
+        if (wp == VK_F2 && (message == WM_KEYDOWN || message == WM_KEYUP))
+        {
+            history_held = message == WM_KEYDOWN;
+            return 0;
+        }
         // F10 is a system key. Consume releases and repeats too, so Windows is stopped here from entering menu mode
         if (wp == VK_F10 && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN || message == WM_KEYUP || message == WM_SYSKEYUP))
         {
@@ -1251,6 +1262,9 @@ namespace
                     if (popups.pending.size() == max_popup_lines)
                         popups.pending.pop_front();
                     popups.pending.push_back(line);
+                    if (popup_history.size() == popup_history_lines)
+                        popup_history.pop_front();
+                    popup_history.push_back(line);
                 }
             }
             popup_seen = snapshot->line_write;
@@ -1552,22 +1566,47 @@ namespace
         {
             popups.update(now);
             const float right = std::min<float>(r.width - 16, 700), max_height = std::max(22.0f, (r.height - 40.0f) / 3 - 8);
-            std::vector<float> heights;
-            float total = 0;
-            for (const auto &popup : popups.visible)
+            if (history_held && !startup_mode)
             {
-                const auto height = std::min(max_height, r.rich_line(20, 0, popup.line, right, false));
-                heights.push_back(height);
-                total += height + 8;
+                // F2 held: the latest popups, newest at the bottom, as many as fit
+                std::vector<float> heights;
+                float total = 30;
+                const float line_max = std::max(22.0f, (r.height - 80.0f) / popup_history_lines);
+                for (const auto &line : popup_history)
+                {
+                    const auto height = std::min(line_max, r.rich_line(20, 0, line, right, false));
+                    heights.push_back(height);
+                    total += height + 6;
+                }
+                float y = std::max(8.0f, r.height - 16 - total);
+                r.quad(14, y - 4, right - 8, r.height - 12 - y, 0xdd141414);
+                r.text(20, y, popup_history.empty() ? std::string("Nothing found or received yet (hold F2)") : "Latest (hold F2)", 0xff20d8ff);
+                y += 30;
+                for (unsigned i = 0; i < popup_history.size(); ++i)
+                {
+                    r.rich_line(20, y, popup_history[i], right, true, y + heights[i], 1.0f);
+                    y += heights[i] + 6;
+                }
             }
-            float y = r.height - 16 - total;
-            for (unsigned i = 0; i < popups.visible.size(); ++i)
+            else
             {
-                const auto &popup = popups.visible[i];
-                const auto opacity = popup_opacity(now, popup.started);
-                r.quad(14, y - 2, right - 8, heights[i] + 4, faded_color(0xcc141414, opacity));
-                r.rich_line(20, y, popup.line, right, true, y + heights[i], opacity);
-                y += heights[i] + 8;
+                std::vector<float> heights;
+                float total = 0;
+                for (const auto &popup : popups.visible)
+                {
+                    const auto height = std::min(max_height, r.rich_line(20, 0, popup.line, right, false));
+                    heights.push_back(height);
+                    total += height + 8;
+                }
+                float y = r.height - 16 - total;
+                for (unsigned i = 0; i < popups.visible.size(); ++i)
+                {
+                    const auto &popup = popups.visible[i];
+                    const auto opacity = popup_opacity(now, popup.started);
+                    r.quad(14, y - 2, right - 8, heights[i] + 4, faded_color(0xcc141414, opacity));
+                    r.rich_line(20, y, popup.line, right, true, y + heights[i], opacity);
+                    y += heights[i] + 8;
+                }
             }
             if (!startup_mode && main_menu(scene.zone) && campaign_menu_visible())
             {
@@ -1928,6 +1967,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI NST_Start(void *startup)
         scroll = 0;
         tab_active = false;
         popups.clear();
+        popup_history.clear();
         popup_seen = 0;
         discard_popup_history = false;
         snapshot = std::make_unique<Shared>();

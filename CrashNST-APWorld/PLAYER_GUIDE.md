@@ -8,6 +8,7 @@
 | Tab | Complete commands, `!hint` item names and `!hint_location` location names |
 | Page Up / Page Down, mouse wheel | Scroll console history |
 | F7 | Toggle AP markers, labels and HUD |
+| F2 (hold) | Show the latest 12 popups again: items found and received, traps, ... (each popup also stays 7 seconds now) |
 | F10 | Restore normal movement if you're stuck in Crashsanity |
 
 Console input supports Left/Right, Home/End, Shift selection and Ctrl+A/C/V.

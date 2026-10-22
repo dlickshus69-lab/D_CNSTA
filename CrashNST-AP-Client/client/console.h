@@ -52,6 +52,10 @@ namespace ingame
         Line line;
         std::uint64_t started;
     };
+    // a popup (an item found or received, a trap, ...) stays this long, fading out over its last popup_fade_ms
+    inline constexpr std::uint64_t popup_total_ms = 7000, popup_fade_ms = 500;
+    // hold F2 to see this many of the latest popups again
+    inline constexpr unsigned popup_history_lines = 12;
     struct PopupQueue
     {
         std::deque<Line> pending;
