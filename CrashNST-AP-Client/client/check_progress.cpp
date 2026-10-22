@@ -52,8 +52,12 @@ unsigned box_marker_color(bool spoilers, const Json::Value &location_flags, std:
 }
 std::string CheckCounts::text() const
 {
-    return std::to_string(done) + "/" + (logic_known ? std::to_string(in_logic) : "?") + " (" + std::to_string(total) +
-           ")";
+    // a game's checks on the title screen and in its hub: how many your items reach now (green when any), then
+    // found out of the game's total
+    if (total && done >= total)
+        return "All checks found: " + std::to_string(done) + "/" + std::to_string(total);
+    return std::string(logic_known && available ? "\x02" : "") + "Available checks: " + (logic_known ? std::to_string(available) : "?") + " (" +
+           std::to_string(done) + "/" + std::to_string(total) + " found)";
 }
 namespace
 {
@@ -143,6 +147,7 @@ std::array<LevelProgress, 3> campaign_progress(const CheckProgress &progress,
         auto &campaign = result[source[1] - '1'];
         campaign.done += level.done;
         campaign.in_logic += level.in_logic;
+        campaign.available += level.available;
         campaign.total += level.total;
         campaign.logic_known = campaign.logic_known && level.logic_known;
     }

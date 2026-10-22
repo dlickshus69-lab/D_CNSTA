@@ -284,6 +284,17 @@ void BoxMarkers::progress(const CheckProgress &counts, const std::map<std::strin
     const auto campaigns = campaign_progress(counts, placements);
     for (unsigned i = 0; i < campaigns.size(); ++i)
         ingame::copy(shared_->campaign_counts[i], campaigns[i].text());
+    // each game's levels (by the hub their entrance is in) and how many of them you can enter now
+    unsigned open[3]{}, total[3]{};
+    for (const auto &[source, destination] : placements)
+        if (source.size() == 4 && source[0] == 'L' && source[1] >= '1' && source[1] <= '3')
+        {
+            ++total[source[1] - '1'];
+            if (unlocked.count(destination))
+                ++open[source[1] - '1'];
+        }
+    for (unsigned i = 0; i < 3; ++i)
+        ingame::copy(shared_->campaign_levels[i], total[i] ? "Available levels: " + std::to_string(open[i]) + "/" + std::to_string(total[i]) : std::string());
     for (const auto &[key, p] : counts.levels)
     {
         auto &level = shared_->levels[shared_->level_count++];

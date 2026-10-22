@@ -1320,24 +1320,24 @@ namespace
             if (scene.camera_active)
             {
                 float goal_y = 16;
-                if (const auto campaign = hub_campaign(scene.zone))
-                {
-                    const std::string counts = snapshot->campaign_counts[campaign - 1];
-                    if (!counts.empty())
-                    {
-                        const float width = r.text_width(counts) + 16, x = std::max(4.0f, r.width - width - 16);
-                        r.quad(x, 16, width, 26, 0xbb181818);
-                        r.text(x + 8, 18, counts, 0xff20d8ff);
-                        goal_y = 48;
-                    }
-                }
-                if (!main_menu(scene.zone) && snapshot->goal_counts[0])
-                {
-                    const float width = r.text_width(snapshot->goal_counts) + 16, x = std::max(4.0f, r.width - width - 16);
+                // a box in the top-right corner, one under another; a leading \x02 makes its text green
+                const auto corner_box = [&](std::string text) {
+                    const bool green = !text.empty() && text[0] == '\x02';
+                    if (green)
+                        text.erase(0, 1);
+                    const float width = r.text_width(text) + 16, x = std::max(4.0f, r.width - width - 16);
                     r.quad(x, goal_y, width, 26, 0xbb181818);
-                    r.text(x + 8, goal_y + 2, snapshot->goal_counts, 0xff20d8ff);
+                    r.text(x + 8, goal_y + 2, text, green ? 0xff40e040 : 0xff20d8ff);
                     goal_y += 32;
-                }
+                };
+                const auto hub_game = hub_campaign(scene.zone);
+                if (hub_game && snapshot->campaign_counts[hub_game - 1][0])
+                    corner_box(snapshot->campaign_counts[hub_game - 1]);
+                if (!main_menu(scene.zone) && snapshot->goal_counts[0])
+                    corner_box(snapshot->goal_counts);
+                // how many of this game's levels you can enter now
+                if (hub_game && snapshot->campaign_levels[hub_game - 1][0])
+                    corner_box(snapshot->campaign_levels[hub_game - 1]);
                 {
                     // running trap timers
                     const auto now = GetTickCount64();
@@ -1575,16 +1575,29 @@ namespace
                 if (snapshot->visible)
                 {
                     const auto positions = campaign_label_positions(r.width, r.height);
+                    // under each game's logo: its available checks (green when your items reach any), then its
+                    // available levels below
                     for (unsigned i = 0; i < positions.size(); ++i)
                     {
-                        const std::string counts = snapshot->campaign_counts[i];
+                        std::string counts = snapshot->campaign_counts[i];
                         if (counts.empty())
                             continue;
-                        const auto width = r.text_width(counts) + 16;
-                        const float x = std::clamp(positions[i].x - width / 2, 4.0f, std::max(4.0f, r.width - width - 4));
-                        const float y = std::clamp<float>(positions[i].y, 4, std::max(4.0f, r.height - 30.0f));
-                        r.quad(x, y, width, 26, 0xbb181818);
-                        r.text(x + 8, y + 2, counts, 0xff20d8ff);
+                        const std::string levels = snapshot->campaign_levels[i];
+                        const bool green = counts[0] == '\x02';
+                        if (green)
+                            counts.erase(0, 1);
+                        const float bottom = std::clamp<float>(positions[i].y, 4, std::max(4.0f, r.height - 30.0f));
+                        float y = levels.empty() ? bottom : std::max(4.0f, bottom - 30);
+                        for (const auto &[text, color] : {std::pair{counts, green ? 0xff40e040u : 0xff20d8ffu}, std::pair{levels, 0xff20d8ffu}})
+                        {
+                            if (text.empty())
+                                continue;
+                            const auto width = r.text_width(text) + 16;
+                            const float x = std::clamp(positions[i].x - width / 2, 4.0f, std::max(4.0f, r.width - width - 4));
+                            r.quad(x, y, width, 26, 0xbb181818);
+                            r.text(x + 8, y + 2, text, color);
+                            y += 30;
+                        }
                     }
                 }
             }

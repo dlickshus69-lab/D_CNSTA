@@ -183,6 +183,7 @@ namespace ingame
         unsigned command_read = 0, command_write = 0;
         char status[256]{}, binding[256]{}, error[256]{};
         char campaign_counts[3][48]{};
+        char campaign_levels[3][40]{}; // "Available levels: open/total" for each game's hub entrances
         char goal_counts[64]{};
         char completion[1024 * 1024]{}; // NUL-separated commands, item names, location names.
         unsigned completion_bytes = 0, item_start = 0, location_start = 0;
@@ -259,6 +260,9 @@ namespace ingame
             return false;
         for (const auto &counts : s.campaign_counts)
             if (!terminated(counts))
+                return false;
+        for (const auto &levels : s.campaign_levels)
+            if (!terminated(levels))
                 return false;
         for (unsigned i = 0; i < s.collectible_count; ++i)
         {

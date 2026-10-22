@@ -15,7 +15,7 @@ Automatic connection attempts stop after five failures.
 Correct the connection settings and use `/connect` to start a fresh attempt.
 
 The level panel in the top-left corner spells it out: checks found out of the level's total and how many more are available now (in logic), whether the level clear is done, then the same for gems, the power crystal and the relic. A line is green when your items let you get more of it now, red when they reach none of the rest, and yellow once it is all done. The label over a hub entrance has three lines: the game and level, with "(All Done)" in green once every check there is found; `Checks: found/total` with how many more your items let you get now; then found/total for `Level Clear`, `C` power crystal, `G` gems, `R` relic and, with Boxsanity, `B` box checks (the level's boxes that are checks). The checks line and each of those are colored the same way.   
-Campaign totals appear in the game choose menu and on hub maps.  
+Each game's totals appear under its logo on the title screen and in the top-right corner of its hub: `Available checks: N (found/total found)`, green when your items reach any, and `Available levels: open/total`, how many of that game's levels you can enter now (by the hub their entrance is in).  
 Approach an unlocked hub entrance to see its destination label and check counts.  
 `/hubdistance_c1`, `/hubdistance_c2` and `/hubdistance_c3` show each hub's label
 distance.   
