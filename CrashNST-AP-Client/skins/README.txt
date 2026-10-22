@@ -8,7 +8,7 @@ game's archives folder). You can drop the mod's whole folder in here as it came,
   skins\PS1 Crash\archives\Crash.pak   (or skins\playstation_1.pak)
   skins\My Skin\Crash.pak              (any other name works too)
 
-Pick one with crash_skin in your YAML's Cosmetic section (default_crash, playstation_1, biker, jetpack, or the
+Pick one with crash_skin in your YAML's Cosmetic section (default_crash, playstation_1, biker, or the
 name of any folder here), or in the client's console with /skin name (/skin on its own lists them, /skin default goes
 back to the normal Crash).
 
@@ -18,7 +18,6 @@ and goes back when you pick default_crash. So a new choice shows the next time t
 
 PlayStation 1 Crash: a folder or .pak whose name has playstation, PS1, PSX or low poly in it.
 Biker Crash: a folder or .pak whose name has biker in it.
-Jetpack Crash: a folder or .pak whose name has jetpack or jet pack in it.
 
 If Steam updates or verifies the game, its new Crash.pak becomes the default and the skin is put back on at the
 next start.
