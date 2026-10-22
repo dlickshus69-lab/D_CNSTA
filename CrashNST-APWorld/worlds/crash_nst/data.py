@@ -385,6 +385,7 @@ SECRET_EXIT_MOVES = {"L217": ("Body Slam",)}
 # levels that can't be cleared by jumping alone (Ability Shuffle): the move the way through needs, for the clear, the
 # crystal and the boxes, in both Ability Logic modes. From play reports; more are added as they turn up.
 CLEAR_MOVES = {
+    "L103": ("Spin",),                  # The Great Gate: a ? crate stacked between iron crates blocks the path
     "L108": ("Spin",),                  # Native Fortress: the spinning log wheels
     "L209": ("Slide",),                 # Crash Crush: slide under the electric gates
     "L212": ("Spin", "Crouch Jump"),    # Sewer or Later: break the crate walls, crawl under the low pipes

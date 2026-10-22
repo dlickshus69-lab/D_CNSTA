@@ -276,7 +276,7 @@ class AbilityLogic(Choice):
     can be jumped on or hit from below), so abilities can be on almost any of those. Bosses still need
     Spin, and gems and relics keep the cautious needs.
     Either way, levels that can't be cleared by jumping alone need their move for everything past the
-    obstacle: Native Fortress needs Spin; Crash Crush and Bee-Having need Slide; Sewer or Later needs Spin
+    obstacle: The Great Gate and Native Fortress need Spin; Crash Crush and Bee-Having need Slide; Sewer or Later needs Spin
     and Crouch Jump; Un-Bearable needs Body Slam and Slide; The Eel Deal's bonus round needs Spin.
     Gimmick stages need no moves either way.
     """

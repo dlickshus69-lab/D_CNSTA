@@ -1,7 +1,8 @@
 ## What's new
 
 - **F2 scrolls.** Hold F2 to see what you found and received (and traps). It now keeps the last 300, and while you hold it the mouse wheel, Page Up/Down or the arrow keys scroll back through them (Home: oldest, End: newest).
-- **DeathLink from gimmick stages.** Dying on the hog, polar bear, jetpack or a vehicle now sends DeathLink like any other death. A DeathLink you receive there waits until you're on foot in that level.
+- **DeathLink on rides.** Dying on the hog, polar bear, jet ski, jetpack or another vehicle now sends DeathLink like any other death. A DeathLink you *receive* on a ride now costs you a life instead of killing you: the game's on-foot death broke the ride (on Coco's jet ski she turned invisible and respawned in the wrong place).
+- **The Great Gate needs Spin** (Ability Shuffle, new seeds): the ? crate stacked between iron crates blocks the path.
 - **Darkness Trap fades in.** The darkness creeps in over 5 seconds, the light closing in on Crash, and lifts over 1.5 seconds when it ends.
 
 ## Recent builds

@@ -8,6 +8,18 @@
 #include <algorithm>
 #include <iostream>
 using save_probe::level_key;
+// stages where Crash (or Coco) rides or flies something: the hog, polar bear, jet ski, jetpack, plane, bike, tiger and
+// scuba levels (the gimmick levels), and the Crash 2 jet-board levels. The on-foot death script a DeathLink runs breaks
+// the ride there (on Coco's jet ski it left her invisible and respawned her in the wrong place), so a DeathLink costs a
+// life there instead
+static bool ridden_level(const std::string &key)
+{
+    static const char *const levels[]{"L107", "L114", "L208", "L213", "L215", "L222", "L224", "L226", "L302", "L303",
+                                      "L305", "L308", "L310", "L312", "L314", "L317", "L318", "L322", "L324", "L326",
+                                      "L328", "L330", "L331", "L332", "L203", "L207", "L211"};
+    return std::find(std::begin(levels), std::end(levels), key) != std::end(levels);
+}
+
 void ClientRuntime::update_routing(ClientTick &tick)
 {
     if (session.ready() && !session_failed)
@@ -203,10 +215,37 @@ void ClientRuntime::update_zone(ClientTick &tick)
     {
         const bool apply =
             tick.room_ready && session.slot_data()["death_link"].asBool() && death_link_level(active_zone);
-        if (apply)
+        const bool ride = apply && ridden_level(active_zone.key);
+        if (ride)
+            ++deathlink_life_losses;
+        else if (apply)
             box_markers->receive_death();
         AP_DeathLinkClear();
-        print_console(apply ? "DeathLink received." : "DeathLink ignored outside an active level.");
+        print_console(ride    ? "DeathLink received. You're on a ride, so you lose a life instead."
+                      : apply ? "DeathLink received."
+                              : "DeathLink ignored outside an active level.");
+    }
+    // a DeathLink on a ride: a life is taken once the game's lives reward is free (the level must still be running)
+    if (deathlink_life_losses && (!death_link_level(active_zone) || !ridden_level(active_zone.key)))
+        deathlink_life_losses = 0;
+    if (deathlink_life_losses && ability_access && !ability_refresh_pending && ability_access->filler_ready() &&
+        !ability_access->filler_pending())
+    {
+        const auto scene = read_scene(GetCurrentProcess());
+        if (scene.camera_active && scene.zone_address)
+        {
+            try
+            {
+                ability_access->queue_life_loss(99999 - deathlink_tickets++ % 50000, scene.zone_address);
+                --deathlink_life_losses;
+                std::cout << "DeathLink on a ride: one life taken.\n" << std::flush;
+            }
+            catch (const std::exception &error)
+            {
+                std::cerr << "DeathLink life loss: " << error.what() << std::endl;
+                deathlink_life_losses = 0;
+            }
+        }
     }
 }
 

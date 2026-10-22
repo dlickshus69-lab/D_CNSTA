@@ -122,6 +122,9 @@ class ClientRuntime
     bool names_loaded = false, render_announced = false;
     std::string completion_error;
     unsigned last_deaths = 0, last_collectible_awards = 0;
+    // DeathLinks received on a ride (hog, bear, jet ski, ...): each costs a life instead, delivered like a Life Loss
+    // Trap; the ticket numbers count down from 99999, clear of item indexes
+    unsigned deathlink_life_losses = 0, deathlink_tickets = 0;
     std::chrono::steady_clock::time_point next_trap{};
     // /aku_lock: -1 follows the seed (Aku Aku Sanity and the Aku Aku item), 0 off, 1 on
     int aku_lock_override = -1;
