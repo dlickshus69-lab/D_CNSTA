@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
+#include <fstream>
 #include <array>
 #include <map>
 #include "trap_rules.h"
@@ -484,6 +485,20 @@ void ClientRuntime::handle_commands()
                 }
                 else
                     print_console("Crash probe needs the in-game adapter. Load into a level first.");
+            }
+            else if (command == "/nitro_volume")
+            {
+                // the Nitro Trap countdown's TNT sound volume, 0-100 (kept for next time)
+                char *end = nullptr;
+                const auto value = std::strtol(argument.c_str(), &end, 10);
+                if (argument.empty() || !end || *end || value < 0 || value > 100)
+                    print_console("Nitro Trap countdown volume: " + std::to_string(ingame::countdown_volume()) + ". Use /nitro_volume 0 to 100 (0 is silent).");
+                else
+                {
+                    ingame::set_countdown_volume(static_cast<unsigned>(value));
+                    std::ofstream(standalone::state_directory() / "nitro_volume.txt", std::ios::trunc) << value << '\n';
+                    print_console("Nitro Trap countdown volume: " + std::to_string(value) + ".");
+                }
             }
             else if (command == "/skin")
             {

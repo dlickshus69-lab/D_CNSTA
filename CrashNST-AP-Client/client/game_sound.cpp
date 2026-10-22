@@ -11,6 +11,8 @@
 #include <set>
 #include <sstream>
 #include <memory>
+#include <cmath>
+#include <algorithm>
 #include <mmsystem.h>
 
 namespace
@@ -348,9 +350,49 @@ namespace ingame
     namespace
     {
         std::mutex countdown_mutex;
-        std::shared_ptr<const std::vector<unsigned char>> countdown_wav, countdown_playing;
+        std::shared_ptr<const std::vector<unsigned char>> countdown_wav, countdown_playing, countdown_scaled;
         std::string countdown_name;
-        unsigned countdown_ms = 0;
+        unsigned countdown_ms = 0, countdown_percent = 50, scaled_percent = 0;
+        // the game plays the TNT quieter than full scale (and in its 3D mix): the sound at `percent` volume, with a few
+        // milliseconds of fade at each end so it starts and stops without a click. 16-bit WAVs (sound_decode's) only.
+        std::shared_ptr<const std::vector<unsigned char>> scaled(const std::vector<unsigned char> &wav, unsigned percent)
+        {
+            auto copy = std::make_shared<std::vector<unsigned char>>(wav);
+            std::uint16_t channels = 0, bits = 0;
+            std::uint32_t rate = 0;
+            std::memcpy(&channels, &wav[22], 2), std::memcpy(&rate, &wav[24], 4), std::memcpy(&bits, &wav[34], 2);
+            if (bits != 16 || !channels || !rate)
+                return copy;
+            const std::size_t frames = (copy->size() - 44) / 2 / channels;
+            const std::size_t fade_in = std::min<std::size_t>(frames / 4, rate * 3 / 1000), fade_out = std::min<std::size_t>(frames / 4, rate * 15 / 1000);
+            for (std::size_t f = 0; f < frames; ++f)
+            {
+                double gain = percent / 100.0;
+                if (f < fade_in)
+                    gain *= static_cast<double>(f) / fade_in;
+                if (frames - f <= fade_out)
+                    gain *= static_cast<double>(frames - f - 1) / fade_out;
+                for (unsigned c = 0; c < channels; ++c)
+                {
+                    auto at = copy->data() + 44 + (f * channels + c) * 2;
+                    std::int16_t sample;
+                    std::memcpy(&sample, at, 2);
+                    sample = static_cast<std::int16_t>(std::lround(sample * gain));
+                    std::memcpy(at, &sample, 2);
+                }
+            }
+            return copy;
+        }
+    }
+    void set_countdown_volume(unsigned percent)
+    {
+        std::lock_guard<std::mutex> guard(countdown_mutex);
+        countdown_percent = std::min(percent, 100u);
+    }
+    unsigned countdown_volume()
+    {
+        std::lock_guard<std::mutex> guard(countdown_mutex);
+        return countdown_percent;
     }
     void set_countdown_sound(std::vector<unsigned char> wav, const std::string &name)
     {
@@ -363,8 +405,9 @@ namespace ingame
             std::memcpy(&rate, &wav[24], 4), std::memcpy(&align, &wav[32], 2), std::memcpy(&data, &wav[40], 4);
             countdown_ms = rate && align ? static_cast<unsigned>(1000ull * data / align / rate) : 0;
         }
-        countdown_wav = wav.empty() ? nullptr : std::make_shared<const std::vector<unsigned char>>(std::move(wav));
+        countdown_wav = wav.size() > 44 ? std::make_shared<const std::vector<unsigned char>>(std::move(wav)) : nullptr;
         countdown_name = countdown_wav ? name : std::string{};
+        countdown_scaled = nullptr;
     }
     bool play_countdown_sound(int index, unsigned step_ms)
     {
@@ -373,8 +416,12 @@ namespace ingame
             return false;
         if (countdown_ms >= 2 * step_ms && index > 0)
             return true; // still playing from 3
+        if (!countdown_percent)
+            return true; // muted
+        if (!countdown_scaled || scaled_percent != countdown_percent)
+            countdown_scaled = scaled(*countdown_wav, countdown_percent), scaled_percent = countdown_percent;
         // PlaySound reads the buffer while it plays: it stays alive until the next one starts
-        countdown_playing = countdown_wav;
+        countdown_playing = countdown_scaled;
         PlaySoundA(reinterpret_cast<LPCSTR>(countdown_playing->data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
         return true;
     }

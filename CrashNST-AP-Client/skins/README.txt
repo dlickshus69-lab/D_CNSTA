@@ -21,3 +21,6 @@ Biker Crash: a folder or .pak whose name has biker in it.
 
 If Steam updates or verifies the game, its new Crash.pak becomes the default and the skin is put back on at the
 next start.
+
+Skin mods are other people's work, and their quirks come with them (the same as installing them by hand):
+the Biker Crash mod reuses Aku Aku's look files for its jacket, so Aku Aku is invisible while wearing it.

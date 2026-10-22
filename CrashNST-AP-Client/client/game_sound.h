@@ -26,4 +26,7 @@ namespace ingame
     // numbers or more plays once, at 3; a short one at every number. False when there is none.
     bool play_countdown_sound(int index, unsigned step_ms);
     std::string countdown_sound_name();
+    // its volume, 0 (silent) to 100 (as loud as the sound file); 50 unless /nitro_volume changed it
+    void set_countdown_volume(unsigned percent);
+    unsigned countdown_volume();
 }

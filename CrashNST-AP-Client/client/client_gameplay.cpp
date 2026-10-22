@@ -2,6 +2,8 @@
 #include "trap_rules.h"
 #include "game_archive.h"
 #include "skins.h"
+#include <fstream>
+#include "game_sound.h"
 #include <algorithm>
 #include <iostream>
 using save_probe::level_key;
@@ -508,6 +510,10 @@ void ClientRuntime::update_ownership(ClientTick &tick)
     if (box_markers && !sound_search_started)
     {
         sound_search_started = true;
+        // the countdown volume picked with /nitro_volume
+        if (std::ifstream volume{standalone::state_directory() / "nitro_volume.txt"}; volume)
+            if (unsigned percent = 0; volume >> percent && percent <= 100)
+                ingame::set_countdown_volume(percent);
         if (const auto skin = skins::status(); !skin.empty())
             print_console(skin, false);
         start_sound_job([] { return ingame::startup_sound_search(standalone::state_directory() / "tnt_sound.txt"); });

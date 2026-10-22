@@ -375,7 +375,7 @@ class NitroTrapWeight(Range):
     """How often Nitro Traps appear compared to other traps. Each one starts with "NITRO INCOMING! 3, 2, 1",
     in step with a TNT crate's own countdown and sound. Then a coin flip: a real Nitro crate appears about
     1.5 crates ahead of Crash in the direction he is running, or a Nitro falls onto the spot where he
-    stands (in 0.32 seconds). It only happens in levels that have Nitro crates (it borrows one of their
+    stands (in 0.31 seconds). It only happens in levels that have Nitro crates (it borrows one of their
     spawners) and never in gimmick or Crash 2 jet-board levels; until then it waits without holding up
     other traps."""
 
@@ -542,7 +542,8 @@ class CrashSkin(TextChoice):
 
     default_crash: the game's own Crash.
     playstation_1: the PlayStation 1 Crash skin (a folder or .pak named playstation_1, PS1 or PSX).
-    biker: the Biker Crash skin (a folder or .pak with "biker" in its name).
+    biker: the Biker Crash skin (a folder or .pak with "biker" in its name). That mod reuses Aku Aku's look
+    files for its jacket, so Aku Aku is invisible while wearing it.
     Any other name picks the skin folder or .pak by that name."""
 
     display_name = "Crash Skin"
