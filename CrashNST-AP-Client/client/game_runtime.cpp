@@ -995,19 +995,29 @@ namespace ingame
             {
                 const auto component = value<Address>(context);
                 const auto target = component ? value<Address>(component + 24) : 0;
+                bool blocked = false;
                 for (unsigned i = 0; target && i < trap_event_entity.size(); ++i)
-                    if (trap_event_entity[i].load() == target && trap_event_lines.fetch_add(1) < 160)
+                    if (trap_event_entity[i].load() == target)
                     {
-                        const auto meta = value<Address>(event + 16);
+                        const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                        // a Nitro's hop: V1.1.68's log showed each hop starts with these two reaching its
+                        // common_Crate_Nitro_Spawned, and that a trap Nitro's hops carry it "home" to the spawner it was
+                        // borrowed from (9000 away, a few thousand units per hop). A trap Nitro doesn't hop.
+                        blocked = name == "common_Crate_c.New_Graph_Event_1_id_uphse9ht" || name == "common_Crate_Nitro_Spawned.New_Graph_Event_1_id_h1ogxqqw";
+                        if (trap_event_lines.fetch_add(1) >= 160)
+                            break;
                         auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
                         if (graph.rfind("Scripts.Graph.", 0) == 0)
                             graph.erase(0, 14);
                         std::array<float, 3> at{};
                         read(target + 32, at);
                         std::cout << "Trap Nitro +" << GetTickCount64() - trap_event_since[i].load() << " ms (at " << static_cast<int>(at[0]) << ", "
-                                  << static_cast<int>(at[1]) << ", " << static_cast<int>(at[2]) << "): " << graph << " gets "
-                                  << string(value<Address>(meta + 16), 120) << "\n" << std::flush;
+                                  << static_cast<int>(at[1]) << ", " << static_cast<int>(at[2]) << "): " << graph << " gets " << name
+                                  << (blocked ? " (its hop: stopped)" : "") << "\n" << std::flush;
+                        break;
                     }
+                if (blocked)
+                    return 0;
                 // V1.1.66 logged the first of each kind; now only what reaches Crash's Aku Aku manager and Aku Aku
                 // crates and masks, in order (for /aku_give)
                 if (!event_research_done.load())
@@ -2428,6 +2438,34 @@ namespace ingame
                 return false;
             return at + size <= reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize;
         }
+        // a crate's physics body: the crate's physics component (+0x1423ff0, the one that copies the body's place onto
+        // the crate every frame, V1.1.65's watch) keeps it at +0x50. The game's own calls in that component move it:
+        // "set body position" (+0x15e3b0, called at +0x6f2727) and "set body velocities" (+0x572770, at +0x6f278c).
+        // V1.1.68: moving only the crate left its body (what is drawn and what kills) up where it appeared.
+        Address crate_physics(Address entity)
+        {
+            if (typed(entity + 0x1a8, 0x1423ff0))
+                return entity + 0x1a8;
+            for (const auto c : list(value<Address>(entity + 24), 64))
+                if (typed(c, 0x1423ff0))
+                    return c;
+            return 0;
+        }
+        bool move_crate_body(Address entity, const std::array<float, 3> &at)
+        {
+            static const bool verified =
+                code_matches(0x6f2720, std::array<unsigned char, 12>{0x48, 0x8b, 0xd0, 0x48, 0x8d, 0x4e, 0x50, 0xe8, 0x84, 0xbc, 0xa6, 0xff}) &&
+                code_matches(0x6f2780, std::array<unsigned char, 17>{0x4c, 0x8d, 0x43, 0x6c, 0x48, 0x8d, 0x4e, 0x50, 0x48, 0x8d, 0x50, 0x60, 0xe8, 0xdf,
+                                                                     0xff, 0xe7, 0xff});
+            const auto physics = live_crate(entity) ? crate_physics(entity) : 0;
+            if (!verified || !physics)
+                return false;
+            alignas(16) float place[4]{at[0], at[1], at[2], 0};
+            alignas(16) float still[4]{};
+            reinterpret_cast<void (*)(Address, const float *)>(base() + 0x15e3b0)(physics + 0x50, place);
+            reinterpret_cast<void (*)(Address, const float *, const float *)>(base() + 0x572770)(physics + 0x50, still, still);
+            return true;
+        }
         // the game's own "set position" for an entity (+0xc05a60, found by V1.1.65's watch): it stores the position,
         // marks the entity moved and tells its parts, so the physics body and the model follow
         void set_entity_position(Address entity, const std::array<float, 3> &at)
@@ -2436,6 +2474,11 @@ namespace ingame
                                                                                                0xec, 0xb0, 0x00, 0x00, 0x00, 0x48, 0x8b, 0xd9});
             if (verified && live_crate(entity))
                 reinterpret_cast<void (*)(Address, const float *)>(base() + 0xc05a60)(entity, at.data());
+            // and its physics body, which is what is drawn and what touches Crash
+            static bool told = false;
+            if (!move_crate_body(entity, at) && !told)
+                told = true, std::cout << "Nitro drop: can't move the crate's physics body (" << (crate_physics(entity) ? "the game's code differs" : "no physics part")
+                                       << ")\n" << std::flush;
         }
         void stop_nitro_drop(Shared &state, const char *why)
         {
@@ -2623,15 +2666,53 @@ namespace ingame
             return typed(c, 0x13bbbd0) && typed(meta, 0x1745d78) && string(value<Address>(meta + 16)) == "Scripts.Graph.common_Spawner_Template" &&
                    field_at(meta, "SpawnedEntity", 232, 8);
         }
+        // research: every setting of a script, one line per six (bytes as numbers, 12/16 byte ones as floats)
+        void log_graph_fields(Address c, const std::string &who)
+        {
+            const auto meta = value<Address>(c + 56);
+            const unsigned size = value<std::uint16_t>(meta + 90), count = value<unsigned>(meta + 24);
+            const auto fields = value<Address>(meta + 40);
+            std::ostringstream out;
+            out << who << ": " << size << " bytes, " << count << " settings:";
+            unsigned shown = 0;
+            for (unsigned i = 0; fields && count <= 512 && i < count; ++i)
+            {
+                const auto field = value<Address>(fields + i * 8);
+                const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                if (!bytes || offset < 0x40 || offset + bytes > size)
+                    continue;
+                out << (shown++ % 6 ? " " : "\n" + who + ":  ") << string(value<Address>(field + 48), 48) << "@0x" << std::hex << offset << std::dec << "=";
+                if (bytes == 1)
+                    out << unsigned(value<unsigned char>(c + offset));
+                else if (bytes == 4)
+                    out << value<int>(c + offset) << "/" << value<float>(c + offset);
+                else if (bytes == 8)
+                    out << "0x" << std::hex << value<std::uint64_t>(c + offset) << std::dec;
+                else
+                {
+                    std::array<float, 4> f{};
+                    read(c + offset, f);
+                    out << "(" << f[0] << "," << f[1] << "," << f[2] << ")";
+                }
+            }
+            std::cout << out.str() << "\n" << std::flush;
+        }
         void aku_give()
         {
             std::array<float, 3> crash{};
-            if (!crash_position(crash))
+            const auto actor = player();
+            if (!actor || !crash_position(crash))
             {
                 std::cout << "Aku give: Crash not found. Try it inside a level.\n" << std::flush;
                 return;
             }
+            // research: Crash's Aku Aku manager as it is now (compare with a mask that protects and one that doesn't)
+            for (const auto c : list(value<Address>(actor + 24), 128))
+                if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78) &&
+                    string(value<Address>(value<Address>(c + 56) + 16)) == "Scripts.Graph.Crash_AkuAkuManager")
+                    log_graph_fields(c, "Aku manager");
             unsigned crates = 0;
+            bool listed = false;
             std::string refusals;
             for (const auto owner : event_owners())
             {
@@ -2649,6 +2730,29 @@ namespace ingame
                     if (!typed(crate, 0x141d490) || !(value<unsigned>(crate + 56) & 4))
                         continue;
                     ++crates;
+                    // research: what an Aku Aku crate (and what placed it) is made of, to find what makes its mask
+                    if (!listed)
+                    {
+                        listed = true;
+                        for (const auto e : {owner, crate})
+                        {
+                            std::ostringstream out;
+                            out << "Aku give: " << string(value<Address>(e + 128)) << " (type +0x" << std::hex << (value<Address>(e) - base()) << ") has";
+                            for (const auto c : list(value<Address>(e + 24), 64))
+                            {
+                                const auto meta = value<Address>(c + 56);
+                                out << " +0x" << (value<Address>(c) - base());
+                                if (typed(meta, 0x1745d78))
+                                    out << "(" << string(value<Address>(meta + 16)) << ")";
+                            }
+                            std::cout << out.str() << std::dec << "\n" << std::flush;
+                            if (e == crate)
+                                for (const auto c : list(value<Address>(e + 24), 64))
+                                    if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78) &&
+                                        string(value<Address>(value<Address>(c + 56) + 16)) == "Scripts.Graph.common_Crate")
+                                        log_graph_fields(c, "Aku crate");
+                        }
+                    }
                     for (const auto c : list(value<Address>(crate + 24), 64))
                     {
                         if (!spawner_template(c))
