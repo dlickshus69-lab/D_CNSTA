@@ -10,6 +10,8 @@
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <memory>
+#include <mmsystem.h>
 
 namespace
 {
@@ -342,5 +344,43 @@ namespace ingame
     {
         std::lock_guard<std::mutex> guard(sound_mutex);
         return order;
+    }
+    namespace
+    {
+        std::mutex countdown_mutex;
+        std::shared_ptr<const std::vector<unsigned char>> countdown_wav, countdown_playing;
+        std::string countdown_name;
+        unsigned countdown_ms = 0;
+    }
+    void set_countdown_sound(std::vector<unsigned char> wav, const std::string &name)
+    {
+        std::lock_guard<std::mutex> guard(countdown_mutex);
+        countdown_ms = 0;
+        if (wav.size() > 44)
+        {
+            std::uint32_t rate = 0, data = 0;
+            std::uint16_t align = 0;
+            std::memcpy(&rate, &wav[24], 4), std::memcpy(&align, &wav[32], 2), std::memcpy(&data, &wav[40], 4);
+            countdown_ms = rate && align ? static_cast<unsigned>(1000ull * data / align / rate) : 0;
+        }
+        countdown_wav = wav.empty() ? nullptr : std::make_shared<const std::vector<unsigned char>>(std::move(wav));
+        countdown_name = countdown_wav ? name : std::string{};
+    }
+    bool play_countdown_sound(int index, unsigned step_ms)
+    {
+        std::lock_guard<std::mutex> guard(countdown_mutex);
+        if (!countdown_wav)
+            return false;
+        if (countdown_ms >= 2 * step_ms && index > 0)
+            return true; // still playing from 3
+        // PlaySound reads the buffer while it plays: it stays alive until the next one starts
+        countdown_playing = countdown_wav;
+        PlaySoundA(reinterpret_cast<LPCSTR>(countdown_playing->data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+        return true;
+    }
+    std::string countdown_sound_name()
+    {
+        std::lock_guard<std::mutex> guard(countdown_mutex);
+        return countdown_name.empty() ? std::string{} : countdown_name + " (" + std::to_string(countdown_ms) + " ms)";
     }
 }

@@ -20,4 +20,10 @@ namespace ingame
     void forget_game_sounds();
     // the names of the sounds used in this level, in the order first used
     std::vector<std::string> game_sound_names();
+    // the Nitro Trap countdown's sound read from the game's own sound banks (a WAV in memory; empty clears it)
+    void set_countdown_sound(std::vector<unsigned char> wav, const std::string &name);
+    // plays it for countdown number `index` (0 for 3, 1 for 2, 2 for 1), every `step_ms`: a sound as long as two
+    // numbers or more plays once, at 3; a short one at every number. False when there is none.
+    bool play_countdown_sound(int index, unsigned step_ms);
+    std::string countdown_sound_name();
 }

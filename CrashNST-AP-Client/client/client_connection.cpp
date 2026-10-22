@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
+#include <array>
+#include <map>
 #include "trap_rules.h"
 #include "game_sound.h"
 void ClientRuntime::queue_ap_packet(std::string raw)
@@ -483,12 +485,25 @@ void ClientRuntime::handle_commands()
             }
             else if (command == "/crash_tint")
             {
-                // /crash_tint red green blue amount (each 0..1), or off
+                // /crash_tint red green blue amount (each 0..1), a color name (blue, red, green, ...), or off
                 std::istringstream values(argument);
                 float red = 0, green = 0, blue = 0, amount = 0.6f;
                 const bool off = argument == "off" || argument == "0";
-                if (!off && !(values >> red >> green >> blue))
-                    print_console("Use /crash_tint red green blue [amount], each 0 to 1 (for example /crash_tint 0 0.4 1 0.6 for blue), or /crash_tint off.");
+                static const std::map<std::string, std::array<float, 3>> named{
+                    {"red", {1, 0.1f, 0.1f}}, {"green", {0.1f, 0.9f, 0.2f}}, {"blue", {0.1f, 0.4f, 1}}, {"yellow", {1, 0.9f, 0.1f}},
+                    {"purple", {0.6f, 0.2f, 1}}, {"pink", {1, 0.4f, 0.8f}}, {"orange", {1, 0.5f, 0.1f}}, {"black", {0.05f, 0.05f, 0.05f}},
+                    {"white", {1, 1, 1}}, {"cyan", {0.1f, 0.9f, 1}}, {"gold", {1, 0.75f, 0.2f}}};
+                std::string first;
+                std::istringstream(argument) >> first;
+                const auto name = named.find(first);
+                if (name != named.end())
+                {
+                    red = name->second[0], green = name->second[1], blue = name->second[2];
+                    values >> first; // skip the name; an amount may follow
+                }
+                if (!off && name == named.end() && !(values >> red >> green >> blue))
+                    print_console("Use /crash_tint blue (or red, green, yellow, purple, pink, orange, black, white, cyan, gold) [amount 0 to 1], "
+                                  "or /crash_tint red green blue [amount] with each 0 to 1, or /crash_tint off.");
                 else if (!box_markers)
                     print_console("Crash tint needs the in-game adapter. Load into a level first.");
                 else
@@ -524,6 +539,35 @@ void ClientRuntime::handle_commands()
                 const auto tnt = ingame::tnt_tick_sound();
                 print_console(names.empty() ? std::string("No game sounds seen in this level yet (or NST's FMOD isn't reachable: see \"Game sound:\" in the log).")
                                             : "Game sounds this level: " + list + (tnt.empty() ? "" : ". Nitro countdown uses: " + tnt));
+            }
+            else if (command == "/sound_find" || command == "/sound_dump" || command == "/nitro_sound")
+            {
+                // the game's own sound banks (its archives): /sound_find text [all] lists sounds, /sound_dump text saves
+                // an archive file to send, /nitro_sound name picks the Nitro countdown's sound
+                if (sound_job.valid())
+                    print_console("A sound search is still running; its results print when it ends.");
+                else if (argument.empty())
+                    print_console(command == "/sound_find" ? "Use /sound_find tnt (or any part of a sound's name), /sound_find tnt all to search every archive."
+                                  : command == "/sound_dump" ? "Use /sound_dump part of an archive file's name (from /sound_find)."
+                                                             : "Use /nitro_sound part of a sound's name (from /sound_find), for the Nitro countdown.");
+                else
+                {
+                    auto text = argument;
+                    bool everywhere = false;
+                    if (text.size() > 4 && text.compare(text.size() - 4, 4, " all") == 0)
+                        text.resize(text.size() - 4), everywhere = true;
+                    if (command == "/sound_dump")
+                        start_sound_job([text] {
+                            const auto file = ingame::dump_archive_member(text, standalone::state_directory() / "dumps");
+                            return std::vector<std::string>{file.empty() ? "Sound dump: no archive file matching \"" + text + "\""
+                                                                         : "Sound dump: saved " + file.string() + " (send this file)"};
+                        });
+                    else
+                        start_sound_job([text, everywhere, pick = command == "/nitro_sound"] {
+                            return ingame::sound_search_report(text, pick || everywhere, pick, pick ? text : std::string{});
+                        });
+                    print_console("Searching the game's sound banks in the background (a few seconds, longer with \"all\")...");
+                }
             }
             else if (command == "/sound_play")
                 print_console(argument.empty() ? std::string("Use /sound_play part of a name from /sounds.")

@@ -6,6 +6,12 @@
 #include <iostream>
 #include "crate_catalogue.h"
 static_assert(std::size(box_specs) <= ingame::max_boxes, "Crate catalogue exceeds bridge capacity");
+void ClientRuntime::start_sound_job(std::function<std::vector<std::string>()> job)
+{
+    // only one at a time: a running search is never replaced (a std::async future waits for its task when replaced)
+    if (!sound_job.valid())
+        sound_job = std::async(std::launch::async, std::move(job));
+}
 void ClientRuntime::print_console(const std::string &text, bool popup)
 {
     std::cout << text << std::endl;

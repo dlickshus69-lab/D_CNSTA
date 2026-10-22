@@ -161,6 +161,11 @@ class ClientRuntime
     std::set<std::int64_t> submitted_checks;
     // Secret Exit Checks: source levels whose secret exit was already announced in the console
     std::set<std::string> announced_secret_exits;
+    // the game's sound banks are searched in the background (the TNT countdown sound at startup, /sound_find):
+    // the lines to print when the search ends
+    std::future<std::vector<std::string>> sound_job;
+    bool sound_search_started = false;
+    void start_sound_job(std::function<std::vector<std::string>()> job);
     bool goal_sent = false;
     std::string previous_gameplay_state;
     std::map<char, std::string> previous_goal_progress;

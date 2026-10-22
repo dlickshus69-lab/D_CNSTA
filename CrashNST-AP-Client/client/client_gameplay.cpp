@@ -1,5 +1,6 @@
 #include "client_runtime.h"
 #include "trap_rules.h"
+#include "game_archive.h"
 #include <algorithm>
 #include <iostream>
 using save_probe::level_key;
@@ -500,6 +501,23 @@ void ClientRuntime::update_ownership(ClientTick &tick)
         catch (const std::exception &)
         {
             last_pause_tick = 0;
+        }
+    // the TNT crate's countdown sound for the Nitro Trap, from the game's own sound banks: searched once, in the
+    // background, when the in-game part is up; results print when the search ends
+    if (box_markers && !sound_search_started)
+    {
+        sound_search_started = true;
+        start_sound_job([] { return ingame::sound_search_report("tnt", false, true); });
+    }
+    if (sound_job.valid() && sound_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        try
+        {
+            for (const auto &line : sound_job.get())
+                print_console(line, false);
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Sound search: " << e.what() << std::endl;
         }
     if (box_markers)
         if (const auto note = box_markers->take_ice_note(); !note.empty())

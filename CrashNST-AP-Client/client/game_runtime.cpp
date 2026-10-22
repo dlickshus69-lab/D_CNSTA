@@ -2541,12 +2541,12 @@ namespace ingame
                 finish_nitro_spawn("nothing spawned within 2 seconds");
         }
         // Nitro Trap, falling: a countdown ("NITRO INCOMING 3, 2, 1" on screen, a tick each second like a TNT crate),
-        // then a Nitro appears high above Crash and drops onto the spot where he stands in 0.35 seconds, speeding up like
+        // then a Nitro appears high above Crash and drops onto the spot where he stands in 0.30 seconds, speeding up like
         // a dropped crate, so moving away dodges it. The game creates the crate up there (a crate the game creates itself
         // works fully) and it is moved every frame with the game's own "set position", the one scripts use. That marks
         // it moved, so the game carries the move over to the crate's physics body and everything it is drawn from.
         // (Writing its position copies directly didn't: every frame the physics body put them back, V1.1.65's watch.)
-        static constexpr std::uint64_t drop_countdown_ms = nitro_countdown_ms, drop_step_ms = nitro_countdown_step_ms, drop_fall_ms = 350;
+        static constexpr std::uint64_t drop_countdown_ms = nitro_countdown_ms, drop_step_ms = nitro_countdown_step_ms, drop_fall_ms = 300;
         // ahead of Crash needs him moving on the ground; after the countdown he gets this long to start, then it falls
         static constexpr std::uint64_t ahead_wait_ms = 1500;
         // the falling Nitro borrows a spawner at least this far away when there is one (see nitro_spawner_near)
@@ -2596,6 +2596,16 @@ namespace ingame
         void countdown_tick(int index)
         {
             static std::string announced;
+            // the TNT countdown read from the game's own sound banks (found at startup, /sound_find)
+            if (play_countdown_sound(index, nitro_countdown_step_ms))
+            {
+                if (const auto name = countdown_sound_name(); announced != name)
+                {
+                    announced = name;
+                    std::cout << "Nitro Trap: the countdown plays the game's TNT sound " << name << " from its sound banks\n" << std::flush;
+                }
+                return;
+            }
             const auto name = tnt_tick_sound();
             if (!name.empty())
             {
@@ -2886,7 +2896,7 @@ namespace ingame
                 d.stage = NitroDropTrap::Falling, d.fall_start = now;
                 return;
             }
-            // falling: speeding up like a dropped crate, landing 0.35 seconds later
+            // falling: speeding up like a dropped crate, landing 0.30 seconds later
             const float q = std::min(1.0f, static_cast<float>(now - d.fall_start) / drop_fall_ms);
             set_entity_position(d.entity, std::array<float, 3>{d.high[0], d.high[1], d.high[2] - d.drop * q * q});
             if (q < 1)
@@ -5800,6 +5810,72 @@ namespace ingame
         }
         return result;
     }
+    // Crash's render model: his model component (+176, type +0x150df30, not a crate's) keeps it at +40 (V1.2.1 probe)
+    Address crash_render_model(Address actor)
+    {
+        const auto component = actor ? value<Address>(actor + 176) : 0;
+        const auto model = component ? value<Address>(component + 40) : 0;
+        return typed(model, 0x1676cb8) ? model : 0;
+    }
+    // every name an object holds within its first 0x100 bytes (pointers to readable text)
+    std::string names_in(Address object)
+    {
+        std::string result;
+        for (unsigned off = 0; off < 0x100; off += 8)
+        {
+            const auto p = value<Address>(object + off);
+            if (p < 0x10000 || p > 0x7ffffffeffffULL || !readable(p, 4))
+                continue;
+            const auto text = string(p, 64);
+            if (text.size() >= 3 && std::all_of(text.begin(), text.end(), [](unsigned char c) { return c >= 32 && c < 127; }))
+                result += " " + hex(off) + "=\"" + text + "\"";
+        }
+        return result;
+    }
+    // /crash_probe part two: the six "Crash_mesh" pieces under his render model (+0xc0, then +0xd0..+0xf8), each with its
+    // first words and every object it points to (and those objects' own pointers) that holds a name, to tell which
+    // piece is his fur, pants, shoes, laces or mohawk and where each piece's color settings are
+    void crash_parts_probe(Address model)
+    {
+        const auto parts = value<Address>(model + 0xc0);
+        if (!readable(parts, 0x100))
+            return;
+        for (unsigned i = 0; i < 6; ++i)
+        {
+            const auto piece = value<Address>(parts + 0xd0 + i * 8);
+            if (!readable(piece, 0x100))
+                continue;
+            std::ostringstream words;
+            for (unsigned off = 0; off < 0x100; off += 8)
+                words << " " << std::hex << value<std::uint64_t>(piece + off);
+            std::cout << "Crash part " << i << ": " << describe_object(piece) << ";" << names_in(piece) << "\nCrash part " << i << " words:" << words.str()
+                      << std::dec << "\n";
+            std::set<Address> seen{piece};
+            for (unsigned off = 0; off < 0x100; off += 8)
+            {
+                const auto p = value<Address>(piece + off);
+                if (p < 0x10000 || p > 0x7ffffffeffffULL || !readable(p, 0x100) || !seen.insert(p).second)
+                    continue;
+                const auto t = value<Address>(p);
+                if (t < base() || t >= module_end())
+                    continue;
+                std::cout << "Crash part " << i << " " << hex(off) << ": type " << hex(static_cast<unsigned>(t - base())) << names_in(p) << "\n";
+                for (unsigned off2 = 0; off2 < 0x100; off2 += 8)
+                {
+                    const auto q = value<Address>(p + off2);
+                    if (q < 0x10000 || q > 0x7ffffffeffffULL || !readable(q, 0x100) || !seen.insert(q).second)
+                        continue;
+                    const auto t2 = value<Address>(q);
+                    if (t2 < base() || t2 >= module_end())
+                        continue;
+                    const auto names = names_in(q);
+                    if (!names.empty())
+                        std::cout << "Crash part " << i << " " << hex(off) << hex(off2) << ": type " << hex(static_cast<unsigned>(t2 - base())) << names << "\n";
+                }
+            }
+        }
+        std::cout << std::flush;
+    }
     // Crash's colors, research. /crash_probe: from Crash's model component (+176) and render model, follow pointers to
     // game objects (5 levels, at most 500 objects) and log each with the names it holds, to find his model's parts
     // (fur, pants, shoes, laces, the mohawk) and what color settings each has. Read-only.
@@ -5811,7 +5887,7 @@ namespace ingame
             std::cout << "Crash probe: Crash not found. Try it inside a level.\n" << std::flush;
             return;
         }
-        const auto component = value<Address>(actor + 176), model = crate_model(actor);
+        const auto component = value<Address>(actor + 176), model = crash_render_model(actor);
         std::cout << "Crash probe: Crash " << describe_object(actor) << "; +176 " << describe_object(component) << "; render model "
                   << (model ? describe_object(model) : std::string("not found")) << "\n" << std::flush;
         struct Node
@@ -5853,6 +5929,8 @@ namespace ingame
             }
         }
         std::cout << "Crash probe: " << shown << " objects listed\n" << std::flush;
+        if (model)
+            crash_parts_probe(model);
     }
     // /crash_tint: the crate markers' tint (a CFxTintBundle) on Crash's whole model, blending his colors toward one.
     // Put back on his new model after a respawn or a new level; removed with amount 0.
@@ -5867,7 +5945,7 @@ namespace ingame
         const std::array<float, 4> want{state.crash_tint[0], state.crash_tint[1], state.crash_tint[2], state.crash_tint[3]};
         const bool on = want[3] > 0;
         const auto actor = player();
-        const auto model = actor ? crate_model(actor) : 0;
+        const auto model = crash_render_model(actor);
         if (t.bundle && (!on || model != t.model || resolve(t.handle) != t.model))
         {
             if (resolve(t.handle) == t.model && typed(t.model, 0x1676cb8))
