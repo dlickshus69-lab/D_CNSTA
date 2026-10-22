@@ -457,6 +457,16 @@ void ClientRuntime::handle_commands()
                                : aku_lock_override == 0 ? "off (test): Aku Aku crates work normally. /aku_lock auto goes back to the seed's setting."
                                                         : "follows the seed (Aku Aku Sanity: no masks until you find the Aku Aku item)."));
             }
+            else if (command == "/aku_give")
+            {
+                if (box_markers)
+                {
+                    box_markers->request_aku_give();
+                    print_console("Aku give test: an Aku Aku crate in this level makes its mask right at Crash. Not sent to AP.");
+                }
+                else
+                    print_console("Aku give needs the in-game adapter. Load into a level first.");
+            }
             else if (command == "/nitro_drop")
             {
                 if (box_markers)

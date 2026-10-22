@@ -68,6 +68,7 @@ public:
     void tint_opacity(float opacity);
     void slow_tilt(float tilt);
     void aku_lock(bool on);
+    void request_aku_give();
     float tuned_slow_tilt();
     bool toggle(const std::string &target, const std::string &value);
     void stop(bool handover = false);

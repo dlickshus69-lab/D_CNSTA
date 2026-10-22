@@ -597,6 +597,12 @@ void BoxMarkers::hub_distance(const std::array<unsigned, 3> &distances)
     ++shared_->revision;
     unlock();
 }
+void BoxMarkers::request_aku_give()
+{
+    lock();
+    ++shared_->aku_give_request;
+    unlock();
+}
 void BoxMarkers::aku_lock(bool on)
 {
     lock();

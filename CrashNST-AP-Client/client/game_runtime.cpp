@@ -554,6 +554,9 @@ namespace ingame
         {
             static Address forced = 0;
             static Address announced = 0;
+            // the game saves game variables at checkpoints and puts them back when Crash respawns, so once the client
+            // has turned the switch on, a respawn can turn it on again after the lock is lifted: it is turned off then too
+            static bool ever = false;
             const auto variable = no_aku_variable.load();
             if (!variable)
                 return;
@@ -574,13 +577,14 @@ namespace ingame
                 if (forced != variable)
                     std::cout << "Aku Aku lock: Aku Aku masks are off (the game's NoAkuAkuMasks switch is on)" << (getter(variable) ? "" : ", but the game refused it")
                               << "\n" << std::flush;
-                forced = variable;
+                forced = variable, ever = true;
             }
-            else if (!locked && forced == variable && on)
+            else if (!locked && on && (forced == variable || ever))
             {
                 setter(variable, 0);
+                std::cout << "Aku Aku lock: Aku Aku masks are back on" << (forced == variable ? "" : " (a respawn had put the switch back)") << "\n"
+                          << std::flush;
                 forced = 0;
-                std::cout << "Aku Aku lock: Aku Aku masks are back on\n" << std::flush;
             }
         }
         // Crash can move: in control, not in a level intro, a cutscene, a death or a respawn. Traps wait for it and
@@ -923,6 +927,10 @@ namespace ingame
         // every event an Aku Aku crate sends or gets. Only reads; every event still goes through unchanged.
         std::atomic<Address> event_crash{0};
         std::atomic_bool event_research_done{false};
+        // research: every event a trap Nitro gets, with the time since it appeared, to find what sends it "home"
+        std::array<std::atomic<Address>, 4> trap_event_entity{};
+        std::array<std::atomic<std::uint64_t>, 4> trap_event_since{};
+        std::atomic_uint trap_event_lines{0}, trap_event_next{0};
         std::mutex event_mutex;
         std::set<std::string> events_seen;
         unsigned event_lines = 0, aku_event_lines = 0;
@@ -947,9 +955,9 @@ namespace ingame
             if (graph.rfind("Scripts.Graph.", 0) == 0)
                 graph.erase(0, 14);
             const auto sender = event_object(value<Address>(event + 32));
-            const bool aku = who.find("Aku") != std::string::npos || sender.find("Aku") != std::string::npos;
+            const bool aku = who.find("Aku") != std::string::npos || sender.find("Aku") != std::string::npos || graph.find("AkuAku") != std::string::npos;
             std::lock_guard lock(event_mutex);
-            if (aku ? aku_event_lines >= 60 : (event_lines >= 250 || !events_seen.insert(who + "|" + graph + "|" + name).second))
+            if (aku ? aku_event_lines >= 150 : (event_lines >= 250 || !events_seen.insert(who + "|" + graph + "|" + name).second))
                 return;
             ++(aku ? aku_event_lines : event_lines);
             std::ostringstream out;
@@ -977,25 +985,44 @@ namespace ingame
                 }
             }
             std::cout << out.str() << "\n" << std::flush;
-            if (event_lines >= 250 && aku_event_lines >= 60)
+            if (aku_event_lines >= 150)
                 event_research_done = true;
         }
         Address event_sent(Address event, Address context)
         {
             const auto crash = event_crash.load();
-            if (crash && event && context && !event_research_done.load())
+            if (crash && event && context)
             {
                 const auto component = value<Address>(context);
                 const auto target = component ? value<Address>(component + 24) : 0;
-                if (target == crash)
-                    log_event(event, component, "Crash");
-                else if (target && typed(target, 0x141d490))
+                for (unsigned i = 0; target && i < trap_event_entity.size(); ++i)
+                    if (trap_event_entity[i].load() == target && trap_event_lines.fetch_add(1) < 160)
+                    {
+                        const auto meta = value<Address>(event + 16);
+                        auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
+                        if (graph.rfind("Scripts.Graph.", 0) == 0)
+                            graph.erase(0, 14);
+                        std::array<float, 3> at{};
+                        read(target + 32, at);
+                        std::cout << "Trap Nitro +" << GetTickCount64() - trap_event_since[i].load() << " ms (at " << static_cast<int>(at[0]) << ", "
+                                  << static_cast<int>(at[1]) << ", " << static_cast<int>(at[2]) << "): " << graph << " gets "
+                                  << string(value<Address>(meta + 16), 120) << "\n" << std::flush;
+                    }
+                // V1.1.66 logged the first of each kind; now only what reaches Crash's Aku Aku manager and Aku Aku
+                // crates and masks, in order (for /aku_give)
+                if (!event_research_done.load())
                 {
-                    const auto name = string(value<Address>(target + 128), 48);
-                    if (name.rfind("Crate_Nitro", 0) == 0)
-                        log_event(event, component, "a Nitro (" + name + ")");
-                    else if (name.find("Aku") != std::string::npos)
-                        log_event(event, component, "an Aku Aku crate (" + name + ")");
+                    if (target == crash)
+                    {
+                        if (string(value<Address>(value<Address>(component + 56) + 16), 64) == "Scripts.Graph.Crash_AkuAkuManager")
+                            log_event(event, component, "an Aku Aku");
+                    }
+                    else if (target && typed(target, 0x141d490))
+                    {
+                        const auto name = string(value<Address>(target + 128), 48);
+                        if (name.find("Aku") != std::string::npos)
+                            log_event(event, component, "an Aku Aku (" + name + ")");
+                    }
                 }
             }
             return reinterpret_cast<Address (*)(Address, Address)>(event_hook.original)(event, context);
@@ -2218,9 +2245,12 @@ namespace ingame
         };
         // the ready Nitro spawner closest to where the new Nitro goes. The new crate goes with that spawner's part of the
         // level, which stays loaded while Crash is around; one borrowed from the far end of the level could vanish early.
-        NitroSpawner nitro_spawner_near(const std::array<float, 3> &to)
+        // With `away`, the closest one at least that far from the spot, if there is one: a crate made by a borrowed
+        // spawner sooner or later goes "home" to it, and from a spawner right next to the spot it lands on that
+        // spawner's own Nitro in plain sight (V1.1.66: every falling Nitro near the start of Snow Go did).
+        NitroSpawner nitro_spawner_near(const std::array<float, 3> &to, float away = 0)
         {
-            NitroSpawner best;
+            NitroSpawner best, far;
             for (const auto owner : event_owners())
             {
                 const auto name = string(value<Address>(owner + 128));
@@ -2235,9 +2265,11 @@ namespace ingame
                     const float d = std::hypot(at[0] - to[0], at[1] - to[1]);
                     if (m && (!best.component || d < best.distance))
                         best = {c, owner, m, d, name};
+                    if (m && d >= away && (!far.component || d < far.distance))
+                        far = {c, owner, m, d, name};
                 }
             }
-            return best;
+            return away > 0 && far.component ? far : best;
         }
         struct NitroSpawn
         {
@@ -2277,7 +2309,7 @@ namespace ingame
         }
         void nitro_spawn_followup();
         // starts a spawn (ahead of Crash, or at `forced`); false with a reason when it cannot right now
-        bool nitro_spawn(std::string &why, const std::array<float, 3> *forced = nullptr)
+        bool nitro_spawn(std::string &why, const std::array<float, 3> *forced = nullptr, float away = 0)
         {
             if (nitro_spawn_state.component)
                 return why = "one is still spawning", false;
@@ -2290,7 +2322,7 @@ namespace ingame
                 spot = *forced;
             else if (!ahead_spot(spot))
                 return why = "no spot ahead yet: Crash needs to be running on the ground", false;
-            const auto spawner = nitro_spawner_near(spot);
+            const auto spawner = nitro_spawner_near(spot, away);
             if (!spawner.component)
                 return why = "no Nitro crates in this level", false;
             auto &s = nitro_spawn_state;
@@ -2345,6 +2377,8 @@ namespace ingame
         // it moved, so the game carries the move over to the crate's physics body and everything it is drawn from.
         // (Writing its position copies directly didn't: every frame the physics body put them back, V1.1.65's watch.)
         static constexpr std::uint64_t drop_countdown_ms = 3000, drop_fall_ms = 700;
+        // the falling Nitro borrows a spawner at least this far away when there is one (see nitro_spawner_near)
+        static constexpr float drop_spawner_away = 1500;
         static constexpr float drop_height = 420;
         struct NitroDropTrap
         {
@@ -2441,6 +2475,8 @@ namespace ingame
                 trap_nitros.erase(trap_nitros.begin());
             TrapNitroWatch w;
             w.entity = entity, w.components = value<Address>(entity + 24), w.level = level, w.spot = at, w.since = GetTickCount64();
+            const auto slot = trap_event_next.fetch_add(1) % trap_event_entity.size();
+            trap_event_since[slot] = w.since, trap_event_entity[slot] = entity;
             if (home)
                 w.home = *home, w.has_home = true;
             trap_nitros.push_back(std::move(w));
@@ -2531,7 +2567,7 @@ namespace ingame
                 d.spot = drop_spot();
                 const std::array<float, 3> high{d.spot[0], d.spot[1], d.spot[2] + drop_height};
                 std::string why;
-                if (!nitro_spawn(why, &high))
+                if (!nitro_spawn(why, &high, drop_spawner_away))
                 {
                     stop_nitro_drop(state, ("no Nitro: " + why).c_str());
                     return;
@@ -2577,6 +2613,74 @@ namespace ingame
             std::cout << "Nitro drop: landed (the game has it at " << whole(e[0]) << ", " << whole(e[1]) << ", " << whole(e[2]) << ")\n" << std::flush;
             d = {};
             state.nitro_countdown_end = 0;
+        }
+        // Aku Aku filler research (/aku_give): a live Aku Aku crate's own content spawner (the one that makes its mask
+        // when it breaks) makes a mask right at Crash. The crate's position points at Crash only for the spawn call,
+        // and its spawner is reset afterwards, so the crate still gives its own mask when it is broken.
+        bool spawner_template(Address c)
+        {
+            const auto meta = value<Address>(c + 56);
+            return typed(c, 0x13bbbd0) && typed(meta, 0x1745d78) && string(value<Address>(meta + 16)) == "Scripts.Graph.common_Spawner_Template" &&
+                   field_at(meta, "SpawnedEntity", 232, 8);
+        }
+        void aku_give()
+        {
+            std::array<float, 3> crash{};
+            if (!crash_position(crash))
+            {
+                std::cout << "Aku give: Crash not found. Try it inside a level.\n" << std::flush;
+                return;
+            }
+            unsigned crates = 0;
+            std::string refusals;
+            for (const auto owner : event_owners())
+            {
+                const auto name = string(value<Address>(owner + 128));
+                if (name.find("AkuAku") == std::string::npos)
+                    continue;
+                // the owner is either the crate or what places it (whose spawner holds the crate)
+                std::vector<Address> candidates{owner};
+                for (const auto c : list(value<Address>(owner + 24), 64))
+                    if (spawner_template(c))
+                        if (const auto spawned = resolve(value<Address>(c + 232)); spawned && spawned != owner)
+                            candidates.push_back(spawned);
+                for (const auto crate : candidates)
+                {
+                    if (!typed(crate, 0x141d490) || !(value<unsigned>(crate + 56) & 4))
+                        continue;
+                    ++crates;
+                    for (const auto c : list(value<Address>(crate + 24), 64))
+                    {
+                        if (!spawner_template(c))
+                            continue;
+                        const char *why = nullptr;
+                        const auto method = spawner_method(c, crate, false, &why);
+                        if (!method)
+                        {
+                            if (why && refusals.size() < 200)
+                                refusals += std::string(" ") + why + ";";
+                            continue;
+                        }
+                        std::array<float, 3> old{};
+                        read(crate + 32, old);
+                        const auto flags = value<std::array<unsigned char, 4>>(c + 66);
+                        write(crate + 32, std::array<float, 3>{crash[0], crash[1], crash[2] + 60});
+                        reinterpret_cast<void (*)(Address, Address, unsigned, Address)>(base() + 0xc988c0)(method, c, 0, 0);
+                        write(crate + 32, old);
+                        const auto mask = resolve(value<Address>(c + 232));
+                        std::array<float, 3> at{};
+                        read(mask + 32, at);
+                        std::cout << "Aku give: " << string(value<Address>(crate + 128)) << " (" << static_cast<int>(std::hypot(old[0] - crash[0], old[1] - crash[1]))
+                                  << " from Crash) made " << (mask ? string(value<Address>(mask + 128)) + " at " + triple(at) : std::string("nothing"))
+                                  << "\n" << std::flush;
+                        write(c + 232, Address{0});
+                        write(c + 66, flags);
+                        return;
+                    }
+                }
+            }
+            std::cout << "Aku give: no Aku Aku crate with its mask still inside here (" << crates << " Aku Aku crates" << (refusals.empty() ? "" : ":" + refusals)
+                      << ")\n" << std::flush;
         }
         // requests from /nitro_spawn and the Nitro Trap; a request waits up to 5 seconds for a spot
         void update_nitro_trap(Shared &state, const std::string &level)
@@ -5387,6 +5491,11 @@ namespace ingame
             nitro_probe();
         }
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
+        if (state.aku_give_request != state.aku_give_ack)
+        {
+            state.aku_give_ack = state.aku_give_request;
+            aku_give();
+        }
         if (!level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))).empty())
             update_aku_lock(state.aku_lock != 0);
         update_ice_watch(state.ice_watch != 0);
