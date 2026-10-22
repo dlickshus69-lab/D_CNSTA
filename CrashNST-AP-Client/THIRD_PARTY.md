@@ -9,6 +9,7 @@ These files are for developers and do not need to be installed to play.
 The standalone AP DLL statically links APCpp, its dependencies, liblzma and the MinGW runtime.
 It uses Windows' D3D11, DXGI, shader compiler, DirectInput and GDI APIs.
 It reads the Zoinks bitmap font from the installed game's permanent.pak, and falls back to GDI for missing glyphs/assets.
+It reads the TNT crate's sound from the installed game's archives and decodes it in memory; no game files are included.
 
 | Component | Source | License |
 | --- | --- | --- |
@@ -22,3 +23,5 @@ It reads the Zoinks bitmap font from the installed game's permanent.pak, and fal
 | p256-m | Mbed TLS `3rdparty/p256-m` , copyright The Mbed TLS Contributors | Apache 2.0 alternative |
 | GCC libraries | MSYS2 MinGW runtime | GPL 3 with GCC Runtime Library Exception |
 | winpthreads | MSYS2 MinGW runtime | MIT/BSD notices in COPYING |
+| stb_vorbis 1.22 | https://github.com/nothings/stb , Sean Barrett | MIT or public domain (`licenses/stb_vorbis.txt`) |
+| FMOD Vorbis setup headers | vgmstream `src/coding/libs/vorbis_codebooks_fsb.h` (extracted by python-fsb5) | vgmstream license (`licenses/vgmstream.txt`) |

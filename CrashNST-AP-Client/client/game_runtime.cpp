@@ -2546,7 +2546,7 @@ namespace ingame
         // works fully) and it is moved every frame with the game's own "set position", the one scripts use. That marks
         // it moved, so the game carries the move over to the crate's physics body and everything it is drawn from.
         // (Writing its position copies directly didn't: every frame the physics body put them back, V1.1.65's watch.)
-        static constexpr std::uint64_t drop_countdown_ms = nitro_countdown_ms, drop_step_ms = nitro_countdown_step_ms, drop_fall_ms = 300;
+        static constexpr std::uint64_t drop_countdown_ms = nitro_countdown_ms, drop_step_ms = nitro_countdown_step_ms, drop_fall_ms = 320;
         // ahead of Crash needs him moving on the ground; after the countdown he gets this long to start, then it falls
         static constexpr std::uint64_t ahead_wait_ms = 1500;
         // the falling Nitro borrows a spawner at least this far away when there is one (see nitro_spawner_near)

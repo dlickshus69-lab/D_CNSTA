@@ -572,7 +572,7 @@ void ClientRuntime::handle_commands()
                         });
                     else
                         start_sound_job([text, everywhere, pick = command == "/nitro_sound"] {
-                            return ingame::sound_search_report(text, pick || everywhere, pick, pick ? text : std::string{},
+                            return ingame::sound_search_report(text, everywhere, pick, pick ? text : std::string{},
                                                                pick ? standalone::state_directory() / "tnt_sound.txt" : std::filesystem::path{});
                         });
                     print_console("Searching the game's sound banks in the background (a few seconds, longer with \"all\")...");

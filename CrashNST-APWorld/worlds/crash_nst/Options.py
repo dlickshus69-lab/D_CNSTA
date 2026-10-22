@@ -370,11 +370,12 @@ class DarknessTrapWeight(Range):
 
 
 class NitroTrapWeight(Range):
-    """How often Nitro Traps appear compared to other traps. Each one is either a real Nitro crate that
-    appears about 1.5 crates ahead of Crash in the direction he is running, or (picked at random) a
-    "NITRO INCOMING 3, 2, 1" countdown, after which a Nitro falls onto the spot where he stands. It only
-    happens in levels that have Nitro crates (it borrows one of their spawners) and never in gimmick or
-    Crash 2 jet-board levels; until then it waits without holding up other traps."""
+    """How often Nitro Traps appear compared to other traps. Each one starts with "NITRO INCOMING! 3, 2, 1",
+    in step with a TNT crate's own countdown and sound. Then a coin flip: a real Nitro crate appears about
+    1.5 crates ahead of Crash in the direction he is running, or a Nitro falls onto the spot where he
+    stands (in 0.32 seconds). It only happens in levels that have Nitro crates (it borrows one of their
+    spawners) and never in gimmick or Crash 2 jet-board levels; until then it waits without holding up
+    other traps."""
 
     display_name = "Nitro Trap Weight"
     range_start = 0
