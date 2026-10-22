@@ -237,7 +237,8 @@ class SpinPlacement(Choice):
     """Where Spin goes when Ability Shuffle is shuffle_spin.
 
     anywhere: any check logic says you can reach without Spin (with relaxed Ability Logic that is most
-    level clears, crystals and boxes).
+    level clears, crystals and boxes). Some seeds give it in your first checks, others leave you jumping
+    for a long while. In a multiworld, progression_balancing pulls it earlier; 0 lets it land anywhere.
     early_to_mid: never in your starting levels. It goes on a random check you can reach without Spin
     (a gimmick stage, so a hog, polar bear, jetpack, vehicle or scuba level) behind unlocks you find
     along the way (two or more when the seed allows), so it usually turns up a few rounds of unlocks in. Logic is the
@@ -275,7 +276,8 @@ class AbilityLogic(Choice):
     can be jumped on or hit from below), so abilities can be on almost any of those. Bosses still need
     Spin, and gems and relics keep the cautious needs.
     Either way, levels that can't be cleared by jumping alone need their move for everything past the
-    obstacle: Native Fortress needs Spin, Bee-Having needs Slide.
+    obstacle: Native Fortress needs Spin; Crash Crush and Bee-Having need Slide; Sewer or Later needs Spin
+    and Crouch Jump; Un-Bearable needs Body Slam and Slide; The Eel Deal's bonus round needs Spin.
     Gimmick stages need no moves either way.
     """
 

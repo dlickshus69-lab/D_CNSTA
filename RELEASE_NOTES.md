@@ -1,8 +1,11 @@
 ## What's new
 
-- **Popups stay longer, and F2 brings them back.** Each popup (an item you found or received, a trap, ...) now stays 7 seconds instead of 3.5. Hold **F2** to see the latest 12 again, newest at the bottom.
+- **More levels need their move (Ability Shuffle, new seeds).** Crash Crush needs Slide (the electric gates), Sewer or Later needs Spin and Crouch Jump (the crate walls and low pipes), Un-Bearable needs Body Slam and Slide, and The Eel Deal's bonus round needs Spin. Until you find the move, the level shows as not available yet, so you come back later instead of needing Crashsanity's vanilla controls.
+- With `spin_placement: anywhere`, moves really can land anywhere: in a test of 24 seeds with these settings, Spin was in the first checks you can do in about 4 of 10 seeds and took anywhere from 50 to 700 checks of jumping in the rest. Every seed was beatable with every check in logic.
 
 ## Recent builds
+
+- **V1.2.19:** popups stay 7 seconds, and holding F2 shows the latest 12 again.
 
 - **V1.2.18:** Ability Shuffle logic: Native Fortress needs Spin and Bee-Having needs Slide (new seeds). Spin Placement `early` removed (older YAMLs get `early_to_mid`).
 - **V1.2.17:** title screen and hubs show Available checks (green when you can get any) and Available levels.

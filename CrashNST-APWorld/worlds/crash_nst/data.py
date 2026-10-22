@@ -385,8 +385,15 @@ SECRET_EXIT_MOVES = {"L217": ("Body Slam",)}
 # levels that can't be cleared by jumping alone (Ability Shuffle): the move the way through needs, for the clear, the
 # crystal and the boxes, in both Ability Logic modes. From play reports; more are added as they turn up.
 CLEAR_MOVES = {
-    "L108": ("Spin",),   # Native Fortress: the spinning log wheels
-    "L220": ("Slide",),  # Bee-Having: slide under the electric fence, slide-jump the long gaps
+    "L108": ("Spin",),                  # Native Fortress: the spinning log wheels
+    "L209": ("Slide",),                 # Crash Crush: slide under the electric gates
+    "L212": ("Spin", "Crouch Jump"),    # Sewer or Later: break the crate walls, crawl under the low pipes
+    "L215": ("Body Slam", "Slide"),     # Un-Bearable: the on-foot parts
+    "L220": ("Slide",),                 # Bee-Having: slide under the electric fence, slide-jump the long gaps
+}
+# boxes in a level's bonus round that need a move the rest of the level doesn't
+BONUS_MOVES = {
+    "L210": ("Spin",),                  # The Eel Deal's bonus round (Spin or Slide; logic expects Spin)
 }
 # first chamber AFTER each boss's award
 C3_POWER_STAGES = (6, 11, 16, 21)
@@ -592,11 +599,14 @@ def move_requirements(level, event, spin_shuffled, jump_only_levels, relaxed=Fal
         override = MOVE_OVERRIDES.get((level.key, "box:"))
     if override is not None:
         return tuple(override)
-    # hog, polar bear, jetpack and Crash 3 vehicle stages keep vanilla controls
-    if level.key in GIMMICK_LEVELS:
-        return ()
-    # a level that can't be cleared by jumping alone needs its move for everything past the obstacle
+    # a level that can't be cleared by jumping alone needs its move for everything past the obstacle, and some bonus
+    # rounds need one of their own
     way = CLEAR_MOVES.get(level.key, ())
+    if event.startswith("box:") and "@bonus:" in event:
+        way = tuple(dict.fromkeys((*way, *BONUS_MOVES.get(level.key, ()))))
+    # hog, polar bear, jetpack and Crash 3 vehicle stages keep vanilla controls (except their on-foot parts above)
+    if level.key in GIMMICK_LEVELS:
+        return way
     if relaxed:
         if event in ("clear", "crystal"):
             return tuple(dict.fromkeys((*(("Spin",) if level.key.startswith("B") else ()), *way)))
