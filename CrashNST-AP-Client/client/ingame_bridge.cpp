@@ -4,6 +4,7 @@
 #include "game_hooks.h"
 #include "console.h"
 #include <algorithm>
+#include <iterator>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -409,11 +410,22 @@ std::vector<std::string> BoxMarkers::commands()
         std::cerr << "In-game adapter: " << error << std::endl;
     return result;
 }
-std::string BoxMarkers::apply_trap(unsigned kind, unsigned seconds)
+std::string BoxMarkers::apply_trap(unsigned kind, unsigned seconds, bool *already)
 {
     const auto now = GetTickCount64();
     const std::uint64_t ms = seconds * 1000ull;
     lock();
+    if (already)
+    {
+        const std::uint64_t timers[]{0, shared_->move_lock_until, shared_->reverse_until, shared_->freeze_until,
+                                     shared_->slippery_until, shared_->slow_until, shared_->darkness_until};
+        const unsigned kinds[]{ingame::TrapDeath, ingame::TrapMoveLock, ingame::TrapReverse, ingame::TrapFreeze,
+                               ingame::TrapSlippery, ingame::TrapSlow, ingame::TrapDarkness};
+        *already = false;
+        for (unsigned i = 0; i < std::size(kinds); ++i)
+            if (kinds[i] == kind && ingame::timer_active(timers[i], now))
+                *already = true;
+    }
     // Slow, Slippery and Reverse take turns (the game thread holds the waiting ones): which one does this wait for?
     std::string after;
     const std::pair<unsigned, std::uint64_t> turns[]{{ingame::TrapSlippery, shared_->slippery_until},
@@ -431,22 +443,22 @@ std::string BoxMarkers::apply_trap(unsigned kind, unsigned seconds)
         ++shared_->death_request;
         break;
     case ingame::TrapMoveLock:
-        shared_->move_lock_until = ingame::extend_timer(shared_->move_lock_until, now, ms);
+        shared_->move_lock_until = ingame::start_timer(shared_->move_lock_until, now, ms);
         break;
     case ingame::TrapReverse:
-        shared_->reverse_until = ingame::extend_timer(shared_->reverse_until, now, ms);
+        shared_->reverse_until = ingame::start_timer(shared_->reverse_until, now, ms);
         break;
     case ingame::TrapFreeze:
-        shared_->freeze_until = ingame::extend_timer(shared_->freeze_until, now, ingame::freeze_trap_ms);
+        shared_->freeze_until = ingame::start_timer(shared_->freeze_until, now, ingame::freeze_trap_ms);
         break;
     case ingame::TrapSlippery:
-        shared_->slippery_until = ingame::extend_timer(shared_->slippery_until, now, ms);
+        shared_->slippery_until = ingame::start_timer(shared_->slippery_until, now, ms);
         break;
     case ingame::TrapSlow:
-        shared_->slow_until = ingame::extend_timer(shared_->slow_until, now, ms);
+        shared_->slow_until = ingame::start_timer(shared_->slow_until, now, ms);
         break;
     case ingame::TrapDarkness:
-        shared_->darkness_until = ingame::extend_timer(shared_->darkness_until, now, ms);
+        shared_->darkness_until = ingame::start_timer(shared_->darkness_until, now, ms);
         break;
     }
     ++shared_->revision;

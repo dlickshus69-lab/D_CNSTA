@@ -256,6 +256,8 @@ class SpinPlacement(Choice):
 class AkuAkuSanity(Toggle):
     """Aku Aku is an item. Until you find it, breaking an Aku Aku crate gives no mask in any of the three
     games, like a move you have not unlocked yet. Once you have it, Aku Aku crates work normally.
+    Lights Out and Fumbling in the Dark (Crash 1) are pitch dark without his light, so logic expects the
+    Aku Aku item for everything in them.
 
     Experimental: the client uses the game's own "no Aku Aku masks" switch. `/aku_lock on` in the client
     tries it without this option.
@@ -387,7 +389,8 @@ class NitroTrapWeight(Range):
 
 class MoveLockTrapWeight(Range):
     """How often Move Lock Traps appear compared to other traps. Spin, slide, body slam and
-    crouch stop working for the Trap Duration. No effect in gimmick or Crash 2 jet-board levels."""
+    crouch stop working for the Trap Duration. No effect in gimmick or Crash 2 jet-board levels.
+    With Ability Shuffle, it waits until you have at least one of those moves."""
 
     display_name = "Move Lock Trap Weight"
     range_start = 0
@@ -416,7 +419,7 @@ class FreezeTrapWeight(Range):
 
 class TrapDuration(Range):
     """Seconds that Move Lock, Reverse Controls, Slippery, Slow and Darkness Traps last. A new trap of the
-    same kind adds its time. The time only runs while Crash can move: it stops during a level's intro,
+    same kind that arrives while one runs adds no time. The time only runs while Crash can move: it stops during a level's intro,
     while he dies and respawns, in the pause menu, hubs and loading screens."""
 
     display_name = "Trap Duration"

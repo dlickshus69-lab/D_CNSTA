@@ -35,6 +35,8 @@ namespace
             result.insert(0xCB0000 + 2100 + i);
         for (unsigned i = 0; i < 4; ++i)
             result.insert(0xCB0000 + 2400 + i);
+        // Aku Aku (Aku Aku Sanity): logic expects him in Crash 1's dark levels, Lights Out and Fumbling in the Dark
+        result.insert(0xCB0000 + 2410);
         return result;
     }
 } // namespace

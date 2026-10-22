@@ -37,6 +37,7 @@ from .data import (
     C3_VEHICLE_LEVELS,
     BASIC_MOVES,
     AKU_AKU,
+    AKU_LIT_LEVELS,
     TRAPS,
     move_requirements,
     easiest_start,
@@ -130,8 +131,15 @@ class CrashWorld(World):
         jump_only = {easiest_start(self.starting_levels)} if self.ability_shuffle == 2 else set()
         return move_requirements(level, event, self.ability_shuffle == 2, jump_only, self.ability_logic == 1)
 
+    def aku_requirements(self, level, event):
+        """With Aku Aku Sanity, Lights Out and Fumbling in the Dark are pitch dark without Aku Aku's light, so logic
+        expects the Aku Aku item for everything inside them (getting in stays open)."""
+        if getattr(self, "aku_aku_sanity", False) and level.key in AKU_LIT_LEVELS:
+            return (AKU_AKU,)
+        return ()
+
     def extra_requirements(self, level, event):
-        return (*self.relic_requirements(level, event), *self.move_requirements(level, event))
+        return (*self.relic_requirements(level, event), *self.move_requirements(level, event), *self.aku_requirements(level, event))
 
     def requirements(self, level, event):
         return self.lock_requirements((*requirements(level, event), *self.extra_requirements(level, event)))
@@ -156,6 +164,7 @@ class CrashWorld(World):
         if type(self.ability_shuffle) is not int or not 0 <= self.ability_shuffle <= 2:
             raise ValueError("Invalid NST tracker ability shuffle")
         self.ability_logic = slot.get("ability_logic", 0)
+        self.aku_aku_sanity = slot.get("aku_aku_sanity", False) is True
         if type(self.ability_logic) is not int or not 0 <= self.ability_logic <= 1:
             raise ValueError("Invalid NST tracker ability logic")
         self.starting_levels = slot.get("starting_levels", [])
@@ -279,6 +288,7 @@ class CrashWorld(World):
         self.relic_tier = self.options.relic_requirement.value
         self.ability_shuffle = self.options.ability_shuffle.value
         self.ability_logic = self.options.ability_logic.value
+        self.aku_aku_sanity = bool(self.options.aku_aku_sanity.value)
         rewards = self.options.collectible_rewards.modes()
         self.vanilla_collectibles = {
             key: mode == "vanilla" for key, mode in rewards.items()

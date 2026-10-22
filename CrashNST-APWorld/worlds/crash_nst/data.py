@@ -178,6 +178,8 @@ ITEMS.update({name: BASE + 2400 + index for index, name in enumerate(BASIC_MOVES
 # Aku Aku Sanity: Aku Aku masks are an item; until it is found, Aku Aku crates give no mask
 AKU_AKU = "Aku Aku"
 ITEMS[AKU_AKU] = BASE + 2410
+# Crash 1's dark levels, where Aku Aku's glow is the light (Lights Out, Fumbling in the Dark)
+AKU_LIT_LEVELS = frozenset({"L122", "L123"})
 # traps replace junk items; the client applies them once you are in a level and in control.
 # IDs never change. Death Trap is retired: it stays in the table for older seeds but is never placed.
 TRAP_IDS = {

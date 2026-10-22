@@ -42,10 +42,11 @@ namespace ingame
     // queued traps fire one at a time, this far apart
     inline constexpr unsigned trap_gap_ms = 10000;
 
-    // a trap of the same kind adds its time to a running one
-    inline std::uint64_t extend_timer(std::uint64_t until, std::uint64_t now, std::uint64_t ms)
+    // a trap of the same kind that arrives while one runs (or waits its turn) adds no time: the running one keeps
+    // its timer, so a trap never lasts longer than its duration
+    inline std::uint64_t start_timer(std::uint64_t until, std::uint64_t now, std::uint64_t ms)
     {
-        return (until > now ? until : now) + ms;
+        return until > now ? until : now + ms;
     }
     inline bool timer_active(std::uint64_t until, std::uint64_t now) { return now < until; }
     inline unsigned seconds_left(std::uint64_t until, std::uint64_t now)
@@ -55,8 +56,8 @@ namespace ingame
 
     // Slow, Slippery and Reverse Controls all change how the stick moves Crash, and together they ruin each other
     // (walking on ice, walking reversed), so they take turns: the one that came first runs, the others wait with their
-    // timers standing still, and the next one starts when it ends. Another trap of the running kind adds its time
-    // to the running one; one of a waiting kind adds to that waiting timer.
+    // timers standing still, and the next one starts when it ends. Another trap of a running or waiting kind adds
+    // no time.
     inline constexpr unsigned turn_traps[]{TrapSlippery, TrapSlow, TrapReverse};
     inline constexpr unsigned turn_trap_count = sizeof(turn_traps) / sizeof(turn_traps[0]);
     inline constexpr unsigned trap_bit(unsigned kind) { return 1u << kind; }

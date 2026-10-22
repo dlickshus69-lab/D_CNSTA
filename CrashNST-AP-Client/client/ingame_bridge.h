@@ -33,7 +33,8 @@ public:
     // start a trap now; timed traps last `seconds` (Freeze always lasts freeze_trap_ms).
     // Life Loss runs through AbilityAccess instead. Slow, Slippery and Reverse take turns: when this one has to wait
     // for another to end, returns that one's name ("" when it starts now).
-    std::string apply_trap(unsigned kind, unsigned seconds);
+    // starts a timed trap; `already` (when given) says one of that kind was running or waiting, so it added no time
+    std::string apply_trap(unsigned kind, unsigned seconds, bool *already = nullptr);
     // research: log the current level's Nitro crates and their spawners (read-only)
     void request_nitro_probe();
     // research (experimental): move the nearest Nitro crate next to Crash

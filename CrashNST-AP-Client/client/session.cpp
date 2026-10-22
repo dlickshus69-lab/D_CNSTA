@@ -199,6 +199,8 @@ void Session::open(const std::filesystem::path &directory, const std::string &se
                 throw std::runtime_error("Invalid saved trap cursor");
             if (data_.isMember("nitro_pending") && (!data_["nitro_pending"].isUInt() || nitro_pending() > max_items))
                 throw std::runtime_error("Invalid saved Nitro Trap count");
+            if (data_.isMember("move_lock_pending") && (!data_["move_lock_pending"].isUInt() || move_lock_pending() > max_items))
+                throw std::runtime_error("Invalid saved Move Lock Trap count");
             if (!data_["server_reset_pending"].isBool())
                 throw std::runtime_error("Invalid server reset marker");
             for (const auto &key : data_["bindings"].getMemberNames())
@@ -222,6 +224,7 @@ void Session::open(const std::filesystem::path &directory, const std::string &se
             data_["filler_cursor"] = 0u;
             data_["trap_cursor"] = 0u;
             data_["nitro_pending"] = 0u;
+            data_["move_lock_pending"] = 0u;
             data_["server_reset_pending"] = false;
             data_["pending"] = data_["checked"] = data_["items"] = Json::Value(Json::arrayValue);
         }
@@ -363,6 +366,7 @@ void Session::reset_server_state()
     data_["filler_cursor"] = 0u;
     data_["trap_cursor"] = 0u;
     data_["nitro_pending"] = 0u;
+    data_["move_lock_pending"] = 0u;
     data_["server_reset_pending"] = true;
     dirty_ = true;
     flush();
@@ -555,6 +559,38 @@ void Session::take_nitro()
     if (!pending)
         return;
     data_["nitro_pending"] = pending - 1;
+    dirty_ = true;
+    flush();
+}
+bool Session::defer_move_lock(unsigned index)
+{
+    if (!ready() || index >= data_["items"].size())
+        throw std::runtime_error("Invalid trap receipt index");
+    if (index < trap_cursor())
+        return false;
+    const auto old_cursor = trap_cursor(), old_pending = move_lock_pending();
+    data_["trap_cursor"] = index + 1;
+    data_["move_lock_pending"] = old_pending + 1;
+    dirty_ = true;
+    try
+    {
+        flush();
+    }
+    catch (...)
+    {
+        data_["trap_cursor"] = old_cursor;
+        data_["move_lock_pending"] = old_pending;
+        dirty_ = true;
+        throw;
+    }
+    return true;
+}
+void Session::take_move_lock()
+{
+    const auto pending = move_lock_pending();
+    if (!pending)
+        return;
+    data_["move_lock_pending"] = pending - 1;
     dirty_ = true;
     flush();
 }

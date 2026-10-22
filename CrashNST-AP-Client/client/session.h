@@ -48,6 +48,10 @@ public:
     unsigned nitro_pending() const { return ready() && data_["nitro_pending"].isUInt() ? data_["nitro_pending"].asUInt() : 0; }
     bool defer_nitro(unsigned index); // reserves the trap and adds it to the waiting count in one save
     void take_nitro();
+    // Move Lock Traps received before Crash has any move to lock (Ability Shuffle) wait the same way
+    unsigned move_lock_pending() const { return ready() && data_["move_lock_pending"].isUInt() ? data_["move_lock_pending"].asUInt() : 0; }
+    bool defer_move_lock(unsigned index);
+    void take_move_lock();
     std::map<char, std::string> bind_saves(const std::filesystem::path &save_directory,
                                            const std::set<std::string> &levels);
     std::filesystem::path profile_directory() const

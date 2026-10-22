@@ -1,5 +1,6 @@
 #include "client_runtime.h"
 #include "trap_rules.h"
+#include "movement_rules.h"
 #include "game_archive.h"
 #include "skins.h"
 #include <fstream>
@@ -553,6 +554,21 @@ void ClientRuntime::update_ownership(ClientTick &tick)
     // traps fire one at a time, in any level (not hubs or menus) with the camera active, trap_gap_ms apart.
     // unlike 1-Ups they do not wait for an AP-unlocked level.
     // each is saved as applied before it starts, so reconnecting never replays it.
+    const auto trap_seconds = [&] {
+        const auto &duration = session.slot_data()["trap_duration"];
+        return duration.isUInt() && duration.asUInt() >= 10 && duration.asUInt() <= 120 ? duration.asUInt() : 30u;
+    };
+    // Move Lock locks Spin, Body Slam, Crouch Jump and Slide: with Ability Shuffle it waits until Crash has one of them
+    const auto lockable_move = [&] {
+        const auto &ability_shuffle = session.slot_data()["ability_shuffle"];
+        if (!ability_shuffle.isIntegral() || ability_shuffle.asInt64() <= 0)
+            return true;
+        for (const auto &item : tick.items)
+            for (unsigned i = 0; i < 4; ++i)
+                if (item.first == ingame::move_item(i))
+                    return true;
+        return false;
+    };
     if (tick.room_ready && box_markers && seed && std::chrono::steady_clock::now() >= next_trap)
     {
         try
@@ -574,6 +590,12 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                         print_console("Nitro Trap incoming! It strikes in the next level with Nitro crates.", true);
                     continue;
                 }
+                if (kind == ingame::TrapMoveLock && !lockable_move())
+                {
+                    if (session.defer_move_lock(index))
+                        print_console("Move Lock Trap incoming! It strikes once you have a move to lock.", true);
+                    continue;
+                }
                 // Life Loss uses the game's lives reward, which must be attached and idle
                 if (kind == ingame::TrapLifeLoss &&
                     (!ability_access || ability_refresh_pending || !ability_access->filler_ready() ||
@@ -581,20 +603,19 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                     break;
                 if (session.reserve_trap(index))
                 {
-                    const auto &duration = session.slot_data()["trap_duration"];
-                    const unsigned seconds = duration.isUInt() && duration.asUInt() >= 10 && duration.asUInt() <= 120
-                                                 ? duration.asUInt()
-                                                 : 30;
+                    const unsigned seconds = trap_seconds();
                     std::string after;
+                    bool already = false;
                     if (kind == ingame::TrapLifeLoss)
                         ability_access->queue_life_loss(index, scene.zone_address);
                     else
-                        after = box_markers->apply_trap(static_cast<unsigned>(kind), seconds);
+                        after = box_markers->apply_trap(static_cast<unsigned>(kind), seconds, &already);
                     const auto timed = ingame::timed_trap(static_cast<unsigned>(kind));
-                    // Slow, Slippery and Reverse take turns: a second one starts when the first ends
-                    print_console(std::string(ingame::trap_names[kind]) +
-                                      (timed ? " for " + std::to_string(seconds) + " seconds" : "") +
-                                      (after.empty() ? "!" : ", once the " + after + " ends!"),
+                    // Slow, Slippery and Reverse take turns: a second one starts when the first ends. One of a kind
+                    // already running adds no time.
+                    print_console(already ? std::string(ingame::trap_names[kind]) + " again! It's already on, so it keeps its time."
+                                          : std::string(ingame::trap_names[kind]) + (timed ? " for " + std::to_string(seconds) + " seconds" : "") +
+                                                (after.empty() ? "!" : ", once the " + after + " ends!"),
                                   true);
                     next_trap = std::chrono::steady_clock::now() + std::chrono::milliseconds(ingame::trap_gap_ms);
                 }
@@ -606,6 +627,27 @@ void ClientRuntime::update_ownership(ClientTick &tick)
             std::cerr << "Trap delivery: " << e.what() << std::endl;
         }
     }
+    // waiting Move Lock Traps fire once Crash has a move to lock, in the trap rhythm
+    if (tick.room_ready && box_markers && session.ready() && session.move_lock_pending() && std::chrono::steady_clock::now() >= next_trap &&
+        lockable_move())
+        try
+        {
+            const auto scene = read_scene(GetCurrentProcess());
+            if (scene.camera_active && !level_key(scene.zone).empty() && box_markers->player_ready())
+            {
+                session.take_move_lock();
+                bool already = false;
+                box_markers->apply_trap(ingame::TrapMoveLock, trap_seconds(), &already);
+                print_console(already ? std::string("Move Lock Trap again! It's already on, so it keeps its time.")
+                                      : "Move Lock Trap for " + std::to_string(trap_seconds()) + " seconds!",
+                              true);
+                next_trap = std::chrono::steady_clock::now() + std::chrono::milliseconds(ingame::trap_gap_ms);
+            }
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Move Lock Trap: " << e.what() << std::endl;
+        }
     // waiting Nitro Traps fire one at a time, in the trap rhythm, once the game reports a Nitro can spawn here
     if (tick.room_ready && box_markers && session.ready() && session.nitro_pending() && std::chrono::steady_clock::now() >= next_trap)
         try
