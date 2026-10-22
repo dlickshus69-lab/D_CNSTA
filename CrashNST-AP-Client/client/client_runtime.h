@@ -12,6 +12,7 @@
 #include <deque>
 #include <filesystem>
 #include <future>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>

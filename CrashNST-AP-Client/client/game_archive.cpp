@@ -50,7 +50,7 @@ namespace ingame
             std::ifstream stream;
             std::uint64_t size = 0;
             Bytes header, names;
-            unsigned count = 0, toc = 0, large = 0, medium = 0, small = 0;
+            unsigned count = 0, toc = 0, large_blocks = 0, medium_blocks = 0, small_blocks = 0;
             explicit Archive(const std::filesystem::path &path) : stream(path, std::ios::binary)
             {
                 require(static_cast<bool>(stream));
@@ -59,7 +59,7 @@ namespace ingame
                 require(size >= 64);
                 header = read(0, 56);
                 require(word(header, 0) == 0x1a414749 && word(header, 4) == 11 && word(header, 16) == 0x800);
-                toc = word(header, 8), count = word(header, 12), large = word(header, 28), medium = word(header, 32), small = word(header, 36);
+                toc = word(header, 8), count = word(header, 12), large_blocks = word(header, 28), medium_blocks = word(header, 32), small_blocks = word(header, 36);
                 require(count > 0 && count <= 200000 && toc >= count * 20 && toc <= limit && 56ull + toc <= size);
                 const auto names_start = get<std::uint64_t>(header, 40);
                 require(names_start >= 56ull + toc);
@@ -93,16 +93,16 @@ namespace ingame
                     return read(source, length);
                 require(command >> 28 == 2); // LZMA blocks; other kinds are not used for these files
                 std::uint64_t table = 56ull + count * 20ull;
-                unsigned elements = large, width = 4, flag = 0x80000000;
+                unsigned elements = large_blocks, width = 4, flag = 0x80000000;
                 if (length <= 0x7f * 0x800)
                 {
-                    table += large * 4ull + medium * 2ull;
-                    elements = small, width = 1, flag = 0x80;
+                    table += large_blocks * 4ull + medium_blocks * 2ull;
+                    elements = small_blocks, width = 1, flag = 0x80;
                 }
                 else if (length <= 0x7fff * 0x800)
                 {
-                    table += large * 4ull;
-                    elements = medium, width = 2, flag = 0x8000;
+                    table += large_blocks * 4ull;
+                    elements = medium_blocks, width = 2, flag = 0x8000;
                 }
                 const auto blocks = (length + 0x7fff) / 0x8000, first = command & 0xfffffff;
                 require(first <= elements && blocks <= elements - first && table + (first + blocks) * static_cast<std::uint64_t>(width) <= 56ull + toc);
