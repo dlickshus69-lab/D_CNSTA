@@ -240,6 +240,17 @@ class SpinPlacement(Choice):
     default = option_early_to_mid
 
 
+class AkuAkuSanity(Toggle):
+    """Aku Aku is an item. Until you find it, breaking an Aku Aku crate gives no mask in any of the three
+    games, like a move you have not unlocked yet. Once you have it, Aku Aku crates work normally.
+
+    Experimental: the client uses the game's own "no Aku Aku masks" switch. `/aku_lock on` in the client
+    tries it without this option.
+    """
+
+    display_name = "Aku Aku Sanity"
+
+
 class AbilityLogic(Choice):
     """What logic expects you can do without the basic moves when Ability Shuffle is on.
 
@@ -546,6 +557,7 @@ crash_option_groups = [
         AbilityShuffle,
         SpinPlacement,
         AbilityLogic,
+        AkuAkuSanity,
     ]),
     OptionGroup("Filler / Traps", [
         WumpaFruitWeight,
@@ -594,6 +606,7 @@ class CrashOptions(PerGameCommonOptions):
     ability_shuffle: AbilityShuffle
     spin_placement: SpinPlacement
     ability_logic: AbilityLogic
+    aku_aku_sanity: AkuAkuSanity
     wumpa_fruit_weight: WumpaFruitWeight
     one_up_weight: OneUpWeight
     trap_fill_percentage: TrapFillPercentage

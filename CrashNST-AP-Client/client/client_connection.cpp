@@ -440,6 +440,23 @@ void ClientRuntime::handle_commands()
                 else
                     print_console("Nitro probe needs the in-game adapter. Load into a level first.");
             }
+            else if (command == "/aku_lock")
+            {
+                if (argument == "on")
+                    aku_lock_override = 1;
+                else if (argument == "off")
+                    aku_lock_override = 0;
+                else if (argument == "auto")
+                    aku_lock_override = -1;
+                else if (!argument.empty())
+                    throw std::invalid_argument("Use /aku_lock on, off or auto");
+                if (box_markers && aku_lock_override >= 0)
+                    box_markers->aku_lock(aku_lock_override == 1);
+                print_console(std::string("Aku Aku lock: ") +
+                              (aku_lock_override == 1 ? "on (test): Aku Aku crates should give no mask. /aku_lock auto goes back to the seed's setting."
+                               : aku_lock_override == 0 ? "off (test): Aku Aku crates work normally. /aku_lock auto goes back to the seed's setting."
+                                                        : "follows the seed (Aku Aku Sanity: no masks until you find the Aku Aku item)."));
+            }
             else if (command == "/nitro_drop")
             {
                 if (box_markers)

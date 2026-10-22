@@ -267,6 +267,12 @@ void ClientRuntime::update_display(ClientTick &tick)
         const auto &death_traps = session.slot_data()["trap_counts"]["Death Trap"];
         const bool trap_kills = death_traps.isIntegral() && death_traps.asInt64() > 0;
         box_markers->configure(seed->movement_styles, death_link, move_shuffle, owned_moves, trap_kills);
+        // Aku Aku Sanity: no masks until the Aku Aku item arrives (older seeds omit the setting)
+        bool aku_locked = session.slot_data()["aku_aku_sanity"] == true &&
+                          std::none_of(tick.items.begin(), tick.items.end(), [](const auto &item) { return item.first == ingame::aku_item(); });
+        if (aku_lock_override >= 0)
+            aku_locked = aku_lock_override == 1;
+        box_markers->aku_lock(aku_locked);
         auto collectible_checked = tick.checked;
         collectible_checked.insert(pending.begin(), pending.end());
         // relic_requirement: 0 any tier, 1 gold or platinum, 2 platinum only. older seeds omit it.

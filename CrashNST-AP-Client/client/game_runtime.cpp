@@ -545,6 +545,42 @@ namespace ingame
             if (tracked && variable == bound_player_died())
                 record_death_change(before, getter(variable) != 0);
         }
+        // Aku Aku Sanity: Crash_DamageManager's NoAkuAkuMasks game variable (the game's own "no Aku Aku masks" switch) is
+        // turned on while masks are locked, and off again when they unlock, only if the client turned it on
+        std::atomic<Address> no_aku_variable{0};
+        void update_aku_lock(bool locked)
+        {
+            static Address forced = 0;
+            static Address announced = 0;
+            const auto variable = no_aku_variable.load();
+            if (!variable)
+                return;
+            if (!typed(variable, 0x155ebf0))
+            {
+                if (announced != variable)
+                    std::cout << "Aku Aku lock: NoAkuAkuMasks isn't a yes/no switch here (type +0x" << std::hex << (value<Address>(variable) - base())
+                              << std::dec << "); masks can't be locked\n" << std::flush;
+                announced = variable;
+                return;
+            }
+            const auto getter = reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60);
+            const auto setter = reinterpret_cast<void (*)(Address, unsigned char)>(death_hook.original ? death_hook.original : base() + 0x502000);
+            const bool on = getter(variable) != 0;
+            if (locked && !on)
+            {
+                setter(variable, 1);
+                if (forced != variable)
+                    std::cout << "Aku Aku lock: Aku Aku masks are off (the game's NoAkuAkuMasks switch is on)" << (getter(variable) ? "" : ", but the game refused it")
+                              << "\n" << std::flush;
+                forced = variable;
+            }
+            else if (!locked && forced == variable && on)
+            {
+                setter(variable, 0);
+                forced = 0;
+                std::cout << "Aku Aku lock: Aku Aku masks are back on\n" << std::flush;
+            }
+        }
         // Crash can move: in control, not in a level intro, a cutscene, a death or a respawn. Traps wait for it and
         // their timers pause without it. Riding something (vehicle levels) only needs the camera and no death.
         bool player_can_move(Address actor, bool camera_active)
@@ -892,6 +928,7 @@ namespace ingame
             }
             death_handle = 0;
             bonus_round_variable = 0;
+            no_aku_variable = 0;
             for (const auto c : list(value<Address>(actor + 24), 128))
             {
                 if (!typed(c, 0x13bbbd0) || value<Address>(c + 24) != actor || !(value<unsigned>(c + 32) & 1) ||
@@ -934,6 +971,8 @@ namespace ingame
                             bonus_round_variable = variable;
                         if (name == "AkuAkuCount")
                             aku_variable = variable;
+                        if (name == "NoAkuAkuMasks")
+                            no_aku_variable = variable;
                         if (name == "WumpaCount")
                             wumpa_variable = variable;
                         std::snprintf(slot.name, sizeof(slot.name), "%s", name.c_str());
@@ -2084,7 +2123,9 @@ namespace ingame
             {
                 Address at = 0;
                 float dz = 0; // its own height above the crate (the physics body sits at the crate's centre)
-                const char *label = "";
+                std::string label;
+                Address script = 0; // for a copy inside one of the crate's scripts: that script
+                unsigned fights = 0;
             };
             Address entity = 0, components = 0, actor = 0;
             std::string level;
@@ -2092,9 +2133,13 @@ namespace ingame
             std::array<float, 3> high{}; // where it appeared: copies filled in late hold this
             std::array<float, 3> home{}; // where the borrowed spawner is (only logged: its copies are never moved)
             bool has_home = false;
-            std::uint64_t since = 0;
-            unsigned frames = 0, fights = 0;
+            std::uint64_t since = 0, window = 0;
+            unsigned frames = 0, fights = 0, window_fights = 0, busy_windows = 0;
             bool falling = false, landed = true, reported_fight = false;
+            // the game moving it back on most frames, second after second: what it draws from isn't pinned, and
+            // fighting it every frame costs frames. One such Nitro per session is watched first (which code moves
+            // it, and the crate's script settings go to the log), then it is let go.
+            unsigned watching = 0;
             std::vector<Copy> copies;
         };
         std::vector<PinnedNitro> pinned_nitros;
@@ -2419,25 +2464,100 @@ namespace ingame
         {
             return std::to_string(ms / 1000) + "." + std::to_string(ms / 100 % 10) + " s";
         }
+        // the hardware watch, shared with /ice_test who (defined further down)
+        bool nitro_watch_free();
+        void nitro_watch_arm(Address at);
+        unsigned nitro_watch_count();
+        void nitro_watch_report(const std::string &what);
+        void nitro_watch_stop();
+        bool nitro_researched = false; // one watched Nitro per session is enough
+        // the crate's scripts and every setting in them, for the log: which setting holds where it is drawn
+        void log_nitro_scripts(const PinnedNitro &p)
+        {
+            for (const auto c : list(value<Address>(p.entity + 24), 64))
+            {
+                const auto meta = value<Address>(c + 56);
+                if (!heap_page(c, 64) || !typed(meta, 0x1745d78))
+                    continue;
+                auto name = string(value<Address>(meta + 16));
+                if (name.rfind("Scripts.Graph.", 0) == 0)
+                    name.erase(0, 14);
+                const unsigned size = value<std::uint16_t>(meta + 90), count = value<unsigned>(meta + 24);
+                const auto fields = value<Address>(meta + 40);
+                std::ostringstream out;
+                out << "Nitro script: " << name << " at 0x" << std::hex << c << std::dec << ", " << size << " bytes, " << count << " settings:";
+                unsigned shown = 0;
+                for (unsigned i = 0; fields && count <= 512 && i < count; ++i)
+                {
+                    const auto field = value<Address>(fields + i * 8);
+                    const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                    if (!bytes || offset + bytes > size)
+                        continue;
+                    out << (shown++ % 6 ? " " : "\nNitro script:  ") << string(value<Address>(field + 48), 48) << "@0x" << std::hex << offset
+                        << std::dec << "=";
+                    if (bytes == 4)
+                    {
+                        const auto f = value<float>(c + offset);
+                        const auto n = value<int>(c + offset);
+                        out << (std::isfinite(f) && std::abs(f) > 1e-6f && std::abs(f) < 1e7f ? std::to_string(f) : std::to_string(n));
+                    }
+                    else if (bytes == 1 || bytes == 2)
+                        out << unsigned(bytes == 1 ? value<unsigned char>(c + offset) : value<std::uint16_t>(c + offset));
+                    else if (bytes == 8)
+                        out << "0x" << std::hex << value<std::uint64_t>(c + offset) << std::dec;
+                    else
+                    {
+                        // vectors and matrices: their floats (a matrix's position is its last row)
+                        std::array<float, 16> f{};
+                        const unsigned n = std::min(bytes / 4, 16u);
+                        std::vector<float> v(n);
+                        read(c + offset, v);
+                        std::copy(v.begin(), v.end(), f.begin());
+                        out << "(";
+                        for (unsigned k = 0; k < n; ++k)
+                            out << (k ? "," : "") << whole(f[k]);
+                        out << ")";
+                    }
+                }
+                std::cout << out.str() << "\n" << std::flush;
+            }
+        }
         // one frame of a pin; false once it is over
         bool hold_pinned_nitro(PinnedNitro &p, const std::string &level)
         {
             const auto now = GetTickCount64(), age = now - p.since;
             if (level != p.level)
+            {
+                if (p.watching)
+                    nitro_watch_stop();
                 return false; // its memory went with the level: nothing to touch
-            const auto fought = p.fights ? ", kept in place on " + std::to_string(p.fights) + " frames the game moved it" : std::string();
-            if (!live_crate(p.entity) || value<Address>(p.entity + 24) != p.components)
-            {
-                std::cout << "Nitro hold: the Nitro is gone after " << seconds(age) << " (set off, broken or unloaded)" << fought << "\n" << std::flush;
-                return false;
             }
+            const auto fought = p.fights ? ", kept in place on " + std::to_string(p.fights) + " frames the game moved it" : std::string();
+            const bool gone = !live_crate(p.entity) || value<Address>(p.entity + 24) != p.components;
             // a respawn can free and reuse what the copies point at: stop writing at once
-            if (player() != p.actor)
+            const bool respawned = !gone && player() != p.actor;
+            if (gone || respawned)
             {
-                std::cout << "Nitro hold: let go after " << seconds(age) << " (Crash respawned)" << fought << "\n" << std::flush;
+                if (p.watching)
+                    nitro_watch_stop();
+                std::cout << "Nitro hold: " << (gone ? "the Nitro is gone after " : "let go after ") << seconds(age)
+                          << (gone ? " (set off, broken or unloaded)" : " (Crash respawned)") << fought << "\n" << std::flush;
                 return false;
             }
             ++p.frames;
+            // watching which code moves it: nothing is written meanwhile; then it is let go
+            if (p.watching)
+            {
+                if (nitro_watch_count() || ++p.watching > 40)
+                {
+                    nitro_watch_report(p.copies.empty() ? std::string("its position") : p.copies.front().label);
+                    nitro_watch_stop();
+                    log_nitro_scripts(p);
+                    std::cout << "Nitro hold: let go after " << seconds(age) << fought << "\n" << std::flush;
+                    return false;
+                }
+                return true;
+            }
             // look for copies every frame for the first 2.5 seconds (a new crate fills them in over its first frames),
             // then every 8th frame
             if (age < 2500 || p.frames % 8 == 0)
@@ -2445,30 +2565,81 @@ namespace ingame
                 std::array<float, 3> e{};
                 read(p.entity + 32, e);
                 const auto slots = nitro_slots(p.entity, crate_model(p.entity));
-                // a copy whose path now leads somewhere else is no longer this crate's
+                const auto scripts = list(value<Address>(p.entity + 24), 64);
+                // a copy whose path now leads somewhere else, or whose script is gone, is no longer this crate's
                 p.copies.erase(std::remove_if(p.copies.begin(), p.copies.end(), [&](const PinnedNitro::Copy &c)
-                                              { return std::none_of(slots.begin(), slots.end(), [&](const NitroSlot &s) { return s.at == c.at; }); }),
+                                              {
+                                                  return c.script ? std::find(scripts.begin(), scripts.end(), c.script) == scripts.end()
+                                                                  : std::none_of(slots.begin(), slots.end(), [&](const NitroSlot &s) { return s.at == c.at; });
+                                              }),
                                p.copies.end());
+                const auto adopt = [&](Address at, float dz, std::string label, Address script)
+                {
+                    if (p.frames > 1)
+                        std::cout << "Nitro hold: " << label << " filled in after " << age << " ms\n" << std::flush;
+                    p.copies.push_back({at, dz, std::move(label), script, 0});
+                };
+                const auto have = [&](Address at)
+                { return std::any_of(p.copies.begin(), p.copies.end(), [&](const PinnedNitro::Copy &c) { return c.at == at; }); };
                 for (const auto &s : slots)
                 {
-                    if (!s.at || std::any_of(p.copies.begin(), p.copies.end(), [&](const PinnedNitro::Copy &c) { return c.at == s.at; }))
+                    if (!s.at || have(s.at))
                         continue;
                     // a copy of where the game has the crate now, where it appeared, or where it is kept
                     std::array<float, 3> v{};
                     float dz = 0;
-                    if (!read(s.at, v) || !(copy_of(v, e, dz) || copy_of(v, p.high, dz) || copy_of(v, p.spot, dz)))
+                    if (read(s.at, v) && (copy_of(v, e, dz) || copy_of(v, p.high, dz) || copy_of(v, p.spot, dz)))
+                        adopt(s.at, dz, s.label, 0);
+                }
+                // the crate's own scripts, read whole (each only as long as it says it is): any setting holding where
+                // it is, where it appeared, where it is kept, or exactly its spawner's spot (the place it goes "home"
+                // to). These are this crate's own settings, so the spawner and the level's Nitro are never touched.
+                for (const auto c : scripts)
+                {
+                    const auto meta = value<Address>(c + 56);
+                    if (!heap_page(c, 64) || !typed(meta, 0x1745d78))
                         continue;
-                    p.copies.push_back({s.at, dz, s.label});
-                    if (p.frames > 1)
-                        std::cout << "Nitro hold: " << s.label << " filled in after " << age << " ms\n" << std::flush;
+                    const unsigned size = value<std::uint16_t>(meta + 90);
+                    std::vector<float> block(size / 4);
+                    if (size < 16 || size > 0x4000 || !heap_page(c, size) || !read(c, block))
+                        continue;
+                    std::string name;
+                    for (unsigned i = 0; i + 3 <= block.size(); ++i)
+                    {
+                        const std::array<float, 3> v{block[i], block[i + 1], block[i + 2]};
+                        if (!std::isfinite(v[0] + v[1] + v[2]))
+                            continue;
+                        float dz = 0;
+                        bool home = false;
+                        if (!(copy_of(v, e, dz) || copy_of(v, p.high, dz) || copy_of(v, p.spot, dz)))
+                        {
+                            if (!p.has_home || std::abs(v[0] - p.home[0]) >= 0.05f || std::abs(v[1] - p.home[1]) >= 0.05f ||
+                                std::abs(v[2] - p.home[2]) >= 30)
+                                continue;
+                            dz = v[2] - p.home[2], home = true;
+                        }
+                        const Address at = c + i * 4;
+                        if (have(at))
+                            continue;
+                        if (name.empty())
+                        {
+                            name = string(value<Address>(meta + 16));
+                            if (name.rfind("Scripts.Graph.", 0) == 0)
+                                name.erase(0, 14);
+                        }
+                        std::ostringstream label;
+                        label << name << "+0x" << std::hex << i * 4 << (home ? " (its home)" : "");
+                        adopt(at, dz, label.str(), c);
+                    }
                 }
             }
             // every copy back to the spot. Once it sits still, a Nitro may still hop on the spot (straight up and down,
             // like any Nitro); only leaving the spot is undone
             const bool still = p.landed && !p.falling;
             unsigned moved = 0;
-            std::string first;
-            for (const auto &c : p.copies)
+            PinnedNitro::Copy *first = nullptr;
+            std::array<float, 3> first_at{};
+            for (auto &c : p.copies)
             {
                 const std::array<float, 3> goal{p.spot[0], p.spot[1], p.spot[2] + c.dz};
                 std::array<float, 3> v{};
@@ -2476,24 +2647,54 @@ namespace ingame
                     continue;
                 if (still && std::abs(v[0] - goal[0]) < 1 && std::abs(v[1] - goal[1]) < 1 && v[2] > goal[2] - 5 && v[2] < goal[2] + 150)
                     continue;
-                if (first.empty())
-                    first = std::string(c.label) + " to " + whole(v[0]) + ", " + whole(v[1]) + ", " + whole(v[2]) +
-                            (p.has_home && std::hypot(v[0] - p.home[0], v[1] - p.home[1]) < 20 ? ", its spawner's spot" : "");
+                if (!first)
+                    first = &c, first_at = v;
                 ++moved;
+                if (still)
+                    ++c.fights;
                 write(c.at, goal);
             }
+            if (!moved || !still)
+                return true;
             // the game moving a crate that is sitting still: its hop (home to its spawner, for a borrowed one)
-            if (moved && still)
+            ++p.fights;
+            if (!p.reported_fight)
             {
-                ++p.fights;
-                if (!p.reported_fight)
-                {
-                    p.reported_fight = true;
-                    std::cout << "Nitro hold: after " << seconds(age) << " the game moved " << moved << " of " << p.copies.size()
-                              << " copies (" << first << "); it stays where the trap put it\n" << std::flush;
-                }
+                p.reported_fight = true;
+                std::cout << "Nitro hold: after " << seconds(age) << " the game moved " << moved << " of " << p.copies.size() << " copies ("
+                          << first->label << " to " << whole(first_at[0]) << ", " << whole(first_at[1]) << ", " << whole(first_at[2])
+                          << (p.has_home && std::hypot(first_at[0] - p.home[0], first_at[1] - p.home[1]) < 20 ? ", its spawner's spot" : "")
+                          << "); it stays where the trap put it\n" << std::flush;
             }
-            return true;
+            // a hop takes a moment; the game moving it on most frames for two seconds running means something it is drawn
+            // from isn't pinned, and every frame fought costs frames
+            if (now - p.window >= 1000)
+            {
+                p.busy_windows = p.window_fights >= 20 ? p.busy_windows + 1 : 0;
+                p.window = now, p.window_fights = 0;
+            }
+            ++p.window_fights;
+            if (p.busy_windows < 2)
+                return true;
+            std::sort(p.copies.begin(), p.copies.end(), [](const PinnedNitro::Copy &a, const PinnedNitro::Copy &b) { return a.fights > b.fights; });
+            std::ostringstream which;
+            for (const auto &c : p.copies)
+                if (c.fights)
+                    which << " " << c.label << " " << c.fights;
+            std::cout << "Nitro hold: the game moves it back on almost every frame (" << which.str()
+                      << "); letting it go so the game keeps its speed\n" << std::flush;
+            if (!nitro_researched && nitro_watch_free())
+            {
+                // once: put the copy the game moves most back one more time, then watch which code moves it again
+                nitro_researched = true;
+                const auto &c = p.copies.front();
+                write(c.at, std::array<float, 3>{p.spot[0], p.spot[1], p.spot[2] + c.dz});
+                nitro_watch_arm(c.at);
+                p.watching = 1;
+                std::cout << "Nitro hold: watching which code moves " << c.label << "\n" << std::flush;
+                return true;
+            }
+            return false;
         }
         void update_pinned_nitros(const std::string &level)
         {
@@ -2589,7 +2790,7 @@ namespace ingame
             {
                 // wait for the copy it is drawn from (the crate script's matrix); its pin keeps it up there meanwhile
                 const bool drawn = std::any_of(p->copies.begin(), p->copies.end(),
-                                               [](const PinnedNitro::Copy &c) { return std::string(c.label) == "crate-matrix"; });
+                                               [](const PinnedNitro::Copy &c) { return c.label == "crate-matrix" || c.script; });
                 ++d.settle_frames;
                 if ((d.settle_frames < 3 || now - d.spawned < 60 || !drawn) && now - d.spawned < drop_settle_ms)
                     return;
@@ -4486,6 +4687,84 @@ namespace ingame
                 }
             }
         }
+        // the falling Nitro's research watch: which code keeps moving a trap Nitro back (see hold_pinned_nitro)
+        bool nitro_watch_free() { return !who_state.mode && !who_armed.load() && !who_target.load(); }
+        void nitro_watch_arm(Address at)
+        {
+            for (auto &cap : who_captures)
+                cap = {};
+            who_count = 0, who_hits = 0;
+            const auto aligned = at & ~Address{7};
+            who_target = aligned;
+            who_last = value<std::uint64_t>(aligned);
+            who_armed = true;
+            const auto threads = who_debug_registers(aligned);
+            std::cout << "Nitro watch: on in " << threads << " threads\n" << std::flush;
+        }
+        unsigned nitro_watch_count() { return who_count.load(); }
+        void nitro_watch_stop()
+        {
+            who_armed = false;
+            who_debug_registers(0);
+            who_target = 0;
+        }
+        void nitro_watch_report(const std::string &what)
+        {
+            const auto count = who_count.load();
+            if (!count)
+            {
+                std::cout << "Nitro watch: nothing moved " << what << " while it was watched (" << who_hits.load() << " writes)\n" << std::flush;
+                return;
+            }
+            std::set<std::uint64_t> dumped;
+            for (unsigned i = 0; i < count && i < std::size(who_captures); ++i)
+            {
+                const auto &cap = who_captures[i];
+                std::ostringstream out;
+                out << "Nitro watch: write " << (i + 1) << " to " << what << " (thread " << cap.thread << ")\n";
+                for (unsigned k = 0; k < cap.count; ++k)
+                {
+                    const auto &f = cap.frames[k];
+                    out << "Nitro watch:   #" << k << " ";
+                    if (f.rip >= base() && f.rip < module_end())
+                        out << "+0x" << std::hex << (f.rip - base());
+                    else
+                        out << "0x" << std::hex << f.rip;
+                    out << std::dec << " rsp=0x" << std::hex << f.rsp << std::dec << " rbx=" << who_register(f.rbx)
+                        << " rbp=" << who_register(f.rbp) << " rsi=" << who_register(f.rsi) << " rdi=" << who_register(f.rdi)
+                        << " r12=" << who_register(f.r12) << " r13=" << who_register(f.r13) << " r14=" << who_register(f.r14)
+                        << " r15=" << who_register(f.r15) << "\n";
+                }
+                std::cout << out.str() << std::flush;
+                // the code of the first few functions in the chain, once each
+                for (unsigned k = 0; k < cap.count && k < 4; ++k)
+                {
+                    const auto rip = cap.frames[k].rip;
+                    DWORD64 image = 0;
+                    const auto entry = RtlLookupFunctionEntry(rip, &image, nullptr);
+                    if (!entry || image != base())
+                        continue;
+                    const std::uint64_t begin = image + entry->BeginAddress, end = image + entry->EndAddress;
+                    if (!dumped.insert(begin).second)
+                        continue;
+                    const auto stop = std::min<std::uint64_t>(end, begin + 4096);
+                    std::ostringstream code;
+                    code << "Nitro watch: code +0x" << std::hex << (begin - base()) << "..+0x" << (end - base()) << "\n";
+                    for (std::uint64_t at = begin; at < stop; at += 64)
+                    {
+                        std::array<unsigned char, 64> bytes{};
+                        const auto n = static_cast<unsigned>(std::min<std::uint64_t>(64, stop - at));
+                        SIZE_T got = 0;
+                        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(at), bytes.data(), n, &got);
+                        code << "Nitro watch: +0x" << (at - base()) << " ";
+                        for (unsigned b = 0; b < got; ++b)
+                            code << std::setw(2) << std::setfill('0') << unsigned(bytes[b]);
+                        code << "\n";
+                    }
+                    std::cout << code.str() << std::flush;
+                }
+            }
+        }
         void update_ice_who(unsigned mode, Address actor)
         {
             auto &w = who_state;
@@ -5421,6 +5700,8 @@ namespace ingame
             nitro_probe();
         }
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
+        if (!level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))).empty())
+            update_aku_lock(state.aku_lock != 0);
         update_ice_watch(state.ice_watch != 0);
         update_move_probe(state.move_probe != 0);
         update_ice_test(state.ice_test <= 14 ? state.ice_test : 0);

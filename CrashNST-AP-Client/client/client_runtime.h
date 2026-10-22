@@ -122,6 +122,8 @@ class ClientRuntime
     std::string completion_error;
     unsigned last_deaths = 0, last_collectible_awards = 0;
     std::chrono::steady_clock::time_point next_trap{};
+    // /aku_lock: -1 follows the seed (Aku Aku Sanity and the Aku Aku item), 0 off, 1 on
+    int aku_lock_override = -1;
     // the kind of the next Nitro Trap: -1 not picked yet, 0 ahead of Crash, 1 falling onto him
     int nitro_kind = -1;
     std::chrono::steady_clock::time_point nitro_kind_since{};

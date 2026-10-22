@@ -35,6 +35,7 @@ from .data import (
     SECRET_SOURCES,
     C3_VEHICLE_LEVELS,
     BASIC_MOVES,
+    AKU_AKU,
     TRAPS,
     move_requirements,
     easiest_start,
@@ -728,6 +729,7 @@ class CrashWorld(World):
             for name in (
                 *(BASIC_MOVES if self.ability_shuffle else ()),
                 *(name for name in ABILITIES if int(name[6]) in self.enabled_campaigns),
+                *((AKU_AKU,) if self.options.aku_aku_sanity.value else ()),
             )
             if name not in required
             and name not in starts
@@ -908,6 +910,8 @@ class CrashWorld(World):
         result["ability_shuffle"] = self.ability_shuffle
         # 0 cautious, 1 relaxed: what logic expects without the basic moves
         result["ability_logic"] = self.ability_logic
+        # Aku Aku Sanity: Aku Aku crates give no mask until the Aku Aku item (BASE + 2410) is received
+        result["aku_aku_sanity"] = bool(self.options.aku_aku_sanity.value)
         # trap item IDs are BASE + TRAP_IDS. counts tell the client which hooks it needs.
         result["trap_counts"] = getattr(self, "trap_counts", dict.fromkeys(TRAPS, 0))
         result["trap_duration"] = self.options.trap_duration.value

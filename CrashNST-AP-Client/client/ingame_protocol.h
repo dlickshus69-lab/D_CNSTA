@@ -152,6 +152,8 @@ namespace ingame
         std::uint64_t heartbeat_game = 0;
         // set by the client: trap time is accounted for up to here while the game thread wasn't running
         std::uint64_t stall_accounted = 0;
+        // set by the client: Aku Aku Sanity without the Aku Aku item (or /aku_lock on): Aku Aku crates give no mask
+        unsigned aku_lock = 0;
         // set by the game thread: a Nitro Trap can spawn here now (level with a ready Nitro spawner, not a
         // gimmick stage, and a spot on Crash's recent path)
         unsigned nitro_ready = 0;

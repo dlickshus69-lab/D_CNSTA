@@ -13,6 +13,8 @@ namespace ingame
         MoveAll = 15
     };
     inline constexpr std::int64_t move_item(unsigned index) { return 0xCB0000 + 2400 + index; }
+    // Aku Aku Sanity: the Aku Aku item
+    inline constexpr std::int64_t aku_item() { return 0xCB0000 + 2410; }
     // the attack event a selected attack fades into. slide and belly flop names are verified (Crashsanity
     // already filters them); the spin name is a best guess and unknown names are logged for testing.
     inline unsigned attack_move(std::string_view action)

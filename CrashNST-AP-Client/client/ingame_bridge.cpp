@@ -597,6 +597,12 @@ void BoxMarkers::hub_distance(const std::array<unsigned, 3> &distances)
     ++shared_->revision;
     unlock();
 }
+void BoxMarkers::aku_lock(bool on)
+{
+    lock();
+    shared_->aku_lock = on ? 1u : 0u;
+    unlock();
+}
 void BoxMarkers::slow_tilt(float tilt)
 {
     if (!ingame::valid_slow_tilt(tilt))
