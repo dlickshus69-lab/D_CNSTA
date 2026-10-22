@@ -53,7 +53,17 @@ jobs:
           -DLIBLZMA_INCLUDE_DIR="$(cygpath -m /mingw64/include)"
 
       - name: Build
-        run: cmake --build build/client --parallel 4
+        # compiler errors are repeated as annotations, so they can be read from the API without the full log
+        run: |
+          set -o pipefail
+          if ! cmake --build build/client --parallel 4 -- -k 2>&1 | tee build.log; then
+            grep -E "error|undefined reference" build.log | head -10 | while IFS= read -r line; do
+              echo "::error::${line//%/%25}"
+            done
+            all=$(grep -E -B1 -A3 ": error|undefined reference|fatal error" build.log | head -120 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Build errors::$all"
+            exit 1
+          fi
 
       - name: Check the DLLs only need files Windows ships with
         run: |
