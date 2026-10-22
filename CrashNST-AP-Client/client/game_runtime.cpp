@@ -3,6 +3,7 @@
 #include "function_hook.h"
 #include "movement_rules.h"
 #include "trap_rules.h"
+#include "game_sound.h"
 #include "game_pickups.h"
 #include "game_memory.h"
 #include "crate_specs.h"
@@ -17,6 +18,7 @@
 #include <sstream>
 #include <set>
 #include <deque>
+#include <random>
 #include <thread>
 #include <chrono>
 #include <unordered_map>
@@ -2544,13 +2546,16 @@ namespace ingame
         // works fully) and it is moved every frame with the game's own "set position", the one scripts use. That marks
         // it moved, so the game carries the move over to the crate's physics body and everything it is drawn from.
         // (Writing its position copies directly didn't: every frame the physics body put them back, V1.1.65's watch.)
-        static constexpr std::uint64_t drop_countdown_ms = 3000, drop_fall_ms = 350;
+        static constexpr std::uint64_t drop_countdown_ms = nitro_countdown_ms, drop_step_ms = nitro_countdown_step_ms, drop_fall_ms = 350;
+        // ahead of Crash needs him moving on the ground; after the countdown he gets this long to start, then it falls
+        static constexpr std::uint64_t ahead_wait_ms = 1500;
         // the falling Nitro borrows a spawner at least this far away when there is one (see nitro_spawner_near)
         static constexpr float drop_spawner_away = 1500;
         static constexpr float drop_height = 420;
         struct NitroDropTrap
         {
-            enum Stage { Idle, Countdown, Spawning, Settling, Falling } stage = Idle;
+            enum Stage { Idle, Countdown, Ahead, Spawning, Settling, Falling } stage = Idle;
+            bool ahead = false; // the coin flip: a Nitro appears ahead of Crash instead of falling onto him
             std::uint64_t start = 0, spawned = 0, fall_start = 0;
             int ticks = 0, settle_frames = 0;
             float drop = 0; // how far it falls
@@ -2584,6 +2589,32 @@ namespace ingame
         void play_tick()
         {
             PlaySoundA(reinterpret_cast<LPCSTR>(tick_sound().data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+        }
+        // the Nitro Trap countdown's sound for number `index` (0 for 3, 1 for 2, 2 for 1), in step with the numbers: the
+        // game's own TNT countdown once a TNT has counted down in this level (a sound as long as the whole countdown
+        // plays once, at 3; a short one at every number), otherwise the client's own tick
+        void countdown_tick(int index)
+        {
+            static std::string announced;
+            const auto name = tnt_tick_sound();
+            if (!name.empty())
+            {
+                const auto length = game_sound_length_ms(name);
+                const bool whole = length >= 2 * nitro_countdown_step_ms;
+                if (whole && index > 0)
+                    return; // still playing from 3
+                if (play_game_sound(name))
+                {
+                    if (announced != name)
+                    {
+                        announced = name;
+                        std::cout << "Nitro Trap: the countdown uses the game's TNT sound \"" << name << "\" (" << length << " ms, "
+                                  << (whole ? "played once at 3" : "at every number") << ")\n" << std::flush;
+                    }
+                    return;
+                }
+            }
+            play_tick();
         }
         // a heap page we may read and write: committed, private, read/write, not a guard, uncached or write-combined
         // page (those can belong to the graphics driver)
@@ -2747,8 +2778,11 @@ namespace ingame
                 {
                     d = {};
                     d.stage = NitroDropTrap::Countdown, d.start = now, d.level = level;
+                    // one Nitro Trap, two endings, half and half (/nitro_drop fall or ahead picks one)
+                    static std::mt19937 coin{std::random_device{}()};
+                    d.ahead = state.nitro_drop_kind == 2 || (state.nitro_drop_kind == 0 && std::bernoulli_distribution(0.5)(coin));
                     state.nitro_countdown_end = now + drop_countdown_ms;
-                    std::cout << "Nitro drop: countdown\n" << std::flush;
+                    std::cout << "Nitro Trap: countdown, then a Nitro " << (d.ahead ? "appears ahead of Crash" : "falls onto Crash") << "\n" << std::flush;
                 }
             }
             static std::uint64_t last_tick = 0;
@@ -2779,10 +2813,39 @@ namespace ingame
                     stop_nitro_drop(state, "called off: Crash can't move");
                     return;
                 }
-                if (d.ticks < 3 && elapsed >= static_cast<std::uint64_t>(d.ticks) * 1000)
-                    ++d.ticks, play_tick();
+                // a tick as each number appears, like a TNT crate
+                if (d.ticks < 3 && elapsed >= static_cast<std::uint64_t>(d.ticks) * drop_step_ms)
+                    countdown_tick(d.ticks++);
                 if (elapsed < drop_countdown_ms)
                     return;
+                if (d.ahead)
+                {
+                    d.stage = NitroDropTrap::Ahead, d.spawned = now;
+                    std::cout << "Nitro Trap: ahead of Crash\n" << std::flush;
+                }
+            }
+            if (d.stage == NitroDropTrap::Ahead)
+            {
+                if (!state.player_ready)
+                {
+                    stop_nitro_drop(state, "called off: Crash can't move");
+                    return;
+                }
+                // a Nitro ahead of him, where the ahead kind always puts it: on the ground he is running on
+                std::string why;
+                if (nitro_spawn(why))
+                {
+                    d = {}; // the ahead Nitro stays where it appeared, nothing more to do
+                    state.nitro_countdown_end = std::min<std::uint64_t>(state.nitro_countdown_end, now) - 1500; // "LOOK OUT!" 1 s
+                    return;
+                }
+                if (now - d.spawned < ahead_wait_ms)
+                    return;
+                std::cout << "Nitro Trap: nothing ahead after " << ahead_wait_ms / 1000.0 << " s (" << why << "): it falls onto him instead\n" << std::flush;
+                d.ahead = false, d.stage = NitroDropTrap::Countdown;
+            }
+            if (d.stage == NitroDropTrap::Countdown)
+            {
                 // the countdown is over: the Nitro appears high above the spot (the game creates it there, whole)
                 d.spot = drop_spot();
                 const std::array<float, 3> high{d.spot[0], d.spot[1], d.spot[2] + drop_height};
@@ -2970,6 +3033,10 @@ namespace ingame
         // requests from /nitro_spawn and the Nitro Trap; a request waits up to 5 seconds for a spot
         void update_nitro_trap(Shared &state, const std::string &level)
         {
+            // the game's sounds from the last level may be gone with it
+            static std::string sound_level;
+            if (level != sound_level)
+                sound_level = level, forget_game_sounds();
             record_crash_path(level);
             nitro_spawn_followup();
             update_nitro_drop(state, level);
@@ -5733,6 +5800,115 @@ namespace ingame
         }
         return result;
     }
+    // Crash's colors, research. /crash_probe: from Crash's model component (+176) and render model, follow pointers to
+    // game objects (5 levels, at most 500 objects) and log each with the names it holds, to find his model's parts
+    // (fur, pants, shoes, laces, the mohawk) and what color settings each has. Read-only.
+    void crash_probe()
+    {
+        const auto actor = player();
+        if (!actor)
+        {
+            std::cout << "Crash probe: Crash not found. Try it inside a level.\n" << std::flush;
+            return;
+        }
+        const auto component = value<Address>(actor + 176), model = crate_model(actor);
+        std::cout << "Crash probe: Crash " << describe_object(actor) << "; +176 " << describe_object(component) << "; render model "
+                  << (model ? describe_object(model) : std::string("not found")) << "\n" << std::flush;
+        struct Node
+        {
+            Address at;
+            std::string path;
+            unsigned depth;
+        };
+        std::deque<Node> queue{{model ? model : component, model ? "model" : "component", 0}};
+        if (model)
+            queue.push_back({component, "component", 0});
+        std::set<Address> seen{actor};
+        unsigned shown = 0;
+        while (!queue.empty() && shown < 500)
+        {
+            const auto n = queue.front();
+            queue.pop_front();
+            if (!n.at || !seen.insert(n.at).second || !readable(n.at, 0x100))
+                continue;
+            const auto type = value<Address>(n.at);
+            if (type < base() || type >= module_end())
+                continue;
+            ++shown;
+            std::cout << "Crash probe: " << n.path << " = " << describe_object(n.at) << "\n";
+            if (n.depth >= 5)
+                continue;
+            // a list: count at +16, its entries at +32
+            const auto count = value<unsigned>(n.at + 16);
+            const auto entries = value<Address>(n.at + 32);
+            if (count && count <= 128 && readable(entries, count * 8))
+                for (unsigned i = 0; i < count; ++i)
+                    queue.push_back({value<Address>(entries + i * 8), n.path + "[" + std::to_string(i) + "]", n.depth + 1});
+            for (unsigned off = 8; off < 0x100; off += 8)
+            {
+                const auto p = value<Address>(n.at + off);
+                if (p > 0x10000 && p < 0x7ffffffeffffULL && !seen.count(p) && readable(p, 16))
+                    if (const auto t = value<Address>(p); t >= base() && t < module_end())
+                        queue.push_back({p, n.path + hex(off), n.depth + 1});
+            }
+        }
+        std::cout << "Crash probe: " << shown << " objects listed\n" << std::flush;
+    }
+    // /crash_tint: the crate markers' tint (a CFxTintBundle) on Crash's whole model, blending his colors toward one.
+    // Put back on his new model after a respawn or a new level; removed with amount 0.
+    struct CrashTint
+    {
+        Address model = 0, bundle = 0, handle = 0;
+        std::array<float, 4> blend{};
+    } crash_tint_state;
+    void update_crash_tint(const Shared &state)
+    {
+        auto &t = crash_tint_state;
+        const std::array<float, 4> want{state.crash_tint[0], state.crash_tint[1], state.crash_tint[2], state.crash_tint[3]};
+        const bool on = want[3] > 0;
+        const auto actor = player();
+        const auto model = actor ? crate_model(actor) : 0;
+        if (t.bundle && (!on || model != t.model || resolve(t.handle) != t.model))
+        {
+            if (resolve(t.handle) == t.model && typed(t.model, 0x1676cb8))
+            {
+                const auto bundles = list(value<Address>(t.model + 224), 64);
+                if (std::find(bundles.begin(), bundles.end(), t.bundle) != bundles.end())
+                    reinterpret_cast<void (*)(Address, Address)>(base() + 0xaf7370)(t.model, t.bundle);
+            }
+            release(t.bundle);
+            model_handle(t.handle, 0);
+            t = {};
+            if (!on)
+                std::cout << "Crash tint: off\n" << std::flush;
+        }
+        if (!on || !model)
+            return;
+        if (!t.bundle)
+        {
+            std::lock_guard lock(crate_mutex);
+            if (!tint_api())
+                return;
+            const auto bundle = reinterpret_cast<Address (*)(Address)>(base() + 0x882b0)(0);
+            if (!typed(bundle, 0x138da80))
+                return;
+            retain(bundle);
+            Address handle = 0;
+            model_handle(handle, model);
+            if (resolve(handle) != model || !write(bundle + 32, default_tint) || !write(bundle + 48, want))
+            {
+                model_handle(handle, 0);
+                release(bundle);
+                return;
+            }
+            reinterpret_cast<void (*)(Address, Address)>(base() + 0xacd1c0)(model, bundle);
+            t = {model, bundle, handle, want};
+            std::cout << "Crash tint: on (" << want[0] << ", " << want[1] << ", " << want[2] << " at " << static_cast<int>(want[3] * 100 + 0.5f)
+                      << "%) on " << describe_object(model) << "\n" << std::flush;
+        }
+        else if (t.blend != want && write(t.bundle + 48, want))
+            t.blend = want;
+    }
     void update_gameplay(Shared &state)
     {
         const auto marker_world = value<Address>(base() + 0x1a64690);
@@ -5793,6 +5969,13 @@ namespace ingame
         }
         if (!level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))).empty())
             update_aku_lock(state.aku_lock != 0);
+        // Crash's colors (research), in levels and hubs
+        update_crash_tint(state);
+        if (state.crash_probe_request != state.crash_probe_ack)
+        {
+            state.crash_probe_ack = state.crash_probe_request;
+            crash_probe();
+        }
         update_ice_watch(state.ice_watch != 0);
         update_move_probe(state.move_probe != 0);
         update_ice_test(state.ice_test <= 14 ? state.ice_test : 0);

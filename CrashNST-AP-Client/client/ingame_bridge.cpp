@@ -453,6 +453,20 @@ std::string BoxMarkers::apply_trap(unsigned kind, unsigned seconds)
     unlock();
     return after;
 }
+void BoxMarkers::request_crash_probe()
+{
+    lock();
+    ++shared_->crash_probe_request;
+    unlock();
+}
+void BoxMarkers::crash_tint(float red, float green, float blue, float amount)
+{
+    const auto unit = [](float v) { return std::isfinite(v) ? std::clamp(v, 0.0f, 1.0f) : 0.0f; };
+    lock();
+    shared_->crash_tint[0] = unit(red), shared_->crash_tint[1] = unit(green), shared_->crash_tint[2] = unit(blue);
+    shared_->crash_tint[3] = unit(amount);
+    unlock();
+}
 void BoxMarkers::request_nitro_probe()
 {
     lock();
@@ -535,9 +549,10 @@ void BoxMarkers::ice_test(unsigned mode)
     shared_->ice_test = mode;
     unlock();
 }
-void BoxMarkers::request_nitro_drop()
+void BoxMarkers::request_nitro_drop(unsigned kind)
 {
     lock();
+    shared_->nitro_drop_kind = kind <= 2 ? kind : 0;
     ++shared_->nitro_drop_request;
     unlock();
 }

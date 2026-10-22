@@ -35,6 +35,10 @@ namespace ingame
         return item >= trap_item(0) && item < trap_item(TrapCount) ? static_cast<int>(item - trap_item(0)) : -1;
     }
     inline constexpr unsigned freeze_trap_ms = 6000;
+    // Nitro Trap: "NITRO INCOMING 3, 2, 1" at a TNT crate's own tempo (V1.1.73 clip, frame by frame: 3, 2 and 1 appear
+    // 1.4 s, 1.3 s apart and it blows 1.4 s after the 1), then the Nitro: 3 steps in all
+    inline constexpr unsigned nitro_countdown_step_ms = 1370;
+    inline constexpr unsigned nitro_countdown_ms = 3 * nitro_countdown_step_ms;
     // queued traps fire one at a time, this far apart
     inline constexpr unsigned trap_gap_ms = 10000;
 

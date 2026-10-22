@@ -1,6 +1,7 @@
 """NST Trilogy world"""
 
 import hashlib
+import logging
 from collections import Counter
 
 from BaseClasses import Item, ItemClassification, Location, Region
@@ -45,6 +46,11 @@ from .data import (
     valid_requirement_counts,
 )
 
+
+# the fewest checks a seed may open with, and the largest share of its locations that may need progression items:
+# fill gives up on narrower or denser seeds (see CrashWorld.widen_start)
+MIN_OPEN_START = 4
+MAX_PROGRESSION_SHARE = 0.65
 
 class CrashItem(Item):
     game = GAME
@@ -661,6 +667,125 @@ class CrashWorld(World):
         name, missing = self.random.choice(deeper or candidates)
         return self.multiworld.get_location(name, self.player), Counter(missing), open_now
 
+    def open_at_start(self, starts):
+        """how many active checks the starting items reach"""
+        count = 0
+        for level in self.active_levels:
+            entrance = Counter(self.lock_requirements(entrance_requirements(level, self.active_levels)))
+            if entrance - starts:
+                continue
+            for event, _, address in checks(level):
+                if address in self.active_checks and address not in self.locked_collectibles:
+                    count += not (Counter(self.requirements(level, event)) - starts)
+            for crate in self.active_crates:
+                if crate["level"] == level.key:
+                    count += not (Counter(self.box_requirements(level, crate_event(crate))) - starts)
+        return count
+
+    def progression_share(self, starts):
+        """the share of the seed's locations that progression items will fill (as create_items counts them)"""
+        required = Counter(self.lock_requirements(f"{level.name} - Access" for level in self.active_levels))
+        for level in self.active_levels:
+            for event, _, address in checks(level):
+                if address in self.active_checks or self.local_reward_sources.get(address) in GEMS:
+                    required |= Counter(self.requirements(level, event))
+        for crate in self.active_crates:
+            required |= Counter(self.box_requirements(BY_KEY[crate["level"]], crate_event(crate)))
+        required -= starts
+        for name in set(self.locked_collectibles.values()) | set(self.local_reward_sources.values()) | set(self.shuffled_collectibles.values()):
+            required.pop(name, None)
+        gems = {name for name in self.shuffled_collectibles.values() if name in GEMS} - set(starts)
+        capacity = len(self.active_checks) - len(self.locked_collectibles)
+        return (sum(required.values()) + len(gems)) / max(1, capacity)
+
+    def item_room(self, starts):
+        """how many items create_items will have to place and the room it will have (before it hands out spare
+        collectible rewards, which it does first when room is short): (items, room, spare rewards)"""
+        required = Counter(self.lock_requirements(f"{level.name} - Access" for level in self.active_levels))
+        for level in self.active_levels:
+            for event, _, address in checks(level):
+                if address in self.active_checks or self.local_reward_sources.get(address) in GEMS:
+                    required |= Counter(self.requirements(level, event))
+        for crate in self.active_crates:
+            required |= Counter(self.box_requirements(BY_KEY[crate["level"]], crate_event(crate)))
+        required -= starts
+        locked = set(self.locked_collectibles.values())
+        local_reward_items = set(self.local_reward_sources.values())
+        shuffled = set(self.shuffled_collectibles.values()) - set(starts)
+        for name in locked | local_reward_items | shuffled:
+            required.pop(name, None)
+        always = [
+            name
+            for name in (
+                *(BASIC_MOVES if self.ability_shuffle else ()),
+                *(name for name in ABILITIES if int(name[6]) in self.enabled_campaigns),
+                *((AKU_AKU,) if self.options.aku_aku_sanity.value else ()),
+            )
+            if name not in required and name not in starts and name not in locked and name not in shuffled
+            and name not in local_reward_items
+        ]
+        room = len(self.active_checks) - len(self.locked_collectibles)
+        return sum(required.values()) + len(shuffled) + len(always), room, sum(name not in GEMS for name in shuffled), required
+
+    def short_of_room(self, starts):
+        """the seed can't hold its items ("more checks are needed"), or a Token Hunt has no slot left for tokens"""
+        items, room, spare, _ = self.item_room(starts)
+        token_hunt = self.victory_goal["type"] == "token_hunt"
+        return items - spare > room or (token_hunt and items >= room)
+
+    def widen_start(self, starts):
+        """Fill fails on narrow or dense seeds (hub and level locks, Ability Shuffle, few check types, no boxes): one
+        that opens with only one to three checks, or whose progression items fill most of its locations. Starting
+        levels are added, earliest hub area first, until the start reaches MIN_OPEN_START checks and progression
+        fills at most MAX_PROGRESSION_SHARE of the locations: only levels that help, at most eight more."""
+        open_now, share = self.open_at_start(starts), self.progression_share(starts)
+        short = self.short_of_room(starts)
+        if open_now >= MIN_OPEN_START and share <= MAX_PROGRESSION_SHARE and not short:
+            return starts
+        candidates = [
+            self.level_placements[level.key]
+            for level in sorted(self.active_levels, key=lambda level: (hub_area(level.key), level.key))
+            if level.key.startswith("L")
+            and level.key not in SECRET_SOURCES
+            and self.level_placements[level.key] not in self.starting_levels
+        ]
+        added = []
+        for key in candidates:
+            # a seed short of room takes as many starting levels as it needs; a merely narrow or dense one at most 8
+            if not short and ((open_now >= MIN_OPEN_START and share <= MAX_PROGRESSION_SHARE) or len(added) >= 8):
+                break
+            trial = Counter(starts)
+            trial |= Counter(self.lock_requirements([f"{BY_KEY[key].name} - Access"]))
+            more, less = self.open_at_start(trial), self.progression_share(trial)
+            if short or (open_now < MIN_OPEN_START and more > open_now) or (share > MAX_PROGRESSION_SHARE and less < share):
+                self.starting_levels.append(key)
+                added.append(BY_KEY[key].name)
+                starts, open_now, share = trial, more, less
+                short = self.short_of_room(starts)
+        # levels ran out (a campaign with two or three levels): start with a few of the items checks need instead,
+        # boss access, hub unlocks, gems and moves, keeping only ones that open the start or thin the progression
+        if open_now < MIN_OPEN_START or share > MAX_PROGRESSION_SHARE:
+            ranked = lambda name: hashlib.sha256(f"{self.multiworld.seed}/{self.player}/widen/{name}".encode()).digest()
+            needed = self.item_room(starts)[3]
+            tried = 0
+            for name in sorted(set(needed), key=ranked):
+                if (open_now >= MIN_OPEN_START and share <= MAX_PROGRESSION_SHARE) or tried >= 8:
+                    break
+                trial = Counter(starts)
+                trial |= Counter(self.lock_requirements([name]))
+                trial[name] = max(trial[name], starts[name] + 1)
+                more, less = self.open_at_start(trial), self.progression_share(trial)
+                if (open_now < MIN_OPEN_START and more > open_now) or (share > MAX_PROGRESSION_SHARE and less < share):
+                    tried += 1
+                    added.append(name)
+                    starts, open_now, share = trial, more, less
+        if added:
+            logging.info(
+                f"{GAME}: player {self.player} also starts with {', '.join(added)}, so the seed opens with {open_now} checks "
+                f"and progression fills {share:.0%} of its locations"
+            )
+        return starts
+
     def create_items(self):
         if self.tracker_slot is not None:
             return
@@ -668,6 +793,7 @@ class CrashWorld(World):
         starts.update(self.precollected_collectibles.values())
         if self.ability_shuffle == 1:
             starts["Spin"] = 1
+        starts = self.widen_start(starts)
         spin_locked = False
         spin_route = Counter()  # unlocks placed on starting checks so Spin stays reachable
         if self.ability_shuffle == 2:
@@ -769,15 +895,36 @@ class CrashWorld(World):
                 shuffled.discard(name)
                 self.multiworld.push_precollected(self.create_item(name))
             progression_count = sum(required.values()) + len(shuffled) + len(always)
+        token_hunt = self.victory_goal["type"] == "token_hunt"
+        if progression_count > capacity or (token_hunt and progression_count >= capacity):
+            # last resort for the tightest settings (a handful of levels and checks, every level already open): start
+            # with items until everything fits, first ones no check needs (moves, abilities, Aku Aku), then ones checks
+            # need. Token Hunt keeps a slot for tokens.
+            need = progression_count - capacity + token_hunt
+            ranked = lambda name: hashlib.sha256(f"{self.multiworld.seed}/{self.player}/room/{name}".encode()).digest()
+            given = []
+            for name in sorted(always, key=ranked)[:need]:
+                always.remove(name)
+                given.append(name)
+            for name in sorted(required.elements(), key=ranked)[: need - len(given)]:
+                required[name] -= 1
+                given.append(name)
+            required = +required
+            for name in given:
+                self.multiworld.push_precollected(self.create_item(name))
+            logging.info(f"{GAME}: player {self.player} starts with {', '.join(given)}: the seed has too few checks to hold them")
+            progression_count = sum(required.values()) + len(shuffled) + len(always)
         if progression_count > capacity:
             raise ValueError(
                 f"{progression_count - capacity} more checks are needed to hold the required items, abilities "
                 "and moves. Enable box checks (boxsanity) or more gem, crystal or relic checks"
             )
-        names = (
-            sorted([*required.elements(), *shuffled, *always])
-            + optional[: capacity - progression_count]
-        )
+        free = capacity - progression_count
+        extra = optional[:free]
+        if self.victory_goal["type"] == "token_hunt" and free and len(extra) == free:
+            # spare colored gems would take every free slot and leave Token Hunt none: half go to tokens instead
+            extra = optional[: free - max(1, free // 2)]
+        names = sorted([*required.elements(), *shuffled, *always]) + extra
         pool = [self.create_item(name) for name in names]
         for item in pool:
             if item.name not in required and not (

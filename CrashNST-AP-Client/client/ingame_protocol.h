@@ -144,6 +144,8 @@ namespace ingame
         unsigned nitro_spawn_request = 0, nitro_spawn_ack = 0;
         // Nitro Trap, falling: "NITRO INCOMING 3, 2, 1", then a Nitro falls onto where Crash stands
         unsigned nitro_drop_request = 0, nitro_drop_ack = 0;
+        // what the Nitro Trap does after its countdown: 0 a coin flip, 1 falls onto Crash, 2 appears ahead of him
+        unsigned nitro_drop_kind = 0;
         // set by the game thread: a falling Nitro can start now (a level with a Nitro spawner, not a gimmick level,
         // Crash can move, none running)
         unsigned nitro_drop_ready = 0;
@@ -160,6 +162,10 @@ namespace ingame
         unsigned aku_lock = 0;
         // /aku_give (research for an Aku Aku filler): the client bumps the request, the game thread makes one mask
         unsigned aku_give_request = 0, aku_give_ack = 0;
+        // Crash's colors (research): /crash_probe logs how his model is built (its parts and their names);
+        // /crash_tint blends a color over his whole model: red, green, blue, amount (amount 0: off)
+        unsigned crash_probe_request = 0, crash_probe_ack = 0;
+        float crash_tint[4]{};
         // set by the game thread: a Nitro Trap can spawn here now (level with a ready Nitro spawner, not a
         // gimmick stage, and a spot on Crash's recent path)
         unsigned nitro_ready = 0;

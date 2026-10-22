@@ -3,7 +3,9 @@
 #include <cctype>
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include "trap_rules.h"
+#include "game_sound.h"
 void ClientRuntime::queue_ap_packet(std::string raw)
 {
     std::lock_guard<std::mutex> lock(state_mutex);
@@ -369,8 +371,9 @@ void ClientRuntime::handle_commands()
                     print_console("Trap test needs the in-game adapter. Load into a level first.");
                 else if (kind->second == ingame::TrapNitro)
                 {
-                    box_markers->request_nitro_spawn();
-                    print_console("Nitro Trap test. Not sent to AP. Close the console (F1); it spawns within 5 seconds once Crash has walked a few steps.");
+                    box_markers->request_nitro_drop(0);
+                    print_console("Nitro Trap test: NITRO INCOMING 3, 2, 1, then a Nitro appears ahead of Crash or falls onto him (half and half). "
+                                  "Not sent to AP. Close the console (F1) and move!");
                 }
                 else
                 {
@@ -468,16 +471,64 @@ void ClientRuntime::handle_commands()
                 else
                     print_console("Aku give needs the in-game adapter. Load into a level first.");
             }
+            else if (command == "/crash_probe")
+            {
+                if (box_markers)
+                {
+                    box_markers->request_crash_probe();
+                    print_console("Crash probe: his model's parts and their names go to the log (\"Crash probe:\" lines). Read-only.");
+                }
+                else
+                    print_console("Crash probe needs the in-game adapter. Load into a level first.");
+            }
+            else if (command == "/crash_tint")
+            {
+                // /crash_tint red green blue amount (each 0..1), or off
+                std::istringstream values(argument);
+                float red = 0, green = 0, blue = 0, amount = 0.6f;
+                const bool off = argument == "off" || argument == "0";
+                if (!off && !(values >> red >> green >> blue))
+                    print_console("Use /crash_tint red green blue [amount], each 0 to 1 (for example /crash_tint 0 0.4 1 0.6 for blue), or /crash_tint off.");
+                else if (!box_markers)
+                    print_console("Crash tint needs the in-game adapter. Load into a level first.");
+                else
+                {
+                    if (!off && !(values >> amount))
+                        amount = 0.6f;
+                    box_markers->crash_tint(red, green, blue, off ? 0.0f : amount);
+                    print_console(off ? std::string("Crash tint off.")
+                                      : "Crash tint test: his whole model blends toward that color (research for fur, pants and shoe colors). /crash_tint off to undo.");
+                }
+            }
             else if (command == "/nitro_drop")
             {
                 if (box_markers)
                 {
-                    box_markers->request_nitro_drop();
-                    print_console("Nitro drop test: NITRO INCOMING 3, 2, 1, then a Nitro falls onto where Crash stands. Not sent to AP. Close the console (F1) and move!");
+                    // /nitro_drop: the trap as it comes (half and half); /nitro_drop fall or ahead picks the ending
+                    const unsigned kind = argument == "fall" ? 1 : argument == "ahead" ? 2 : 0;
+                    box_markers->request_nitro_drop(kind);
+                    print_console(std::string("Nitro Trap test: NITRO INCOMING 3, 2, 1, then a Nitro ") +
+                                  (kind == 1 ? "falls onto Crash" : kind == 2 ? "appears ahead of Crash (keep running)" : "appears ahead of Crash or falls onto him") +
+                                  ". Not sent to AP. Close the console (F1) and move! (/nitro_drop fall or /nitro_drop ahead picks one.)");
                 }
                 else
                     print_console("Nitro drop needs the in-game adapter. Load into a level first.");
             }
+            else if (command == "/sounds")
+            {
+                // research: the game sounds played in this level (a TNT's countdown shows up once one counts down)
+                const auto names = ingame::game_sound_names();
+                std::string list;
+                for (const auto &name : names)
+                    list += (list.empty() ? "" : ", ") + name;
+                const auto tnt = ingame::tnt_tick_sound();
+                print_console(names.empty() ? std::string("No game sounds seen in this level yet (or NST's FMOD isn't reachable: see \"Game sound:\" in the log).")
+                                            : "Game sounds this level: " + list + (tnt.empty() ? "" : ". Nitro countdown uses: " + tnt));
+            }
+            else if (command == "/sound_play")
+                print_console(argument.empty() ? std::string("Use /sound_play part of a name from /sounds.")
+                              : ingame::play_game_sound(argument) ? "Playing the game sound matching \"" + argument + "\"."
+                                                                  : "No game sound matching \"" + argument + "\" was played in this level yet.");
             else if (command == "/nitro_spawn")
             {
                 if (box_markers)

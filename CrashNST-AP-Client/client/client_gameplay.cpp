@@ -583,30 +583,17 @@ void ClientRuntime::update_ownership(ClientTick &tick)
     if (tick.room_ready && box_markers && session.ready() && session.nitro_pending() && std::chrono::steady_clock::now() >= next_trap)
         try
         {
-            // each Nitro Trap is one of two kinds, picked at random: a Nitro ahead of Crash, or a Nitro that falls
-            // onto him after a countdown. If its kind can't happen for 8 seconds (the ahead one needs Crash running),
-            // the other kind is used.
+            // every Nitro Trap starts with "NITRO INCOMING 3, 2, 1" at a TNT crate's tempo; then the game thread flips a
+            // coin: a Nitro appears ahead of Crash, or one falls onto him (if he isn't moving when it should appear
+            // ahead, he gets a moment to start, then it falls instead)
             const auto scene = read_scene(GetCurrentProcess());
             const auto now = std::chrono::steady_clock::now();
-            if (nitro_kind < 0)
-                nitro_kind = std::uniform_int_distribution<int>(0, 1)(nitro_random), nitro_kind_since = now;
-            const bool waited = now - nitro_kind_since > std::chrono::seconds(8);
-            if (scene.camera_active && !level_key(scene.zone).empty() && box_markers->player_ready())
+            if (scene.camera_active && !level_key(scene.zone).empty() && box_markers->player_ready() && box_markers->nitro_drop_ready())
             {
-                const bool ahead = box_markers->nitro_ready(), drop = box_markers->nitro_drop_ready();
-                const bool use_drop = drop && (nitro_kind == 1 || (waited && !ahead));
-                const bool use_ahead = !use_drop && ahead && (nitro_kind == 0 || waited);
-                if (use_drop || use_ahead)
-                {
-                    session.take_nitro();
-                    if (use_drop)
-                        box_markers->request_nitro_drop();
-                    else
-                        box_markers->request_nitro_spawn();
-                    print_console(use_drop ? "Nitro Trap! Look up!" : "Nitro Trap!", true);
-                    nitro_kind = -1;
-                    next_trap = now + std::chrono::milliseconds(ingame::trap_gap_ms);
-                }
+                session.take_nitro();
+                box_markers->request_nitro_drop(0);
+                print_console("Nitro Trap! NITRO INCOMING!", true);
+                next_trap = now + std::chrono::milliseconds(ingame::trap_gap_ms);
             }
         }
         catch (const std::exception &e)

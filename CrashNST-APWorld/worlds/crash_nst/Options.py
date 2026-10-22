@@ -90,7 +90,9 @@ class StartingLevels(Range):
     """Number of starting level entrances per enabled campaign.
 
     Fills the earliest hub areas available in the selected level pool first,
-    then unlocks more if needed.
+    then unlocks more if needed. Very tight settings (hub and level locks, few
+    check types, no boxsanity) get a few more starting levels automatically, so
+    the seed opens with at least 4 checks and can always be generated.
     """
 
     display_name = "Starting Levels per Campaign"

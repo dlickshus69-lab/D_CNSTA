@@ -44,7 +44,8 @@ public:
     void move_probe(bool on);
     void ice_test(unsigned mode);
     void request_ice_find();
-    void request_nitro_drop();
+    // the Nitro Trap: countdown, then kind 0 a coin flip, 1 a Nitro falls onto Crash, 2 one appears ahead of him
+    void request_nitro_drop(unsigned kind = 0);
     std::string take_ice_note(); // a new console message from the game thread, or empty
     void request_nitro_spawn();
     bool nitro_ready();
@@ -70,6 +71,9 @@ public:
     void slow_tilt(float tilt);
     void aku_lock(bool on);
     void request_aku_give();
+    // Crash's colors (research): log his model's parts; blend a color over him (amount 0 turns it off)
+    void request_crash_probe();
+    void crash_tint(float red, float green, float blue, float amount);
     float tuned_slow_tilt();
     bool toggle(const std::string &target, const std::string &value);
     void stop(bool handover = false);

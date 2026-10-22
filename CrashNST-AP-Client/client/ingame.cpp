@@ -4,6 +4,7 @@
 #include "game_font.h"
 #include "game_memory.h"
 #include "trap_rules.h"
+#include "game_sound.h"
 #include <d3d11.h>
 #include <dxgi1_5.h>
 #include <d3dcompiler.h>
@@ -442,6 +443,8 @@ namespace
             }
         }
         std::cout << "Controller input hooks:" << (hooked.empty() ? " none found" : hooked) << "\n" << std::flush;
+        // the game's own sounds (the TNT countdown for the Nitro Trap), through NST's FMOD imports
+        install_sound_hooks();
     }
 
     bool bridge_lock(DWORD wait = 0)
@@ -1296,19 +1299,20 @@ namespace
                                   r.draw.push_back(r.vertex(v->x, v->y, 0.00024f, 0.00024f, v->color));
                           });
         }
-        // the falling Nitro's countdown, near the top middle of the screen (shown even with the HUD hidden), then
-        // "LOOK OUT!" until it lands (the game thread clears the countdown then)
+        // the Nitro Trap's countdown, near the top middle of the screen (shown even with the HUD hidden), a number per
+        // TNT beat, then "LOOK OUT!" until it lands (the game thread clears the countdown then)
         if (!startup_mode && scene.camera_active && snapshot->nitro_countdown_end)
             if (const auto now = GetTickCount64(); now < snapshot->nitro_countdown_end + 2500)
             {
                 const bool falling = now >= snapshot->nitro_countdown_end;
-                const auto left = falling ? 0u : static_cast<unsigned>((snapshot->nitro_countdown_end - now + 999) / 1000);
+                const auto step = nitro_countdown_step_ms;
+                const auto left = falling ? 0u : static_cast<unsigned>((snapshot->nitro_countdown_end - now + step - 1) / step);
                 const std::string warning = falling ? std::string("LOOK OUT!") : "NITRO INCOMING!  " + std::to_string(left);
                 const float scale = r.height >= 1000 ? 2.0f : 1.6f;
                 const float width = r.text_width(warning) * scale, x = (r.width - width) / 2, y = r.height * 0.16f;
                 r.quad(x - 18 * scale, y - 6 * scale, width + 36 * scale, 34 * scale, 0xbb101010);
-                // Nitro green, blinking brighter on each new second
-                const bool flash = falling ? (now / 120) % 2 == 0 : (snapshot->nitro_countdown_end - now) % 1000 > 800;
+                // Nitro green, blinking brighter as each number appears
+                const bool flash = falling ? (now / 120) % 2 == 0 : (snapshot->nitro_countdown_end - now) % step > step - 200;
                 r.big_text(x + 2 * scale, y + 2 * scale, warning, 0xff000000, scale);
                 r.big_text(x, y, warning, flash ? 0xffb0ffb0 : 0xff30ff50, scale);
             }
