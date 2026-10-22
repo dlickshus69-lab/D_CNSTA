@@ -154,6 +154,31 @@ namespace ingame
             std::sort(result.begin(), result.end());
             return result;
         }
+        std::string extension(const std::string &name)
+        {
+            const auto slash = name.find_last_of("/\\:");
+            const auto dot = name.find_last_of('.');
+            return dot == std::string::npos || (slash != std::string::npos && dot < slash) ? std::string("(none)") : lower(name.substr(dot));
+        }
+        bool has_word(const std::string &name, std::initializer_list<const char *> words)
+        {
+            const auto l = lower(name);
+            return std::any_of(words.begin(), words.end(), [&](const char *w) { return l.find(w) != std::string::npos; });
+        }
+        // archive files that can hold sound samples: the sound_samples folder, or the usual sound-bank kinds.
+        // The sounds/banks/*.igz files are only the banks' descriptions (events, volumes), no audio.
+        bool sound_file(const std::string &name)
+        {
+            const auto kind = extension(name);
+            if (kind == ".igz")
+                return false;
+            return has_word(name, {"sound", "audio", "sfx"}) || kind == ".snd" || kind == ".fsb" || kind == ".bank" || kind == ".wav";
+        }
+        // the always-loaded archives, where sounds shared by every level are likeliest
+        bool shared_archive(const std::filesystem::path &path)
+        {
+            return has_word(path.filename().string(), {"permanent", "common", "crash", "shared", "sound", "audio", "global", "boot"});
+        }
         // FSB5 sample rates by index
         constexpr std::array<unsigned, 11> fsb5_rates{{4000, 8000, 11000, 11025, 16000, 22050, 24000, 32000, 44100, 48000, 96000}};
         std::string fsb5_codec(unsigned mode)
@@ -168,9 +193,12 @@ namespace ingame
             case 6: return "GC ADPCM";
             case 7: return "IMA ADPCM";
             case 8: return "VAG";
+            case 9: return "HEVAG";
             case 10: return "XMA";
             case 11: return "MPEG";
+            case 12: return "CELT";
             case 13: return "AT9";
+            case 14: return "XWMA";
             case 15: return "Vorbis";
             case 16: return "FADPCM";
             case 17: return "Opus";
@@ -197,17 +225,17 @@ namespace ingame
                 return "PCM8";
             return "unknown (mode " + std::to_string(mode) + ")";
         }
-        // the samples of an FSB4 or FSB5 bank (vgmstream's layouts)
-        std::vector<GameSound> bank_samples(const Bytes &b)
+        // the samples of an FSB5 or FSB4 bank starting at `at` (vgmstream's layouts); offsets are from the file's start
+        std::vector<GameSound> fsb_samples(const Bytes &b, std::size_t at)
         {
             std::vector<GameSound> result;
-            if (b.size() < 64)
+            if (b.size() < at + 64)
                 return result;
-            if (!std::memcmp(b.data(), "FSB5", 4))
+            if (!std::memcmp(b.data() + at, "FSB5", 4))
             {
-                const auto version = word(b, 4), count = word(b, 8), headers = word(b, 12), names = word(b, 16), data = word(b, 20), mode = word(b, 24);
-                const std::size_t base = version == 0 ? 0x40 : 0x3c;
-                require(count <= 100000 && base + headers + names <= b.size());
+                const auto version = word(b, at + 4), count = word(b, at + 8), headers = word(b, at + 12), names = word(b, at + 16), data = word(b, at + 20), mode = word(b, at + 24);
+                const std::size_t base = at + (version == 0 ? 0x40 : 0x3c);
+                require(count <= 100000 && headers <= limit && names <= limit && base + headers + names <= b.size());
                 const auto data_start = base + headers + names;
                 std::size_t p = base;
                 for (unsigned i = 0; i < count; ++i)
@@ -217,7 +245,8 @@ namespace ingame
                     GameSound s;
                     s.index = i;
                     s.codec = fsb5_codec(mode);
-                    s.channels = ((low >> 5) & 0x03) + 1;
+                    static constexpr unsigned channel_codes[] = {1, 2, 6, 8};
+                    s.channels = channel_codes[(low >> 5) & 0x03];
                     const auto rate = (low >> 1) & 0x0f;
                     s.rate = rate < fsb5_rates.size() ? fsb5_rates[rate] : 0;
                     s.offset = data_start + ((((static_cast<std::uint64_t>(high) & 0x03) << 25) | ((low >> 7) & 0x1ffffff)) << 5);
@@ -238,19 +267,19 @@ namespace ingame
                 }
                 for (unsigned i = 0; i < result.size(); ++i)
                 {
-                    const auto end = i + 1 < result.size() ? result[i + 1].offset : data_start + data;
+                    const auto end = i + 1 < result.size() ? result[i + 1].offset : static_cast<std::uint64_t>(data_start) + data;
                     result[i].bytes = end > result[i].offset ? end - result[i].offset : 0;
                     if (names)
                         result[i].name = string_at(b, base + headers + word(b, base + headers + i * 4));
                 }
                 return result;
             }
-            if (!std::memcmp(b.data(), "FSB4", 4))
+            if (!std::memcmp(b.data() + at, "FSB4", 4))
             {
-                const auto count = word(b, 4), headers = word(b, 8), flags = word(b, 20);
-                require(count <= 100000 && 0x30ull + headers <= b.size());
-                std::size_t p = 0x30;
-                std::uint64_t offset = 0x30ull + headers;
+                const auto count = word(b, at + 4), headers = word(b, at + 8), flags = word(b, at + 20);
+                require(count <= 100000 && at + 0x30ull + headers <= b.size());
+                std::size_t p = at + 0x30;
+                std::uint64_t offset = at + 0x30ull + headers;
                 GameSound first;
                 std::uint32_t first_mode = 0;
                 for (unsigned i = 0; i < count; ++i)
@@ -288,11 +317,185 @@ namespace ingame
             }
             return result;
         }
-        bool bank_name(const std::string &member)
+        // a RIFF WAVE file: one sample
+        std::vector<GameSound> wav_samples(const Bytes &b)
         {
-            const auto l = lower(member);
-            return (l.size() > 4 && (l.compare(l.size() - 4, 4, ".snd") == 0 || l.compare(l.size() - 4, 4, ".fsb") == 0)) &&
-                   l.find("sound") != std::string::npos;
+            std::vector<GameSound> result;
+            if (b.size() < 44 || std::memcmp(b.data(), "RIFF", 4) || std::memcmp(b.data() + 8, "WAVE", 4))
+                return result;
+            GameSound s;
+            unsigned tag = 0, bits = 0, align = 0;
+            for (std::size_t p = 12; p + 8 <= b.size();)
+            {
+                const auto size = word(b, p + 4);
+                if (!std::memcmp(b.data() + p, "fmt ", 4) && size >= 16)
+                {
+                    tag = get<std::uint16_t>(b, p + 8), s.channels = get<std::uint16_t>(b, p + 10), s.rate = word(b, p + 12);
+                    align = get<std::uint16_t>(b, p + 20), bits = get<std::uint16_t>(b, p + 22);
+                }
+                if (!std::memcmp(b.data() + p, "data", 4))
+                {
+                    s.offset = p + 8;
+                    s.bytes = std::min<std::uint64_t>(size, b.size() - (p + 8));
+                    break;
+                }
+                p += 8 + size + (size & 1);
+            }
+            if (!s.bytes || !tag)
+                return result;
+            s.signed8 = false;
+            s.codec = tag == 1 ? (bits == 16 ? "PCM16" : bits == 8 ? "PCM8" : "PCM" + std::to_string(bits))
+                      : tag == 2      ? "MS ADPCM"
+                      : tag == 0x11   ? "IMA ADPCM"
+                      : tag == 0x55   ? "MPEG"
+                                      : "WAV format " + std::to_string(tag);
+            s.frames = tag == 1 && align ? static_cast<unsigned>(s.bytes / align) : 0;
+            result.push_back(s);
+            return result;
+        }
+        // the samples in an archive file: an FSB bank (alone, or inside an FMOD Studio .bank or another container) or a WAV.
+        // `format` names what the file turned out to be.
+        std::vector<GameSound> file_samples(const Bytes &b, std::string &format, const std::string &member);
+        std::vector<GameSound> samples_of(const Bytes &b, std::string &format)
+        {
+            static const char fsb5[] = "FSB5", fsb4[] = "FSB4";
+            for (const auto magic : {fsb5, fsb4})
+            {
+                const auto found = std::search(b.begin(), b.end(), magic, magic + 4);
+                if (found != b.end())
+                {
+                    format = magic;
+                    return fsb_samples(b, static_cast<std::size_t>(found - b.begin()));
+                }
+            }
+            auto wav = wav_samples(b);
+            if (!wav.empty())
+                return format = "WAV", wav;
+            format = "other";
+            if (b.size() >= 4)
+            {
+                std::string magic;
+                for (int i = 0; i < 4; ++i)
+                    magic += std::isprint(b[i]) ? static_cast<char>(b[i]) : '.';
+                format = "other \"" + magic + "\"";
+            }
+            return {};
+        }
+        // a file holding one unnamed sample (a WAV, a one-sound bank) is named for the file
+        std::vector<GameSound> file_samples(const Bytes &b, std::string &format, const std::string &member)
+        {
+            auto samples = samples_of(b, format);
+            if (samples.size() == 1 && samples[0].name.empty())
+            {
+                auto file = member;
+                std::replace(file.begin(), file.end(), '\\', '/');
+                samples[0].name = std::filesystem::path(file).stem().string();
+            }
+            return samples;
+        }
+        std::string label(const GameSound &s)
+        {
+            return s.name.empty() ? "#" + std::to_string(s.index) : s.name;
+        }
+        std::string describe(const GameSound &s)
+        {
+            return label(s) + " (" + s.codec + ", " + std::to_string(s.channels) + " ch, " + std::to_string(s.rate) + " Hz, " +
+                   std::to_string(s.rate ? 1000ull * s.frames / s.rate : 0) + " ms) in " + s.member + " [" + std::filesystem::path(s.pak).filename().string() + "]";
+        }
+        // the archive file's samples, read again (for playing or a remembered choice)
+        std::vector<GameSound> reread(const std::filesystem::path &pak, const std::string &member, Bytes &data)
+        {
+            Archive a(pak);
+            for (unsigned i = 0; i < a.count; ++i)
+                if (a.name(i) == member)
+                {
+                    data = a.member(i);
+                    std::string format;
+                    auto samples = file_samples(data, format, member);
+                    for (auto &s : samples)
+                        s.pak = pak.string(), s.member = member;
+                    return samples;
+                }
+            throw std::runtime_error("the file is no longer in its archive");
+        }
+        std::vector<unsigned char> wav_from(const GameSound &sound, const Bytes &bank, std::string &why)
+        {
+            const bool pcm16 = sound.codec == "PCM16", pcm8 = sound.codec == "PCM8";
+            if (!pcm16 && !pcm8)
+                return why = "its codec is " + sound.codec + ", which the client can't play yet", Bytes{};
+            if (!sound.channels || sound.channels > 2 || !sound.rate || !sound.bytes || sound.bytes > 8u * 1024 * 1024)
+                return why = "its format is unexpected", Bytes{};
+            if (sound.offset > bank.size() || sound.bytes > bank.size() - sound.offset)
+                return why = "its data is outside its bank", Bytes{};
+            const auto bits = pcm16 ? 16u : 8u, align = sound.channels * bits / 8;
+            const auto size = static_cast<std::uint32_t>(sound.bytes - sound.bytes % align);
+            Bytes wav(44 + size);
+            const auto put32 = [&](std::size_t at, std::uint32_t v) { std::memcpy(&wav[at], &v, 4); };
+            const auto put16 = [&](std::size_t at, std::uint16_t v) { std::memcpy(&wav[at], &v, 2); };
+            std::memcpy(&wav[0], "RIFF", 4), put32(4, 36 + size), std::memcpy(&wav[8], "WAVE", 4);
+            std::memcpy(&wav[12], "fmt ", 4), put32(16, 16), put16(20, 1), put16(22, static_cast<std::uint16_t>(sound.channels));
+            put32(24, sound.rate), put32(28, sound.rate * align), put16(32, static_cast<std::uint16_t>(align)), put16(34, static_cast<std::uint16_t>(bits));
+            std::memcpy(&wav[36], "data", 4), put32(40, size);
+            std::memcpy(&wav[44], bank.data() + sound.offset, size);
+            if (pcm8 && sound.signed8) // FMOD's 8-bit PCM is signed, WAV's unsigned
+                for (std::size_t i = 44; i < wav.size(); ++i)
+                    wav[i] = static_cast<unsigned char>(wav[i] ^ 0x80);
+            return wav;
+        }
+        // the likeliest TNT countdown: a TNT sound that ticks, beeps or counts, not its explosion. With `prefer`, the
+        // first sound whose name (or "file #index") contains it.
+        const GameSound *countdown_choice(const std::vector<GameSound> &sounds, const std::string &prefer)
+        {
+            const auto full = [](const GameSound &s) { return label(s) + " " + s.member + " #" + std::to_string(s.index); };
+            if (!prefer.empty())
+            {
+                for (const auto &s : sounds)
+                    if (lower(label(s)).find(lower(prefer)) != std::string::npos)
+                        return &s;
+                for (const auto &s : sounds)
+                    if (lower(full(s)).find(lower(prefer)) != std::string::npos)
+                        return &s;
+                return nullptr;
+            }
+            for (const auto &s : sounds)
+                if (has_word(full(s), {"tnt"}) && has_word(label(s), {"count", "tick", "beep", "timer", "fuse"}) && !has_word(label(s), {"explo", "boom", "blast"}))
+                    return &s;
+            for (const auto &s : sounds)
+                if (has_word(full(s), {"tnt"}) && has_word(full(s), {"count", "tick", "beep", "timer", "fuse"}) && !has_word(full(s), {"explo", "boom", "blast"}))
+                    return &s;
+            for (const auto &s : sounds)
+                if (has_word(full(s), {"tnt"}) && !has_word(full(s), {"explo", "boom", "blast", "break"}))
+                    return &s;
+            return nullptr;
+        }
+        // loads the sound for the Nitro countdown; a console line about it. `remember` keeps the choice for next time.
+        std::string use_countdown(const GameSound &sound, const std::filesystem::path &remember, bool remembered = false)
+        {
+            std::string why;
+            Bytes bank;
+            Bytes wav;
+            try
+            {
+                reread(sound.pak, sound.member, bank);
+                wav = wav_from(sound, bank, why);
+            }
+            catch (const std::exception &e)
+            {
+                why = std::string("its file could not be read (") + e.what() + ")";
+            }
+            if (wav.empty())
+                return "Nitro Trap countdown: found \"" + label(sound) + "\" in " + sound.member + ", but " + why + ". /sound_dump " +
+                       std::filesystem::path(sound.member).filename().string() + " saves its file to send";
+            set_countdown_sound(std::move(wav), label(sound));
+            if (!remember.empty() && !remembered)
+            {
+                std::error_code error;
+                std::filesystem::create_directories(remember.parent_path(), error);
+                std::ofstream out(remember, std::ios::binary);
+                out << sound.pak << '\n' << sound.member << '\n' << sound.index << '\n' << label(sound) << '\n';
+            }
+            return "Nitro Trap countdown: plays the game's own \"" + label(sound) + "\" (" + sound.codec + ", " +
+                   std::to_string(sound.rate ? 1000ull * sound.frames / sound.rate : 0) + " ms)" + (remembered ? " (remembered from last time)" : "");
         }
     } // namespace
 
@@ -324,18 +527,14 @@ namespace ingame
             }
         return result;
     }
-    std::vector<GameSound> find_game_sounds(const std::string &text, bool everywhere, unsigned &scanned, unsigned limit_sounds)
+    std::vector<GameSound> find_game_sounds(const std::string &text, bool everywhere, SoundScan &scan, unsigned limit_sounds)
     {
         std::vector<GameSound> result;
-        scanned = 0;
+        scan = {};
         const auto wanted = lower(text);
         for (const auto &path : archives())
         {
-            // the sound-sample banks shared by every level live in the always-loaded archives
-            const auto pak = lower(path.filename().string());
-            if (!everywhere && pak.find("permanent") == std::string::npos && pak.find("common") == std::string::npos &&
-                pak.find("crash") == std::string::npos && pak.find("shared") == std::string::npos)
-                continue;
+            const bool shared = shared_archive(path);
             try
             {
                 Archive a(path);
@@ -343,22 +542,33 @@ namespace ingame
                 {
                     const auto name = a.name(i);
                     const auto l = lower(name);
-                    // music streams are long; the TNT is a short effect
-                    if (!bank_name(name) || l.find("music") != std::string::npos || l.find("stream") != std::string::npos || a.length(i) > 16u * 1024 * 1024)
+                    // music streams are long; the TNT is a short effect. Outside the shared archives only files named
+                    // for the sound are read, unless every archive is searched.
+                    const bool named = !wanted.empty() && l.find(wanted) != std::string::npos;
+                    if (!sound_file(name) || l.find("music") != std::string::npos || l.find("stream") != std::string::npos ||
+                        (!everywhere && !shared && !named) || a.length(i) > 16u * 1024 * 1024)
                         continue;
-                    ++scanned;
+                    ++scan.files;
                     try
                     {
-                        const auto bank = a.member(i);
-                        for (auto &s : bank_samples(bank))
-                            if ((lower(s.name).find(wanted) != std::string::npos || lower(name).find(wanted) != std::string::npos) && result.size() < limit_sounds)
+                        const auto data = a.member(i);
+                        std::string format;
+                        auto samples = file_samples(data, format, name);
+                        ++scan.formats[format];
+                        for (auto &s : samples)
+                        {
+                            ++scan.codecs[s.codec];
+                            ++(s.name.empty() ? scan.unnamed : scan.named);
+                            if ((named || lower(s.name).find(wanted) != std::string::npos) && result.size() < limit_sounds)
                             {
                                 s.pak = path.string(), s.member = name;
                                 result.push_back(s);
                             }
+                        }
                     }
                     catch (const std::exception &)
                     {
+                        ++scan.formats["unreadable"];
                     }
                 }
             }
@@ -370,37 +580,15 @@ namespace ingame
     }
     std::vector<unsigned char> game_sound_wav(const GameSound &sound, std::string &why)
     {
-        const bool pcm16 = sound.codec == "PCM16", pcm8 = sound.codec == "PCM8";
-        if (!pcm16 && !pcm8)
-            return why = "its codec is " + sound.codec + ", which the client can't play yet", Bytes{};
-        if (!sound.channels || sound.channels > 2 || !sound.rate || !sound.bytes || sound.bytes > 8u * 1024 * 1024)
-            return why = "its format is unexpected", Bytes{};
         try
         {
-            Archive a(sound.pak);
             Bytes bank;
-            for (unsigned i = 0; i < a.count && bank.empty(); ++i)
-                if (a.name(i) == sound.member)
-                    bank = a.member(i);
-            require(!bank.empty() && sound.offset <= bank.size() && sound.bytes <= bank.size() - sound.offset);
-            const auto bits = pcm16 ? 16u : 8u, align = sound.channels * bits / 8;
-            const auto size = static_cast<std::uint32_t>(sound.bytes - sound.bytes % align);
-            Bytes wav(44 + size);
-            const auto put32 = [&](std::size_t at, std::uint32_t v) { std::memcpy(&wav[at], &v, 4); };
-            const auto put16 = [&](std::size_t at, std::uint16_t v) { std::memcpy(&wav[at], &v, 2); };
-            std::memcpy(&wav[0], "RIFF", 4), put32(4, 36 + size), std::memcpy(&wav[8], "WAVE", 4);
-            std::memcpy(&wav[12], "fmt ", 4), put32(16, 16), put16(20, 1), put16(22, static_cast<std::uint16_t>(sound.channels));
-            put32(24, sound.rate), put32(28, sound.rate * align), put16(32, static_cast<std::uint16_t>(align)), put16(34, static_cast<std::uint16_t>(bits));
-            std::memcpy(&wav[36], "data", 4), put32(40, size);
-            std::memcpy(&wav[44], bank.data() + sound.offset, size);
-            if (pcm8) // FMOD's 8-bit PCM is signed, WAV's unsigned
-                for (std::size_t i = 44; i < wav.size(); ++i)
-                    wav[i] = static_cast<unsigned char>(wav[i] ^ 0x80);
-            return wav;
+            reread(sound.pak, sound.member, bank);
+            return wav_from(sound, bank, why);
         }
         catch (const std::exception &e)
         {
-            return why = std::string("its bank could not be read (") + e.what() + ")", Bytes{};
+            return why = std::string("its file could not be read (") + e.what() + ")", Bytes{};
         }
     }
     std::filesystem::path dump_archive_member(const std::string &text, const std::filesystem::path &folder)
@@ -430,7 +618,68 @@ namespace ingame
             }
         return {};
     }
-    std::vector<std::string> sound_search_report(const std::string &text, bool everywhere, bool choose, const std::string &prefer)
+    std::vector<std::string> archive_census()
+    {
+        std::vector<std::string> lines;
+        const auto root = game_archives();
+        const auto paks = archives();
+        std::string names;
+        for (std::size_t i = 0; i < paks.size() && i < 12; ++i)
+        {
+            std::error_code error;
+            auto relative = std::filesystem::relative(paks[i], root, error);
+            names += (i ? ", " : "") + (error ? paks[i].filename() : relative).generic_string();
+        }
+        lines.push_back("Game archives: " + std::to_string(paks.size()) + " .pak files" + (names.empty() ? "" : ": " + names + (paks.size() > 12 ? ", ..." : "")));
+        std::map<std::string, unsigned> kinds, per_archive;
+        std::vector<std::string> examples;
+        unsigned sounds = 0, unreadable = 0;
+        for (const auto &path : paks)
+            try
+            {
+                Archive a(path);
+                for (unsigned i = 0; i < a.count; ++i)
+                {
+                    const auto name = a.name(i);
+                    if (!has_word(name, {"sound", "audio", "sfx"}) && !sound_file(name))
+                        continue;
+                    ++sounds, ++kinds[extension(name)], ++per_archive[path.filename().string()];
+                    if (examples.size() < 8 && (examples.empty() || sound_file(name)))
+                        examples.push_back(path.filename().string() + ": " + name + " (" + std::to_string(a.length(i)) + " bytes)");
+                }
+            }
+            catch (const std::exception &)
+            {
+                ++unreadable;
+            }
+        std::string summary;
+        for (const auto &[kind, count] : kinds)
+            summary += (summary.empty() ? "" : ", ") + kind + " " + std::to_string(count);
+        std::vector<std::pair<unsigned, std::string>> busiest;
+        for (const auto &[pak, count] : per_archive)
+            busiest.emplace_back(count, pak);
+        std::sort(busiest.rbegin(), busiest.rend());
+        std::string where;
+        for (std::size_t i = 0; i < busiest.size() && i < 6; ++i)
+            where += (i ? ", " : "") + busiest[i].second + " (" + std::to_string(busiest[i].first) + ")";
+        lines.push_back("Sound files in the archives: " + std::to_string(sounds) + (summary.empty() ? "" : " (" + summary + ")") +
+                        (where.empty() ? "" : "; most in " + where) + (unreadable ? "; " + std::to_string(unreadable) + " archives unreadable" : ""));
+        for (const auto &example : examples)
+            lines.push_back("Sound file: " + example);
+        if (!sounds)
+        {
+            // maybe the sounds sit next to the archives instead
+            std::error_code error;
+            std::string top;
+            unsigned shown = 0;
+            for (std::filesystem::directory_iterator it(root.parent_path(), error), end; !error && it != end && shown < 20; it.increment(error), ++shown)
+                top += (shown ? ", " : "") + it->path().filename().string() + (it->is_directory(error) ? "/" : "");
+            lines.push_back("Game folder: " + top);
+        }
+        return lines;
+    }
+    std::vector<std::string> sound_search_report(const std::string &text, bool everywhere, bool choose, const std::string &prefer,
+                                                 const std::filesystem::path &remember)
     {
         std::vector<std::string> lines;
         const auto root = game_archives();
@@ -439,54 +688,64 @@ namespace ingame
             return {"Sound search: the game's archives folder was not found next to its .exe"};
         for (const auto &line : find_archive_members(text, 30))
             lines.push_back("Archive file: " + line);
-        unsigned scanned = 0;
-        auto sounds = find_game_sounds(text, everywhere, scanned, 80);
-        lines.push_back("Sound search \"" + text + "\": " + std::to_string(sounds.size()) + " sounds in " + std::to_string(scanned) + " sound banks" +
-                        (everywhere ? " (every archive)" : " (shared archives; add \"all\" for every archive)"));
+        SoundScan scan;
+        const auto sounds = find_game_sounds(text, everywhere, scan, 80);
+        std::string formats, codecs;
+        unsigned listed = 0;
+        for (const auto &[format, count] : scan.formats)
+            if (++listed <= 10)
+                formats += (formats.empty() ? "" : ", ") + format + " " + std::to_string(count);
+        for (const auto &[codec, count] : scan.codecs)
+            codecs += (codecs.empty() ? "" : ", ") + codec + " " + std::to_string(count);
+        lines.push_back("Sound search \"" + text + "\": " + std::to_string(sounds.size()) + " sounds in " + std::to_string(scan.files) + " sound files" +
+                        (everywhere ? " (every archive)" : " (shared archives and files named for it; add \"all\" for every archive)") +
+                        (formats.empty() ? "" : ". Files: " + formats) + (codecs.empty() ? "" : ". Codecs: " + codecs) +
+                        ". Named samples: " + std::to_string(scan.named) + ", unnamed: " + std::to_string(scan.unnamed));
         for (const auto &s : sounds)
-            lines.push_back("Game sound: " + s.name + " (" + s.codec + ", " + std::to_string(s.channels) + " ch, " + std::to_string(s.rate) + " Hz, " +
-                            std::to_string(s.rate ? 1000ull * s.frames / s.rate : 0) + " ms) in " + s.member + " [" +
-                            std::filesystem::path(s.pak).filename().string() + "]");
+            lines.push_back("Game sound: " + describe(s));
         if (!choose)
             return lines;
-        // the likeliest TNT countdown: a TNT sound that ticks, beeps or counts, not its explosion
-        const GameSound *pick = nullptr;
-        const auto has = [](const std::string &name, std::initializer_list<const char *> words) {
-            const auto l = lower(name);
-            return std::any_of(words.begin(), words.end(), [&](const char *w) { return l.find(w) != std::string::npos; });
-        };
-        for (const auto &s : sounds)
-        {
-            if (!prefer.empty() ? lower(s.name).find(lower(prefer)) != std::string::npos
-                                : has(s.name, {"tnt"}) && has(s.name, {"count", "tick", "beep", "timer", "fuse"}) && !has(s.name, {"explo", "boom", "blast"}))
-            {
-                pick = &s;
-                break;
-            }
-        }
-        if (!pick && prefer.empty())
-            for (const auto &s : sounds)
-                if (has(s.name, {"tnt"}) && !has(s.name, {"explo", "boom", "blast", "break"}))
-                {
-                    pick = &s;
-                    break;
-                }
+        const auto pick = countdown_choice(sounds, prefer);
         if (!pick)
         {
-            lines.push_back("Nitro Trap countdown: no TNT countdown sound found" + std::string(everywhere ? "" : " in the shared archives (try /sound_find tnt all)") +
-                            "; it keeps the client's tick");
+            lines.push_back("Nitro Trap countdown: no " + (prefer.empty() ? std::string("TNT countdown sound") : "sound matching \"" + prefer + "\"") + " found" +
+                            (everywhere ? "" : " in the shared archives") + "; it keeps the client's tick");
             return lines;
         }
-        std::string why;
-        auto wav = game_sound_wav(*pick, why);
-        if (wav.empty())
+        lines.push_back(use_countdown(*pick, remember));
+        return lines;
+    }
+    std::vector<std::string> startup_sound_search(const std::filesystem::path &remember)
+    {
+        // a background search: below the game's threads, so loading and playing don't wait on it
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+        std::vector<std::string> lines;
+        // a sound found (or picked with /nitro_sound) before is loaded straight away
+        if (std::ifstream in{remember}; in)
         {
-            lines.push_back("Nitro Trap countdown: found \"" + pick->name + "\" in " + pick->member + ", but " + why +
-                            ". /sound_dump " + std::filesystem::path(pick->member).filename().string() + " saves its bank to send");
-            return lines;
+            std::string pak, member, index, name;
+            if (std::getline(in, pak) && std::getline(in, member) && std::getline(in, index) && std::getline(in, name))
+                try
+                {
+                    Bytes data;
+                    for (const auto &s : reread(pak, member, data))
+                        if (std::to_string(s.index) == index && label(s) == name)
+                            return {use_countdown(s, remember, true)};
+                }
+                catch (const std::exception &)
+                {
+                }
         }
-        set_countdown_sound(std::move(wav), pick->name);
-        lines.push_back("Nitro Trap countdown: now plays the game's own \"" + pick->name + "\" (" + pick->codec + ") on each number");
+        lines = archive_census();
+        auto quick = sound_search_report("tnt", false, true, {}, remember);
+        lines.insert(lines.end(), quick.begin(), quick.end());
+        if (countdown_sound_name().empty())
+        {
+            // the long search waits for the level's own loading to finish first
+            Sleep(20000);
+            auto full = sound_search_report("tnt", true, true, {}, remember);
+            lines.insert(lines.end(), full.begin(), full.end());
+        }
         return lines;
     }
 }

@@ -507,7 +507,7 @@ void ClientRuntime::update_ownership(ClientTick &tick)
     if (box_markers && !sound_search_started)
     {
         sound_search_started = true;
-        start_sound_job([] { return ingame::sound_search_report("tnt", false, true); });
+        start_sound_job([] { return ingame::startup_sound_search(standalone::state_directory() / "tnt_sound.txt"); });
     }
     if (sound_job.valid() && sound_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
         try

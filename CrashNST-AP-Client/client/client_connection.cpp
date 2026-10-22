@@ -8,6 +8,7 @@
 #include <map>
 #include "trap_rules.h"
 #include "game_sound.h"
+#include "game_archive.h"
 void ClientRuntime::queue_ap_packet(std::string raw)
 {
     std::lock_guard<std::mutex> lock(state_mutex);
@@ -549,7 +550,14 @@ void ClientRuntime::handle_commands()
                 else if (argument.empty())
                     print_console(command == "/sound_find" ? "Use /sound_find tnt (or any part of a sound's name), /sound_find tnt all to search every archive."
                                   : command == "/sound_dump" ? "Use /sound_dump part of an archive file's name (from /sound_find)."
-                                                             : "Use /nitro_sound part of a sound's name (from /sound_find), for the Nitro countdown.");
+                                                             : "Use /nitro_sound part of a sound's name (or \"file #number\") from /sound_find, for the Nitro countdown; /nitro_sound off for the plain tick.");
+                else if (command == "/nitro_sound" && argument == "off")
+                {
+                    ingame::set_countdown_sound({}, {});
+                    std::error_code error;
+                    std::filesystem::remove(standalone::state_directory() / "tnt_sound.txt", error);
+                    print_console("Nitro Trap countdown: back to the client's tick.");
+                }
                 else
                 {
                     auto text = argument;
@@ -564,7 +572,8 @@ void ClientRuntime::handle_commands()
                         });
                     else
                         start_sound_job([text, everywhere, pick = command == "/nitro_sound"] {
-                            return ingame::sound_search_report(text, pick || everywhere, pick, pick ? text : std::string{});
+                            return ingame::sound_search_report(text, pick || everywhere, pick, pick ? text : std::string{},
+                                                               pick ? standalone::state_directory() / "tnt_sound.txt" : std::filesystem::path{});
                         });
                     print_console("Searching the game's sound banks in the background (a few seconds, longer with \"all\")...");
                 }
