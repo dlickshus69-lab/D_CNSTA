@@ -1,6 +1,7 @@
 #include "client_runtime.h"
 #include "trap_rules.h"
 #include "game_archive.h"
+#include "skins.h"
 #include <algorithm>
 #include <iostream>
 using save_probe::level_key;
@@ -507,6 +508,8 @@ void ClientRuntime::update_ownership(ClientTick &tick)
     if (box_markers && !sound_search_started)
     {
         sound_search_started = true;
+        if (const auto skin = skins::status(); !skin.empty())
+            print_console(skin, false);
         start_sound_job([] { return ingame::startup_sound_search(standalone::state_directory() / "tnt_sound.txt"); });
     }
     if (sound_job.valid() && sound_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready)

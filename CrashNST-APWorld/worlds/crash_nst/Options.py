@@ -1,10 +1,12 @@
 """player options"""
 
+import re
 from dataclasses import dataclass
 
 from Options import (
     Visibility,
     Choice,
+    TextChoice,
     OptionGroup,
     DefaultOnToggle,
     OptionDict,
@@ -533,6 +535,28 @@ class LevelPool(OptionDict):
         level_pools(self.value)
 
 
+class CrashSkin(TextChoice):
+    """Crash's look, from a skin mod. Put each skin mod's Crash.pak in the client's CrashNSTAP\\skins folder, either
+    in a folder named for the skin (the mod's own folder is fine, for example "Biker Crash") or as <name>.pak. The
+    client puts the skin on when the game starts, so after connecting to a new seed, restart the game once.
+
+    default_crash: the game's own Crash.
+    playstation_1: the PlayStation 1 Crash skin (a folder or .pak named playstation_1, PS1 or PSX).
+    biker: the Biker Crash skin (a folder or .pak with "biker" in its name).
+    Any other name picks the skin folder or .pak by that name."""
+
+    display_name = "Crash Skin"
+    option_default_crash = 0
+    option_playstation_1 = 1
+    option_biker = 2
+    default = 0
+
+    @classmethod
+    def validate_text(cls, value: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9 _.\-]{1,64}", value):
+            raise ValueError(f"crash_skin \"{value}\": a skin's name may only use letters, numbers, spaces, _ . and -")
+
+
 # sections on the options page and in generated YAMLs, in this order. Archipelago puts Progression Balancing and
 # Accessibility in "Game Options" first and adds "Item & Location Options" last.
 crash_option_groups = [
@@ -588,6 +612,9 @@ crash_option_groups = [
         TrapDuration,
         DeathLink,
     ]),
+    OptionGroup("Cosmetic", [
+        CrashSkin,
+    ]),
 ]
 
 
@@ -635,3 +662,4 @@ class CrashOptions(PerGameCommonOptions):
     death_trap_weight: DeathTrapWeight
     trap_duration: TrapDuration
     death_link: DeathLink
+    crash_skin: CrashSkin

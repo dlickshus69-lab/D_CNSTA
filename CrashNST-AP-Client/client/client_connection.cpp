@@ -9,6 +9,7 @@
 #include "trap_rules.h"
 #include "game_sound.h"
 #include "game_archive.h"
+#include "skins.h"
 void ClientRuntime::queue_ap_packet(std::string raw)
 {
     std::lock_guard<std::mutex> lock(state_mutex);
@@ -484,6 +485,27 @@ void ClientRuntime::handle_commands()
                 else
                     print_console("Crash probe needs the in-game adapter. Load into a level first.");
             }
+            else if (command == "/skin")
+            {
+                // /skin lists the skins in CrashNSTAP\skins, /skin name picks one (from the next game start), /skin default
+                std::string list;
+                for (const auto &name : skins::available())
+                    list += (list.empty() ? "" : ", ") + name;
+                if (argument.empty())
+                {
+                    const auto status = skins::status();
+                    print_console((status.empty() ? std::string("Skin: Default Crash.") : status) + " Skins in CrashNSTAP\\skins: " +
+                                  (list.empty() ? std::string("none yet") : list) + ". /skin name picks one, /skin default goes back.");
+                }
+                else
+                {
+                    const auto wanted = skins::normalize(argument);
+                    skins::choose(wanted);
+                    print_console(skins::worn() == wanted ? "Skin: already wearing " + skins::display(wanted) + "."
+                                                          : "Skin: " + skins::display(wanted) + " chosen. Restart the game to wear it." +
+                                                                (wanted == "default" || !list.empty() ? std::string() : " (CrashNSTAP\\skins is empty: put the skin there first.)"));
+                }
+            }
             else if (command == "/crash_tint")
             {
                 // /crash_tint red green blue amount (each 0..1), a color name (blue, red, green, ...), or off
@@ -806,6 +828,12 @@ void ClientRuntime::process_packets(AP_ConnectionStatus status)
                         server_matches_session = true;
                         std::cout << "Session bound: " << observed_seed << ", team " << message["team"].asInt()
                                   << ", slot " << message["slot"].asInt() << std::endl;
+                        // the YAML's skin, once per seed; it shows from the next game start
+                        if (slot_data["crash_skin"].isString())
+                            if (const auto note = skins::apply_seed_choice(observed_seed + "/" + std::to_string(message["slot"].asInt()),
+                                                                           slot_data["crash_skin"].asString());
+                                !note.empty())
+                                print_console(note);
                     }
                     else if (command == "ReceivedItems")
                     {

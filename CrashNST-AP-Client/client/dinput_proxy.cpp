@@ -4,6 +4,12 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <cstdlib>
+#include <algorithm>
+#include <cwctype>
+#include <fstream>
+#include <string>
+#include <vector>
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
@@ -106,6 +112,199 @@ namespace
             }
         }
         return false;
+    }
+    // Skins: the game's archives\Crash.pak (Crash's model, textures and sounds) swapped for a skin mod's Crash.pak from
+    // CrashNSTAP\skins before the game opens it, the same as installing the mod by hand. The skin to wear is the first
+    // line of %LOCALAPPDATA%\CrashNSTAP\state\skin.txt (written by the client from the YAML's crash_skin or /skin).
+    // The game's own Crash.pak is kept in skins\default; skins\installed.txt remembers which skin is in the archives
+    // folder (name, size, write time), so a Steam update or verify is noticed and becomes the new default.
+    // The result is left in CRASHNSTAP_SKIN ("name|wearing|path", "name|missing|", "name|failed|reason") for the client.
+    std::wstring lower(std::wstring text)
+    {
+        std::transform(text.begin(), text.end(), text.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+        return text;
+    }
+    std::wstring trim(std::wstring text)
+    {
+        const auto first = text.find_first_not_of(L" \t\r\n\ufeff");
+        const auto last = text.find_last_not_of(L" \t\r\n");
+        return first == std::wstring::npos ? std::wstring() : text.substr(first, last - first + 1);
+    }
+    std::wstring widen(const std::string &text)
+    {
+        if (text.empty())
+            return {};
+        std::wstring result(MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), static_cast<int>(result.size()));
+        return result;
+    }
+    std::string narrow(const std::wstring &text)
+    {
+        if (text.empty())
+            return {};
+        std::string result(WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), static_cast<int>(result.size()), nullptr, nullptr);
+        return result;
+    }
+    struct FileStamp
+    {
+        unsigned long long size = 0, written = 0;
+        bool operator==(const FileStamp &o) const { return size == o.size && written == o.written; }
+    };
+    bool stamp(const std::filesystem::path &path, FileStamp &result)
+    {
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) || (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            return false;
+        result.size = (static_cast<unsigned long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+        result.written = (static_cast<unsigned long long>(data.ftLastWriteTime.dwHighDateTime) << 32) | data.ftLastWriteTime.dwLowDateTime;
+        return true;
+    }
+    // the YAML's names and what a skin's folder or file is likely called
+    std::vector<std::wstring> skin_aliases(const std::wstring &name)
+    {
+        if (name == L"playstation_1" || name == L"playstation 1" || name == L"ps1")
+            return {L"playstation_1", L"playstation 1", L"playstation1", L"playstation", L"ps1", L"psx", L"low-poly", L"lowpoly", L"low poly", L"low_poly"};
+        if (name == L"biker")
+            return {L"biker"};
+        return {name};
+    }
+    // the skin's Crash.pak: a .pak file in skins named for it, or the Crash.pak inside a folder named for it (any depth,
+    // as the mod came); an exact name wins over a name that only contains it
+    std::filesystem::path find_skin(const std::filesystem::path &skins, const std::wstring &name)
+    {
+        const auto aliases = skin_aliases(name);
+        for (const bool exact : {true, false})
+        {
+            std::error_code error;
+            for (std::filesystem::directory_iterator it(skins, error), end; !error && it != end; it.increment(error))
+            {
+                const auto entry = it->path();
+                const bool folder = it->is_directory(error);
+                const auto key = lower(folder ? entry.filename().wstring() : entry.stem().wstring());
+                if (key == L"default" || (!folder && lower(entry.extension().wstring()) != L".pak"))
+                    continue;
+                const bool match = std::any_of(aliases.begin(), aliases.end(), [&](const std::wstring &a) {
+                    return exact ? key == a : key.find(a) != std::wstring::npos;
+                });
+                if (!match)
+                    continue;
+                if (!folder)
+                    return entry;
+                std::filesystem::path any;
+                std::error_code inner;
+                for (std::filesystem::recursive_directory_iterator walk(entry, inner), stop; !inner && walk != stop; walk.increment(inner))
+                {
+                    if (walk.depth() > 4 || !walk->is_regular_file(inner) || lower(walk->path().extension().wstring()) != L".pak")
+                        continue;
+                    if (lower(walk->path().filename().wstring()) == L"crash.pak")
+                        return walk->path();
+                    if (any.empty())
+                        any = walk->path();
+                }
+                if (!any.empty())
+                    return any;
+            }
+        }
+        return {};
+    }
+    void apply_skin(const std::filesystem::path &proxy_folder, const std::filesystem::path &game_folder)
+    {
+        std::wstring report;
+        std::string outcome;
+        try
+        {
+            [&] {
+                const auto skins = proxy_folder / L"CrashNSTAP" / L"skins";
+                const auto game_pak = game_folder / L"archives" / L"Crash.pak";
+                const auto backup = skins / L"default" / L"Crash.pak";
+                const auto record_file = skins / L"installed.txt";
+                std::wstring want = L"default";
+                static wchar_t local[32768]{};
+                const auto count = GetEnvironmentVariableW(L"LOCALAPPDATA", local, std::size(local));
+                if (count && count < std::size(local))
+                {
+                    std::ifstream in(std::filesystem::path(local) / L"CrashNSTAP" / L"state" / L"skin.txt");
+                    std::string line;
+                    if (in && std::getline(in, line) && !trim(widen(line)).empty())
+                        want = lower(trim(widen(line)));
+                }
+                if (want == L"default_crash" || want == L"normal" || want == L"vanilla" || want == L"off")
+                    want = L"default";
+                FileStamp current;
+                if (!stamp(game_pak, current))
+                {
+                    outcome = narrow(want) + "|failed|the game's archives\\Crash.pak was not found";
+                    return;
+                }
+                // which skin the archives folder holds now: the recorded one if the file is still what was put there
+                std::wstring installed = L"default";
+                {
+                    std::ifstream in(record_file);
+                    std::string name, size, written;
+                    if (in && std::getline(in, name) && std::getline(in, size) && std::getline(in, written))
+                    {
+                        FileStamp recorded{std::strtoull(size.c_str(), nullptr, 10), std::strtoull(written.c_str(), nullptr, 10)};
+                        if (recorded == current)
+                            installed = lower(trim(widen(name)));
+                    }
+                }
+                const auto record = [&](const std::wstring &name) {
+                    FileStamp now;
+                    std::error_code error;
+                    std::filesystem::create_directories(skins, error);
+                    std::ofstream out(record_file, std::ios::trunc);
+                    if (stamp(game_pak, now))
+                        out << narrow(name) << '\n' << now.size << '\n' << now.written << '\n';
+                };
+                if (want == installed)
+                {
+                    outcome = narrow(want) + "|wearing|" + (want == L"default" ? std::string() : narrow(game_pak.wstring()));
+                    report = L"already wearing " + want;
+                    return;
+                }
+                // the game's own Crash.pak (or a Steam update of it) is kept before a skin first replaces it
+                if (installed == L"default")
+                {
+                    FileStamp saved;
+                    if (!stamp(backup, saved) || !(saved == current))
+                    {
+                        std::error_code error;
+                        std::filesystem::create_directories(backup.parent_path(), error);
+                        if (!CopyFileW(game_pak.c_str(), backup.c_str(), FALSE))
+                        {
+                            outcome = narrow(want) + "|failed|could not keep a copy of the game's Crash.pak (Windows error " + std::to_string(GetLastError()) + ")";
+                            return;
+                        }
+                    }
+                    record(L"default");
+                }
+                const auto source = want == L"default" ? backup : find_skin(skins, want);
+                FileStamp found;
+                if (source.empty() || !stamp(source, found))
+                {
+                    outcome = narrow(want) + "|missing|" + narrow(installed);
+                    report = L"no skin named " + want + L" in " + skins.wstring();
+                    return;
+                }
+                if (!CopyFileW(source.c_str(), game_pak.c_str(), FALSE))
+                {
+                    outcome = narrow(want) + "|failed|could not copy " + narrow(source.wstring()) + " (Windows error " + std::to_string(GetLastError()) + ")";
+                    return;
+                }
+                record(want);
+                outcome = narrow(want) + "|wearing|" + narrow(source.wstring());
+                report = L"put on " + want + L" from " + source.wstring();
+            }();
+        }
+        catch (...)
+        {
+            outcome = "default|failed|unexpected error";
+        }
+        if (!outcome.empty())
+            SetEnvironmentVariableW(L"CRASHNSTAP_SKIN", widen(outcome).c_str());
+        if (!report.empty())
+            OutputDebugStringW((L"Crash NST AP skins: " + report + L"\n").c_str());
     }
     const char *names[]{"DirectInput8Create", "DllCanUnloadNow", "DllGetClassObject",
                         "DllRegisterServer", "DllUnregisterServer", "GetdfDIJoystick"};
@@ -269,6 +468,11 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, void *)
             const auto pe = reinterpret_cast<IMAGE_NT_HEADERS64 *>(base + reinterpret_cast<IMAGE_DOS_HEADER *>(base)->e_lfanew);
             if (pe->OptionalHeader.SizeOfImage >= 0xe6d9a0 && !install_save_gate())
                 return FALSE;
+            // before the game opens its archives
+            static wchar_t proxy[32768]{};
+            const auto proxy_count = GetModuleFileNameW(module, proxy, std::size(proxy));
+            if (proxy_count && proxy_count < std::size(proxy))
+                apply_skin(std::filesystem::path(proxy).parent_path(), std::filesystem::path(host).parent_path());
         }
         // the worker runs after DLL notifications release loader lock
         const auto thread = CreateThread(nullptr, 0, preload, nullptr, 0, nullptr);

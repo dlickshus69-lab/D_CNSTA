@@ -82,6 +82,8 @@ jobs:
           cp build/client/proxy/dinput8.dll package/
           cp build/client/crash_nst_ingame.dll package/CrashNSTAP/
           cp -r CrashNST-AP-Client/licenses package/CrashNSTAP/
+          mkdir -p package/CrashNSTAP/skins
+          cp CrashNST-AP-Client/skins/README.txt package/CrashNSTAP/skins/
           cp CrashNST-AP-Client/THIRD_PARTY.md CrashNST-AP-Client/PLAYER_GUIDE.md package/CrashNSTAP/
           cp CrashNST-AP-Client/README.md package/
           (cd package && zip -r ../CrashNST-AP-Client-x64.zip .)

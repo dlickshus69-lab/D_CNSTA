@@ -1065,6 +1065,8 @@ class CrashWorld(World):
         # trap item IDs are BASE + TRAP_IDS. counts tell the client which hooks it needs.
         result["trap_counts"] = getattr(self, "trap_counts", dict.fromkeys(TRAPS, 0))
         result["trap_duration"] = self.options.trap_duration.value
+        # the client picks the skin from CrashNSTAP\\skins by this name ("default_crash" is the game's own Crash)
+        result["crash_skin"] = str(self.options.crash_skin.current_key)
         # 0 = any tier, 1 = gold or platinum, 2 = platinum only
         result["relic_requirement"] = self.options.relic_requirement.value
         return result

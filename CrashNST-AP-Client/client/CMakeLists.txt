@@ -15,7 +15,7 @@ target_compile_features(crash_nst_proxy PRIVATE cxx_std_17)
 if(MINGW)
     target_link_options(crash_nst_proxy PRIVATE -static -static-libstdc++ -static-libgcc)
 endif()
-set(NST_RUNTIME_SOURCES ap_client.cpp client_connection.cpp client_display.cpp client_progress.cpp client_gameplay.cpp client_campaigns.cpp seed_config.cpp function_hook.cpp game_pickups.cpp save_format.cpp game_memory.cpp game_hooks.cpp session.cpp cloud_saves.cpp ingame_bridge.cpp check_progress.cpp collectibles.cpp console.cpp ap_console.cpp game_runtime.cpp game_sound.cpp game_archive.cpp sound_decode.cpp stb_vorbis_impl.cpp)
+set(NST_RUNTIME_SOURCES ap_client.cpp client_connection.cpp client_display.cpp client_progress.cpp client_gameplay.cpp client_campaigns.cpp seed_config.cpp function_hook.cpp game_pickups.cpp save_format.cpp game_memory.cpp game_hooks.cpp session.cpp cloud_saves.cpp ingame_bridge.cpp check_progress.cpp collectibles.cpp console.cpp ap_console.cpp game_runtime.cpp game_sound.cpp game_archive.cpp sound_decode.cpp stb_vorbis_impl.cpp minimp3_impl.cpp skins.cpp)
 # Compile APCpp into standalone DLL
 file(READ "${APCPP_SOURCE_DIR}/Archipelago.cpp" NST_APCPP_SOURCE)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${APCPP_SOURCE_DIR}/Archipelago.cpp")

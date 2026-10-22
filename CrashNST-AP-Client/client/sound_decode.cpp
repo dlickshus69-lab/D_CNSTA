@@ -11,6 +11,8 @@
 #define STB_VORBIS_NO_PUSHDATA_API
 #define STB_VORBIS_HEADER_ONLY
 #include "third_party/stb_vorbis.c"
+// minimp3's declarations (its code is compiled in minimp3_impl.cpp)
+#include "third_party/minimp3.h"
 
 namespace ingame
 {
@@ -101,6 +103,72 @@ namespace ingame
                 }
             }
             return !out.samples.empty();
+        }
+
+        // one MPEG audio frame's size from its 4-byte header; 0 when it isn't a frame header
+        unsigned mpeg_frame_bytes(const unsigned char *h, unsigned &layer)
+        {
+            if (h[0] != 0xff || (h[1] & 0xe0) != 0xe0)
+                return 0;
+            const unsigned version = (h[1] >> 3) & 3; // 3 MPEG-1, 2 MPEG-2, 0 MPEG-2.5
+            layer = 4 - ((h[1] >> 1) & 3);            // 1, 2 or 3
+            const unsigned bitrate_index = h[2] >> 4, rate_index = (h[2] >> 2) & 3, padding = (h[2] >> 1) & 1;
+            if (version == 1 || layer == 4 || bitrate_index == 0 || bitrate_index == 15 || rate_index == 3)
+                return 0;
+            static const unsigned short bitrates[2][3][15] = {
+                {{0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448},
+                 {0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384},
+                 {0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320}},
+                {{0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256},
+                 {0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160},
+                 {0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160}}};
+            static const unsigned rates[3] = {44100, 48000, 32000};
+            const bool mpeg1 = version == 3;
+            const unsigned rate = rates[rate_index] >> (mpeg1 ? 0 : version == 2 ? 1 : 2);
+            const unsigned bitrate = bitrates[mpeg1 ? 0 : 1][layer - 1][bitrate_index] * 1000;
+            if (layer == 1)
+                return (12 * bitrate / rate + padding) * 4;
+            return (layer == 3 && !mpeg1 ? 72 : 144) * bitrate / rate + padding;
+        }
+        // FSB MPEG (vgmstream's mpeg_custom_utils.c, MPEG_FSB): standard frames, Layer III frames padded to 4 bytes
+        // (16 with more than 2 channels); the padding may hold garbage, so frames are found by their sizes. Each frame
+        // goes to minimp3 on its own.
+        bool decode_mpeg(const unsigned char *data, std::size_t bytes, unsigned channels, Pcm &out, std::string &why)
+        {
+            mp3dec_t decoder;
+            mp3dec_init(&decoder);
+            std::vector<short> pcm(MINIMP3_MAX_SAMPLES_PER_FRAME);
+            const unsigned align = channels > 2 ? 16 : 4;
+            unsigned frames = 0, skipped = 0;
+            for (std::size_t p = 0; p + 4 <= bytes;)
+            {
+                unsigned layer = 0;
+                const auto size = mpeg_frame_bytes(data + p, layer);
+                if (!size || p + size > bytes)
+                {
+                    // past the padding rules: look a little further for the next frame
+                    if (++skipped > 64)
+                        break;
+                    ++p;
+                    continue;
+                }
+                skipped = 0;
+                mp3dec_frame_info_t info{};
+                const int samples = mp3dec_decode_frame(&decoder, data + p, static_cast<int>(size), pcm.data(), &info);
+                if (samples > 0 && info.channels > 0)
+                {
+                    if (static_cast<unsigned>(info.channels) != channels && out.samples.empty())
+                        channels = out.channels = static_cast<unsigned>(info.channels);
+                    if (static_cast<unsigned>(info.channels) == channels)
+                        out.samples.insert(out.samples.end(), pcm.begin(), pcm.begin() + samples * info.channels);
+                    ++frames;
+                }
+                const auto padding = (layer == 3 || channels > 2) && size % align ? align - size % align : 0;
+                p += size + padding;
+            }
+            if (out.samples.empty())
+                return why = "its MPEG data didn't decode", false;
+            return true;
         }
 
         // FMOD's Vorbis setup headers, unpacked once
@@ -251,6 +319,8 @@ namespace ingame
             ok = decode_ima(data, bytes, channels, out) || (why = "its IMA ADPCM data is too short", false);
         else if (codec == "FADPCM")
             ok = decode_fadpcm(data, bytes, channels, out) || (why = "its FADPCM data is too short", false);
+        else if (codec == "MPEG")
+            ok = decode_mpeg(data, bytes, channels, out, why);
         else if (codec == "Vorbis")
             ok = decode_vorbis(data, bytes, channels, rate, vorbis_setup, out, why);
         else
