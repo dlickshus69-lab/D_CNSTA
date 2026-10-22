@@ -80,6 +80,8 @@ namespace skins
             return "default";
         if (key == "playstation_1" || key == "playstation 1" || key == "ps1")
             return "playstation_1";
+        if (key == "jet pack" || key == "jet_pack" || key == "jet-pack")
+            return "jetpack";
         return key;
     }
     std::string display(const std::string &name)
@@ -91,6 +93,8 @@ namespace skins
             return "PlayStation 1 Crash";
         if (key == "biker")
             return "Biker Crash";
+        if (key == "jetpack")
+            return "Jetpack Crash";
         return name;
     }
     std::string chosen() { return normalize(read_line(standalone::state_directory() / "skin.txt")); }

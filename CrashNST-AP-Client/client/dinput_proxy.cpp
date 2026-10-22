@@ -167,6 +167,8 @@ namespace
             return {L"playstation_1", L"playstation 1", L"playstation1", L"playstation", L"ps1", L"psx", L"low-poly", L"lowpoly", L"low poly", L"low_poly"};
         if (name == L"biker")
             return {L"biker"};
+        if (name == L"jetpack" || name == L"jet pack" || name == L"jet_pack")
+            return {L"jetpack", L"jet pack", L"jet_pack", L"jet-pack"};
         return {name};
     }
     // the skin's Crash.pak: a .pak file in skins named for it, or the Crash.pak inside a folder named for it (any depth,

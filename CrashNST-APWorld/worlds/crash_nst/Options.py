@@ -544,12 +544,14 @@ class CrashSkin(TextChoice):
     playstation_1: the PlayStation 1 Crash skin (a folder or .pak named playstation_1, PS1 or PSX).
     biker: the Biker Crash skin (a folder or .pak with "biker" in its name). That mod reuses Aku Aku's look
     files for its jacket, so Aku Aku is invisible while wearing it.
+    jetpack: the Jetpack Crash skin (a folder or .pak with "jetpack" or "jet pack" in its name).
     Any other name picks the skin folder or .pak by that name."""
 
     display_name = "Crash Skin"
     option_default_crash = 0
     option_playstation_1 = 1
     option_biker = 2
+    option_jetpack = 3
     default = 0
 
     @classmethod

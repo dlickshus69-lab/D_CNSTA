@@ -128,8 +128,8 @@ jobs:
             Start-Sleep -Seconds 20
           }
           if (-not $created) { Write-Host "::error::Could not create release $tag"; exit 1 }
-          # keep the five newest builds; older ones (and the old latest-build) are cleaned up
-          $old = gh release list --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[5:] | .[].tagName'
+          # keep the five newest builds; older ones (and the old latest-build) are cleaned up. The skins release stays.
+          $old = gh release list --limit 100 --json tagName,createdAt --jq '[.[] | select(.tagName | startswith("skins") | not)] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName'
           foreach ($t in $old) {
             gh release delete $t --cleanup-tag --yes
             if ($LASTEXITCODE -ne 0) { Write-Host "::warning::Could not remove old release $t" }
