@@ -550,6 +550,41 @@ namespace ingame
         // Aku Aku Sanity: Crash_DamageManager's NoAkuAkuMasks game variable (the game's own "no Aku Aku masks" switch) is
         // turned on while masks are locked, and off again when they unlock, only if the client turned it on
         std::atomic<Address> no_aku_variable{0};
+        // the Aku Aku lock's message filter (event_sent) is on while the lock is
+        std::atomic_bool aku_messages_blocked{false};
+        // while the Aku Aku lock is on, logs when Crash's Aku Aku manager shows a mask
+        void watch_aku_manager(bool locked)
+        {
+            static Address actor_seen = 0, component = 0;
+            static std::uint64_t searched = 0;
+            static int last_state = -1;
+            static bool last_mask = false;
+            static unsigned lines = 0;
+            const auto actor = player();
+            const auto now = GetTickCount64();
+            if (actor != actor_seen || (!component && now - searched > 1000))
+            {
+                actor_seen = actor, component = 0, searched = now, last_state = -1;
+                for (const auto c : actor ? list(value<Address>(actor + 24), 128) : std::vector<Address>{})
+                    if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78) &&
+                        string(value<Address>(value<Address>(c + 56) + 16)) == "Scripts.Graph.Crash_AkuAkuManager")
+                    {
+                        component = c;
+                        break;
+                    }
+            }
+            if (!locked || !component)
+                return;
+            const int state = value<int>(component + 0x90);
+            const bool mask = resolve(value<Address>(component + 0x60)) != 0;
+            if ((state != last_state || mask != last_mask) && lines < 30)
+            {
+                ++lines;
+                std::cout << "Aku Aku lock: Aku's manager is in state " << state << ", " << (mask ? "with a mask out (he shows)" : "no mask out")
+                          << "\n" << std::flush;
+            }
+            last_state = state, last_mask = mask;
+        }
         void update_aku_lock(bool locked)
         {
             static Address forced = 0;
@@ -557,6 +592,8 @@ namespace ingame
             // the game saves game variables at checkpoints and puts them back when Crash respawns, so once the client
             // has turned the switch on, a respawn can turn it on again after the lock is lifted: it is turned off then too
             static bool ever = false;
+            aku_messages_blocked = locked;
+            watch_aku_manager(locked);
             const auto variable = no_aku_variable.load();
             if (!variable)
                 return;
@@ -933,6 +970,49 @@ namespace ingame
         std::atomic_uint trap_event_lines{0}, trap_event_next{0};
         std::mutex event_mutex;
         std::set<std::string> events_seen;
+        // Aku Aku lock: the game's NoAkuAkuMasks switch stops masks from protecting Crash and crates from giving them,
+        // but the game still shows the mask it brings back at a level's start (a mask carried in from the last level)
+        // and when Crash respawns. While the lock is on, Crash's Aku Aku manager doesn't get the messages that hand him
+        // a mask (seen in the V1.1.65-V1.1.70 logs: at a level's start, at a respawn, and when a mask is picked up);
+        // the ones about a hit or a death still go through, so a mask already there goes away when Crash dies.
+        std::set<std::string> aku_blocked_seen;
+        // the script type of Crash's Aku Aku manager, found by name the first time a message reaches it (also in the
+        // first frames of a level), and the other script types on Crash, so each name is read only once
+        std::atomic<Address> aku_manager_meta{0};
+        std::set<Address> crash_other_metas;
+        bool aku_manager(Address component, Address target)
+        {
+            const auto meta = value<Address>(component + 56);
+            if (!meta)
+                return false;
+            if (meta == aku_manager_meta.load())
+                return true;
+            if (!typed(target, 0x1592220))
+                return false;
+            {
+                std::lock_guard lock(event_mutex);
+                if (crash_other_metas.count(meta))
+                    return false;
+            }
+            if (string(value<Address>(meta + 16), 64) == "Scripts.Graph.Crash_AkuAkuManager")
+            {
+                aku_manager_meta = meta;
+                return true;
+            }
+            std::lock_guard lock(event_mutex);
+            if (crash_other_metas.size() < 512)
+                crash_other_metas.insert(meta);
+            return false;
+        }
+        bool aku_give_message(const std::string &name)
+        {
+            static const char *const gives[]{"tm011evr", "5fw2bzv2", "zocmrwe4", "5bnreye5", "ju9pgu97", "s8h11iit", "fcbn65ha", "ibjgf1k9",
+                                             "a9nnfx8i", "6ldq5n9r", "9nj5heau", "nr69k1wc", "cwmbdu2t", "barwfjg5", "5sryuo67"};
+            for (const auto id : gives)
+                if (name.find(id) != std::string::npos)
+                    return true;
+            return false;
+        }
         unsigned event_lines = 0, aku_event_lines = 0;
         std::string event_object(Address v)
         {
@@ -1018,6 +1098,21 @@ namespace ingame
                     }
                 if (blocked)
                     return 0;
+                if (aku_messages_blocked.load() && component && target && aku_manager(component, target))
+                {
+                    const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                    if (aku_give_message(name))
+                    {
+                        std::lock_guard lock(event_mutex);
+                        if (aku_blocked_seen.size() < 40 && aku_blocked_seen.insert(name).second)
+                        {
+                            const auto id = name.find("_id_");
+                            std::cout << "Aku Aku lock: kept " << (id == std::string::npos ? name : name.substr(id + 4))
+                                      << " from Aku Aku (it hands Crash a mask)\n" << std::flush;
+                        }
+                        return 0;
+                    }
+                }
                 // V1.1.66 logged the first of each kind; now only what reaches Crash's Aku Aku manager and Aku Aku
                 // crates and masks, in order (for /aku_give)
                 if (!event_research_done.load())
