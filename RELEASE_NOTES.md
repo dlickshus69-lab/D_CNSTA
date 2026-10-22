@@ -1,12 +1,11 @@
 ## What's new
 
-- **F2 scrolls.** Hold F2 to see what you found and received (and traps). It now keeps the last 300, and while you hold it the mouse wheel, Page Up/Down or the arrow keys scroll back through them (Home: oldest, End: newest).
-- **DeathLink on rides.** Dying on the hog, polar bear, jet ski, jetpack or another vehicle now sends DeathLink like any other death. A DeathLink you *receive* on a ride now costs you a life instead of killing you: the game's on-foot death broke the ride (on Coco's jet ski she turned invisible and respawned in the wrong place).
-- **The Great Gate needs Spin** (Ability Shuffle, new seeds): the ? crate stacked between iron crates blocks the path.
-- **Darkness Trap fades in.** The darkness creeps in over 5 seconds, the light closing in on Crash, and lifts over 1.5 seconds when it ends.
+- **Trap mercy.** Every time Crash dies, each timed trap loses 5 seconds, both the ones running and the ones waiting their turn. A trap with less than 5 seconds left ends.
 
 ## Recent builds
 
+- **V1.2.22:** a DeathLink you receive on a ride (hog, polar bear, jet ski, jetpack, vehicles) costs a life instead of breaking the ride. The Great Gate needs Spin (Ability Shuffle, new seeds).
+- **V1.2.21:** F2 keeps the last 300 popups and scrolls (mouse wheel, Page Up/Down, arrows, Home/End). Deaths on rides send DeathLink. The Darkness Trap fades in over 5 seconds.
 - **V1.2.20:** Crash Crush, Sewer or Later, Un-Bearable and The Eel Deal's bonus round need their moves (Ability Shuffle, new seeds).
 - **V1.2.19:** popups stay 7 seconds, and holding F2 shows the latest 12 again.
 - **V1.2.18:** Ability Shuffle logic: Native Fortress needs Spin and Bee-Having needs Slide (new seeds). Spin Placement `early` removed (older YAMLs get `early_to_mid`).

@@ -39,6 +39,8 @@ namespace ingame
     // 1.4 s, 1.3 s apart and it blows 1.4 s after the 1), then the Nitro: 3 steps in all
     inline constexpr unsigned nitro_countdown_step_ms = 1370;
     inline constexpr unsigned nitro_countdown_ms = 3 * nitro_countdown_step_ms;
+    // mercy: each death takes this much off every timed trap, running or waiting its turn
+    inline constexpr std::uint64_t trap_death_mercy_ms = 5000;
     // queued traps fire one at a time, this far apart
     inline constexpr unsigned trap_gap_ms = 10000;
 

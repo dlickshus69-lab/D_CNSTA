@@ -408,6 +408,8 @@ namespace ingame
         std::atomic_bool remote_death{false};
         std::atomic<Address> death_handle{0};
         std::atomic_uint observed_deaths{0};
+        // deaths not yet taken off the trap timers (trap_death_mercy_ms each)
+        std::atomic_uint mercy_deaths{0};
         FunctionHook death_hook;
         // research: every graph event the game sends goes through +0x767da0 (DeathLink sends one through it too)
         FunctionHook event_hook;
@@ -490,6 +492,9 @@ namespace ingame
         {
             if (before == after)
                 return;
+            // every death counts for the trap mercy, sent or not (a received DeathLink, a bonus round)
+            if (after)
+                ++mercy_deaths;
             if (!after)
             {
                 remote_death = false;
@@ -6083,6 +6088,22 @@ namespace ingame
                                                       std::pair{TrapDarkness, &state.darkness_until}})
                         if (((state.traps_waiting | off_here) & trap_bit(kind)) && *until > last_frame)
                             *until += now - last_frame;
+            }
+            // mercy: a death takes 5 seconds off every timed trap, running or waiting; one with less left ends
+            if (const auto deaths = mercy_deaths.exchange(0))
+            {
+                const auto cut = static_cast<std::uint64_t>(deaths) * trap_death_mercy_ms;
+                unsigned shortened = 0;
+                for (auto *until : {&state.move_lock_until, &state.reverse_until, &state.freeze_until, &state.slippery_until,
+                                    &state.slow_until, &state.darkness_until})
+                    if (*until > now)
+                    {
+                        *until = *until - now > cut ? *until - cut : now;
+                        ++shortened;
+                    }
+                if (shortened)
+                    std::cout << "Trap mercy: Crash died, " << shortened << " trap timer" << (shortened == 1 ? "" : "s") << " "
+                              << cut / 1000 << " s shorter.\n" << std::flush;
             }
             last_frame = now, was_paused = paused;
             state.traps_paused = paused ? 1u : 0u;
