@@ -236,20 +236,20 @@ class AbilityShuffle(Choice):
 class SpinPlacement(Choice):
     """Where Spin goes when Ability Shuffle is shuffle_spin.
 
-    early: in your first checks (your easiest starting level or a starting gimmick stage).
     anywhere: any check logic says you can reach without Spin (with relaxed Ability Logic that is most
     level clears, crystals and boxes).
     early_to_mid: never in your starting levels. It goes on a random check you can reach without Spin
     (a gimmick stage, so a hog, polar bear, jetpack, vehicle or scuba level) behind unlocks you find
     along the way (two or more when the seed allows), so it usually turns up a few rounds of unlocks in. Logic is the
     same either way, so the seed is always beatable. If the seed has no such check (no gimmick stages
-    in your levels), Spin is placed early.
+    in your levels), Spin goes in your first checks.
     """
 
     display_name = "Spin Placement"
-    option_early = 0
     option_early_to_mid = 1
     option_anywhere = 2
+    # older YAMLs: "early" was removed and means early_to_mid
+    alias_early = 1
     default = option_early_to_mid
 
 
@@ -273,8 +273,9 @@ class AbilityLogic(Choice):
     need Spin in Crash 1 and every move in Crash 2 and 3. Abilities can only be early or in gimmick stages.
     relaxed: level clears, power crystals and boxes need only jumping (enemies can be jumped on, crates
     can be jumped on or hit from below), so abilities can be on almost any of those. Bosses still need
-    Spin, and gems and relics keep the cautious needs. If a level turns out to need a move you do not have
-    yet, play another level and come back.
+    Spin, and gems and relics keep the cautious needs.
+    Either way, levels that can't be cleared by jumping alone need their move for everything past the
+    obstacle: Native Fortress needs Spin, Bee-Having needs Slide.
     Gimmick stages need no moves either way.
     """
 

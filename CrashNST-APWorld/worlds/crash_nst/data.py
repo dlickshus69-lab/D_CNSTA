@@ -382,6 +382,12 @@ SECRET_EXITS = {
 # the way to a secret exit: Dino Might!'s is on its yellow gem path, and Diggin' It's plant takes a body slam
 SECRET_EXIT_GEMS = {"L311": ("Yellow",)}
 SECRET_EXIT_MOVES = {"L217": ("Body Slam",)}
+# levels that can't be cleared by jumping alone (Ability Shuffle): the move the way through needs, for the clear, the
+# crystal and the boxes, in both Ability Logic modes. From play reports; more are added as they turn up.
+CLEAR_MOVES = {
+    "L108": ("Spin",),   # Native Fortress: the spinning log wheels
+    "L220": ("Slide",),  # Bee-Having: slide under the electric fence, slide-jump the long gaps
+}
 # first chamber AFTER each boss's award
 C3_POWER_STAGES = (6, 11, 16, 21)
 # vehicle and riding stages do not use Crash's on-foot powers.
@@ -565,7 +571,9 @@ MOVE_OVERRIDES = {}
 def easiest_start(starting_levels):
     """with Spin shuffled, the one starting level logic expects you to clear by jumping alone.
     level shuffle can start you anywhere, so pick the earliest level by its own position in its game."""
-    regular = [key for key in starting_levels if key not in GIMMICK_LEVELS] or list(starting_levels)
+    regular = [key for key in starting_levels if key not in GIMMICK_LEVELS and key not in CLEAR_MOVES] or [
+        key for key in starting_levels if key not in GIMMICK_LEVELS
+    ] or list(starting_levels)
     return min(regular, key=lambda key: (int(key[2:]), key[1]))
 
 
@@ -587,14 +595,17 @@ def move_requirements(level, event, spin_shuffled, jump_only_levels, relaxed=Fal
     # hog, polar bear, jetpack and Crash 3 vehicle stages keep vanilla controls
     if level.key in GIMMICK_LEVELS:
         return ()
+    # a level that can't be cleared by jumping alone needs its move for everything past the obstacle
+    way = CLEAR_MOVES.get(level.key, ())
     if relaxed:
         if event in ("clear", "crystal"):
-            return ("Spin",) if level.key.startswith("B") else ()
+            return tuple(dict.fromkeys((*(("Spin",) if level.key.startswith("B") else ()), *way)))
         if event.startswith("box:"):
-            return ()
+            return way
     if event in ("clear", "crystal"):
         # with Spin shuffled, your easiest starting level is assumed clearable by jumping alone
-        return () if spin_shuffled and level.key in jump_only_levels else ("Spin",)
+        base = () if spin_shuffled and level.key in jump_only_levels and not way else ("Spin",)
+        return tuple(dict.fromkeys((*base, *way)))
     # gems, relics and boxes: Crash 1 levels were built for jump and spin only
     if level.campaign == 1:
         return ("Spin",)
