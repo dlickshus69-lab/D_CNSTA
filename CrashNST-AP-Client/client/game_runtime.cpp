@@ -2381,12 +2381,12 @@ namespace ingame
                 finish_nitro_spawn("nothing spawned within 2 seconds");
         }
         // Nitro Trap, falling: a countdown ("NITRO INCOMING 3, 2, 1" on screen, a tick each second like a TNT crate),
-        // then a Nitro appears high above Crash and drops onto the spot where he stands in 0.7 seconds, speeding up like
+        // then a Nitro appears high above Crash and drops onto the spot where he stands in 0.45 seconds, speeding up like
         // a dropped crate, so moving away dodges it. The game creates the crate up there (a crate the game creates itself
         // works fully) and it is moved every frame with the game's own "set position", the one scripts use. That marks
         // it moved, so the game carries the move over to the crate's physics body and everything it is drawn from.
         // (Writing its position copies directly didn't: every frame the physics body put them back, V1.1.65's watch.)
-        static constexpr std::uint64_t drop_countdown_ms = 3000, drop_fall_ms = 700;
+        static constexpr std::uint64_t drop_countdown_ms = 3000, drop_fall_ms = 450;
         // the falling Nitro borrows a spawner at least this far away when there is one (see nitro_spawner_near)
         static constexpr float drop_spawner_away = 1500;
         static constexpr float drop_height = 420;
@@ -2665,7 +2665,7 @@ namespace ingame
                 d.stage = NitroDropTrap::Falling, d.fall_start = now;
                 return;
             }
-            // falling: speeding up like a dropped crate, landing 0.7 seconds later
+            // falling: speeding up like a dropped crate, landing 0.45 seconds later
             const float q = std::min(1.0f, static_cast<float>(now - d.fall_start) / drop_fall_ms);
             set_entity_position(d.entity, std::array<float, 3>{d.high[0], d.high[1], d.high[2] - d.drop * q * q});
             if (q < 1)
