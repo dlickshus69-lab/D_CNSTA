@@ -31,8 +31,9 @@ public:
     void configure(const std::map<std::string, unsigned> &styles, bool death_link, bool move_shuffle = false,
                    unsigned owned_moves = 0, bool trap_kills = false);
     // start a trap now; timed traps last `seconds` (Freeze always lasts freeze_trap_ms).
-    // Life Loss runs through AbilityAccess instead.
-    void apply_trap(unsigned kind, unsigned seconds);
+    // Life Loss runs through AbilityAccess instead. Slow, Slippery and Reverse take turns: when this one has to wait
+    // for another to end, returns that one's name ("" when it starts now).
+    std::string apply_trap(unsigned kind, unsigned seconds);
     // research: log the current level's Nitro crates and their spawners (read-only)
     void request_nitro_probe();
     // research (experimental): move the nearest Nitro crate next to Crash

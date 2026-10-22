@@ -1339,16 +1339,26 @@ namespace
                     // running trap timers
                     const auto now = GetTickCount64();
                     std::string traps;
-                    const std::pair<std::uint64_t, const char *> timers[]{{snapshot->move_lock_until, "Move Lock"},
-                                                                          {snapshot->reverse_until, "Reversed"},
-                                                                          {snapshot->freeze_until, "Frozen"},
-                                                                          {snapshot->slippery_until, slippery_until.load() || snapshot->traps_paused ? "Slippery" : "Slippery (off here)"},
-                                                                          // the timer keeps running in gimmick/chase levels, where Slow does nothing
-                                                                          {snapshot->slow_until, slow_until.load() || snapshot->traps_paused ? "Slow" : "Slow (off here)"},
-                                                                          {snapshot->darkness_until, darkness_exempt && !snapshot->traps_paused ? "Darkness (off here)" : "Darkness"}};
-                    for (const auto &[until, label] : timers)
+                    struct TrapTimer
+                    {
+                        std::uint64_t until;
+                        const char *label;
+                        unsigned bit; // trap_bit() of a kind that takes turns with others, or 0
+                    };
+                    const TrapTimer timers[]{{snapshot->move_lock_until, "Move Lock", 0},
+                                             {snapshot->reverse_until, "Reversed", trap_bit(TrapReverse)},
+                                             {snapshot->freeze_until, "Frozen", 0},
+                                             {snapshot->slippery_until, slippery_until.load() || snapshot->traps_paused || (snapshot->traps_waiting & trap_bit(TrapSlippery)) ? "Slippery" : "Slippery (off here)", trap_bit(TrapSlippery)},
+                                             // the timer keeps running in gimmick/chase levels, where Slow does nothing
+                                             {snapshot->slow_until, slow_until.load() || snapshot->traps_paused || (snapshot->traps_waiting & trap_bit(TrapSlow)) ? "Slow" : "Slow (off here)", trap_bit(TrapSlow)},
+                                             {snapshot->darkness_until, darkness_exempt && !snapshot->traps_paused ? "Darkness (off here)" : "Darkness", 0}};
+                    // Slow, Slippery and Reverse take turns: the ones waiting for theirs say "next", their time standing still
+                    for (const auto &[until, label, bit] : timers)
                         if (timer_active(until, now))
-                            traps += (traps.empty() ? "" : "  ") + std::string(label) + " " + std::to_string(seconds_left(until, now)) + "s";
+                        {
+                            traps += (traps.empty() ? "" : "  ") + std::string(label) + ((snapshot->traps_waiting & bit) ? " (next)" : "") + " " +
+                                     std::to_string(seconds_left(until, now)) + "s";
+                        }
                     if (!traps.empty() && snapshot->traps_paused)
                         traps = "Paused: " + traps;
                     if (!traps.empty())
@@ -2030,12 +2040,18 @@ extern "C" __declspec(dllexport) void NST_Tick()
             {
                 // traps do nothing while paused in a hub or menu
                 const bool paused = shared->traps_paused != 0;
-                reverse_until = paused ? 0 : shared->reverse_until;
+                // Slow, Slippery and Reverse take turns: a waiting one does nothing (update_gameplay holds its timer)
+                static TrapTurns turns;
+                const std::uint64_t *const turn_timers[turn_trap_count]{&shared->slippery_until, &shared->slow_until,
+                                                                        &shared->reverse_until};
+                static_assert(turn_traps[0] == TrapSlippery && turn_traps[1] == TrapSlow && turn_traps[2] == TrapReverse, "turn_timers order");
+                const unsigned waiting = shared->traps_waiting = turns.update(turn_timers, GetTickCount64());
+                reverse_until = paused || (waiting & trap_bit(TrapReverse)) ? 0 : shared->reverse_until;
                 freeze_until = paused ? 0 : shared->freeze_until;
                 // Slippery has no effect in gimmick levels
-                slippery_until = paused || gimmick_stage() ? 0 : shared->slippery_until;
+                slippery_until = paused || (waiting & trap_bit(TrapSlippery)) || gimmick_stage() ? 0 : shared->slippery_until;
                 // Slow has no effect in gimmick and chase levels
-                slow_until = paused || slow_trap_exempt() ? 0 : shared->slow_until;
+                slow_until = paused || (waiting & trap_bit(TrapSlow)) || slow_trap_exempt() ? 0 : shared->slow_until;
                 update_walk_tuner(*shared);
                 update_gameplay(*shared);
             }

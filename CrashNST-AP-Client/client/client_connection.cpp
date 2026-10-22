@@ -374,8 +374,9 @@ void ClientRuntime::handle_commands()
                 }
                 else
                 {
-                    box_markers->apply_trap(kind->second, 30);
+                    const auto after = box_markers->apply_trap(kind->second, 30);
                     print_console(std::string(ingame::trap_names[kind->second]) + " test" + (ingame::timed_trap(kind->second) ? " for 30 seconds" : "") +
+                                  (after.empty() ? "" : ", once the " + after + " ends") +
                                   ". Not sent to AP. Close the console (F1) to play; it ignores the controller while open.");
                 }
             }

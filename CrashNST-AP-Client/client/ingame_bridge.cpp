@@ -408,11 +408,22 @@ std::vector<std::string> BoxMarkers::commands()
         std::cerr << "In-game adapter: " << error << std::endl;
     return result;
 }
-void BoxMarkers::apply_trap(unsigned kind, unsigned seconds)
+std::string BoxMarkers::apply_trap(unsigned kind, unsigned seconds)
 {
     const auto now = GetTickCount64();
     const std::uint64_t ms = seconds * 1000ull;
     lock();
+    // Slow, Slippery and Reverse take turns (the game thread holds the waiting ones): which one does this wait for?
+    std::string after;
+    const std::pair<unsigned, std::uint64_t> turns[]{{ingame::TrapSlippery, shared_->slippery_until},
+                                                     {ingame::TrapSlow, shared_->slow_until},
+                                                     {ingame::TrapReverse, shared_->reverse_until}};
+    const auto waiting = shared_->traps_waiting;
+    for (const auto &[own, own_until] : turns)
+        if (own == kind && (!ingame::timer_active(own_until, now) || (waiting & ingame::trap_bit(kind))))
+            for (const auto &[other, until] : turns)
+                if (other != kind && ingame::timer_active(until, now) && !(waiting & ingame::trap_bit(other)))
+                    after = ingame::trap_names[other];
     switch (kind)
     {
     case ingame::TrapDeath:
@@ -439,6 +450,7 @@ void BoxMarkers::apply_trap(unsigned kind, unsigned seconds)
     }
     ++shared_->revision;
     unlock();
+    return after;
 }
 void BoxMarkers::request_nitro_probe()
 {

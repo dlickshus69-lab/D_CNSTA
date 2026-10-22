@@ -114,6 +114,9 @@ namespace ingame
         // set by the client while you are in a hub, menu or loading screen: timers are pushed back and
         // trap effects are off
         unsigned traps_paused = 0;
+        // set by the game thread: trap_bit()s of Slow/Slippery/Reverse traps waiting for another one to end (their timers
+        // stand still and they do nothing until their turn)
+        unsigned traps_waiting = 0;
         // set by the renderer while the pause menu is on screen; the client then pauses traps too
         unsigned menu_paused = 0;
         // /nitro_probe: the client bumps the request, the game thread logs once and acknowledges

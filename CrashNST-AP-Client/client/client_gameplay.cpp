@@ -525,13 +525,16 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                     const unsigned seconds = duration.isUInt() && duration.asUInt() >= 10 && duration.asUInt() <= 120
                                                  ? duration.asUInt()
                                                  : 30;
+                    std::string after;
                     if (kind == ingame::TrapLifeLoss)
                         ability_access->queue_life_loss(index, scene.zone_address);
                     else
-                        box_markers->apply_trap(static_cast<unsigned>(kind), seconds);
+                        after = box_markers->apply_trap(static_cast<unsigned>(kind), seconds);
                     const auto timed = ingame::timed_trap(static_cast<unsigned>(kind));
+                    // Slow, Slippery and Reverse take turns: a second one starts when the first ends
                     print_console(std::string(ingame::trap_names[kind]) +
-                                      (timed ? " for " + std::to_string(seconds) + " seconds!" : "!"),
+                                      (timed ? " for " + std::to_string(seconds) + " seconds" : "") +
+                                      (after.empty() ? "!" : ", once the " + after + " ends!"),
                                   true);
                     next_trap = std::chrono::steady_clock::now() + std::chrono::milliseconds(ingame::trap_gap_ms);
                 }

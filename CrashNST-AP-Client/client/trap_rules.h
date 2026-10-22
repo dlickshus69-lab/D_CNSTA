@@ -49,6 +49,36 @@ namespace ingame
         return until > now ? static_cast<unsigned>((until - now + 999) / 1000) : 0;
     }
 
+    // Slow, Slippery and Reverse Controls all change how the stick moves Crash, and together they ruin each other
+    // (walking on ice, walking reversed), so they take turns: the one that came first runs, the others wait with their
+    // timers standing still, and the next one starts when it ends. Another trap of the running kind adds its time
+    // to the running one; one of a waiting kind adds to that waiting timer.
+    inline constexpr unsigned turn_traps[]{TrapSlippery, TrapSlow, TrapReverse};
+    inline constexpr unsigned turn_trap_count = sizeof(turn_traps) / sizeof(turn_traps[0]);
+    inline constexpr unsigned trap_bit(unsigned kind) { return 1u << kind; }
+    struct TrapTurns
+    {
+        unsigned order[turn_trap_count]{}; // indexes into turn_traps, first come first
+        unsigned count = 0;
+        // timers: the end times of turn_traps, in that order. Returns the trap_bit()s of the traps that wait.
+        unsigned update(const std::uint64_t *const (&timers)[turn_trap_count], std::uint64_t now)
+        {
+            unsigned kept = 0;
+            for (unsigned i = 0; i < count; ++i)
+                if (timer_active(*timers[order[i]], now))
+                    order[kept++] = order[i];
+            count = kept;
+            for (unsigned t = 0; t < turn_trap_count; ++t)
+                if (timer_active(*timers[t], now) && std::find(order, order + count, t) == order + count)
+                    order[count++] = t;
+            unsigned waiting = 0;
+            for (unsigned i = 1; i < count; ++i)
+                waiting |= trap_bit(turn_traps[order[i]]);
+            return waiting;
+        }
+        void clear() { count = 0; }
+    };
+
     // Reverse Controls: left/right and forward/back swap on the stick, d-pad, arrows and WASD
     inline std::int16_t reverse_axis(std::int16_t value)
     {

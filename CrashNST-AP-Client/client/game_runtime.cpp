@@ -2451,6 +2451,22 @@ namespace ingame
                     return c;
             return 0;
         }
+        inline constexpr float body_meters = 0.0254f; // game units (inches) to physics body units (meters)
+        // where the crate's physics body is, in game units (read-only: the getter the game's own sync uses)
+        bool crate_body_position(Address entity, std::array<float, 3> &out)
+        {
+            static const bool verified =
+                code_matches(0x6f2796, std::array<unsigned char, 9>{0x48, 0x83, 0xc1, 0x50, 0xe8, 0x81, 0xcd, 0xa3, 0xff});
+            const auto physics = live_crate(entity) ? crate_physics(entity) : 0;
+            if (!verified || !physics)
+                return false;
+            const auto matrix = reinterpret_cast<const float *(*)(Address)>(base() + 0x12f520)(physics + 0x50);
+            if (!matrix)
+                return false;
+            for (unsigned i = 0; i < 3; ++i)
+                out[i] = matrix[12 + i] / body_meters;
+            return true;
+        }
         bool move_crate_body(Address entity, const std::array<float, 3> &at)
         {
             static const bool verified =
@@ -2460,7 +2476,10 @@ namespace ingame
             const auto physics = live_crate(entity) ? crate_physics(entity) : 0;
             if (!verified || !physics)
                 return false;
-            alignas(16) float place[4]{at[0], at[1], at[2], 0};
+            // the physics body works in meters, the game in inches: the game's own sync multiplies the body's position
+            // by 39.37 when it copies it to the crate (V1.1.69 put the game's numbers in as they were, and the Nitro
+            // flew to 39.37 times its spot, out of sight)
+            alignas(16) float place[4]{at[0] * body_meters, at[1] * body_meters, at[2] * body_meters, 0};
             alignas(16) float still[4]{};
             reinterpret_cast<void (*)(Address, const float *)>(base() + 0x15e3b0)(physics + 0x50, place);
             reinterpret_cast<void (*)(Address, const float *, const float *)>(base() + 0x572770)(physics + 0x50, still, still);
@@ -2653,7 +2672,11 @@ namespace ingame
                 return;
             std::array<float, 3> e{};
             read(d.entity + 32, e);
-            std::cout << "Nitro drop: landed (the game has it at " << whole(e[0]) << ", " << whole(e[1]) << ", " << whole(e[2]) << ")\n" << std::flush;
+            std::array<float, 3> body{};
+            const bool has_body = crate_body_position(d.entity, body);
+            std::cout << "Nitro drop: landed (the game has it at " << whole(e[0]) << ", " << whole(e[1]) << ", " << whole(e[2])
+                      << (has_body ? ", its body at " + whole(body[0]) + ", " + whole(body[1]) + ", " + whole(body[2]) : std::string(", its body not found"))
+                      << ")\n" << std::flush;
             d = {};
             state.nitro_countdown_end = 0;
         }
@@ -4985,7 +5008,8 @@ namespace ingame
             static std::uint64_t slide_checked = 0;
             if (actor != f.actor || (!f.has_slide && now - slide_checked > 1000))
                 f.actor = actor, slide_checked = now, f.has_slide = actor && crash_script(actor, "Scripts.Graph.Crash_IceSlide");
-            const bool want = !level.empty() && !state.traps_paused && !trap_gimmick_level(level) && timer_active(state.slippery_until, now);
+            const bool want = !level.empty() && !state.traps_paused && !(state.traps_waiting & trap_bit(TrapSlippery)) &&
+                              !trap_gimmick_level(level) && timer_active(state.slippery_until, now);
             const bool can = want && kind && actor && f.has_slide;
             ice_floor_engaged = can;
             if (!can)
@@ -5575,11 +5599,20 @@ namespace ingame
                 // in moves them on by that frame.
                 const bool stalled = now - last_frame > 250;
                 const auto from = stalled ? std::max(last_frame, state.stall_accounted) : last_frame;
-                if ((stalled || paused || was_paused) && now > from)
-                    for (auto *until : {&state.move_lock_until, &state.reverse_until, &state.freeze_until, &state.slippery_until,
-                                        &state.slow_until, &state.darkness_until})
-                        if (*until > from)
-                            *until += now - from;
+                if (stalled || paused || was_paused)
+                {
+                    if (now > from)
+                        for (auto *until : {&state.move_lock_until, &state.reverse_until, &state.freeze_until, &state.slippery_until,
+                                            &state.slow_until, &state.darkness_until})
+                            if (*until > from)
+                                *until += now - from;
+                }
+                else
+                    // Slow, Slippery and Reverse take turns: one waiting for another to end stands still too
+                    for (const auto &[kind, until] : {std::pair{TrapReverse, &state.reverse_until}, std::pair{TrapSlippery, &state.slippery_until},
+                                                      std::pair{TrapSlow, &state.slow_until}})
+                        if ((state.traps_waiting & trap_bit(kind)) && *until > last_frame)
+                            *until += now - last_frame;
             }
             last_frame = now, was_paused = paused;
             state.traps_paused = paused ? 1u : 0u;
