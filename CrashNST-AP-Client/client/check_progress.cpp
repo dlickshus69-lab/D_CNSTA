@@ -101,7 +101,7 @@ std::string LevelProgress::secret_exit_text() const
 }
 std::string LevelProgress::collectible_text() const
 {
-    // the level clear, then C power crystal, G gems, R relic, as tab-separated pieces, each marked green or red
+    // the level clear, then C power crystal, G gems, R relic, B box checks, as tab-separated pieces, each marked green or red
     // like the top-left panel's lines
     std::string result;
     const auto piece = [&](const char *label, const CheckCounts &c)
@@ -116,6 +116,7 @@ std::string LevelProgress::collectible_text() const
     piece("C", collectibles[1]);
     piece("G", collectibles[0]);
     piece("R", collectibles[2]);
+    piece("B", boxes); // box checks (Boxsanity)
     return result;
 }
 std::string LevelProgress::label_text() const
@@ -245,7 +246,10 @@ CheckProgress check_progress(const CheckRules &rules, const std::vector<std::pai
                             : event == "crystal"                     ? &count.collectibles[1]
                             : event == "relic"                       ? &count.collectibles[2]
                                                                      : nullptr;
-        auto *clear = event == "clear" ? &count.clear : event == "secret_exit" ? &count.secret_exit : nullptr;
+        auto *clear = event == "clear"                ? &count.clear
+                      : event == "secret_exit"        ? &count.secret_exit
+                      : event.rfind("box:", 0) == 0 ? &count.boxes
+                                                      : nullptr;
         count.title = rule.title;
         ++count.total;
         if (collectible)
