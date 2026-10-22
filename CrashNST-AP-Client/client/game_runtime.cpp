@@ -2250,7 +2250,7 @@ namespace ingame
         // spawner's own Nitro in plain sight (V1.1.66: every falling Nitro near the start of Snow Go did).
         NitroSpawner nitro_spawner_near(const std::array<float, 3> &to, float away = 0)
         {
-            NitroSpawner best, far;
+            NitroSpawner best, distant;
             for (const auto owner : event_owners())
             {
                 const auto name = string(value<Address>(owner + 128));
@@ -2265,11 +2265,11 @@ namespace ingame
                     const float d = std::hypot(at[0] - to[0], at[1] - to[1]);
                     if (m && (!best.component || d < best.distance))
                         best = {c, owner, m, d, name};
-                    if (m && d >= away && (!far.component || d < far.distance))
-                        far = {c, owner, m, d, name};
+                    if (m && d >= away && (!distant.component || d < distant.distance))
+                        distant = {c, owner, m, d, name};
                 }
             }
-            return away > 0 && far.component ? far : best;
+            return away > 0 && distant.component ? distant : best;
         }
         struct NitroSpawn
         {
