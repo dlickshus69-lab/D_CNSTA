@@ -1348,13 +1348,16 @@ namespace
                         const char *label;
                         unsigned bit; // trap_bit() of a kind that takes turns with others, or 0
                     };
-                    const TrapTimer timers[]{{snapshot->move_lock_until, "Move Lock", 0},
+                    // a trap with no effect in this level says "(off here)": its time stands still until a level where it works
+                    const auto off = [&](unsigned kind, const char *on, const char *off_here) {
+                        return (snapshot->traps_off_here & trap_bit(kind)) && !snapshot->traps_paused ? off_here : on;
+                    };
+                    const TrapTimer timers[]{{snapshot->move_lock_until, off(TrapMoveLock, "Move Lock", "Move Lock (off here)"), 0},
                                              {snapshot->reverse_until, "Reversed", trap_bit(TrapReverse)},
                                              {snapshot->freeze_until, "Frozen", 0},
-                                             {snapshot->slippery_until, slippery_until.load() || snapshot->traps_paused || (snapshot->traps_waiting & trap_bit(TrapSlippery)) ? "Slippery" : "Slippery (off here)", trap_bit(TrapSlippery)},
-                                             // the timer keeps running in gimmick/chase levels, where Slow does nothing
-                                             {snapshot->slow_until, slow_until.load() || snapshot->traps_paused || (snapshot->traps_waiting & trap_bit(TrapSlow)) ? "Slow" : "Slow (off here)", trap_bit(TrapSlow)},
-                                             {snapshot->darkness_until, darkness_exempt && !snapshot->traps_paused ? "Darkness (off here)" : "Darkness", 0}};
+                                             {snapshot->slippery_until, off(TrapSlippery, "Slippery", "Slippery (off here)"), trap_bit(TrapSlippery)},
+                                             {snapshot->slow_until, off(TrapSlow, "Slow", "Slow (off here)"), trap_bit(TrapSlow)},
+                                             {snapshot->darkness_until, off(TrapDarkness, "Darkness", "Darkness (off here)"), 0}};
                     // Slow, Slippery and Reverse take turns: the ones waiting for theirs say "next", their time standing still
                     for (const auto &[until, label, bit] : timers)
                         if (timer_active(until, now))

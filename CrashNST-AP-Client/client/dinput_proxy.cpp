@@ -210,6 +210,34 @@ namespace
         }
         return {};
     }
+    // the same file? Same size and the same first 256 KB (each skin's Crash.pak differs from the game's early on)
+    bool same_file(const std::filesystem::path &a, const std::filesystem::path &b)
+    {
+        FileStamp sa, sb;
+        if (!stamp(a, sa) || !stamp(b, sb) || sa.size != sb.size)
+            return false;
+        std::ifstream fa(a, std::ios::binary), fb(b, std::ios::binary);
+        std::vector<char> ba(256 * 1024), bb(256 * 1024);
+        fa.read(ba.data(), static_cast<std::streamsize>(ba.size()));
+        fb.read(bb.data(), static_cast<std::streamsize>(bb.size()));
+        return fa.gcount() == fb.gcount() && std::equal(ba.begin(), ba.begin() + fa.gcount(), bb.begin());
+    }
+    // the name of the skin in the skins folder whose Crash.pak is this file, or empty
+    std::wstring skin_of(const std::filesystem::path &skins, const std::filesystem::path &file)
+    {
+        std::error_code error;
+        for (std::filesystem::directory_iterator it(skins, error), end; !error && it != end; it.increment(error))
+        {
+            const bool folder = it->is_directory(error);
+            const auto key = lower(folder ? it->path().filename().wstring() : it->path().stem().wstring());
+            if (key == L"default" || (!folder && lower(it->path().extension().wstring()) != L".pak"))
+                continue;
+            const auto pak = find_skin(skins, key);
+            if (!pak.empty() && same_file(pak, file))
+                return key;
+        }
+        return {};
+    }
     void apply_skin(const std::filesystem::path &proxy_folder, const std::filesystem::path &game_folder)
     {
         std::wstring report;
@@ -251,6 +279,15 @@ namespace
                             installed = lower(trim(widen(name)));
                     }
                 }
+                // no record of what's there (lost, or the file changed): it is the game's own Crash.pak unless it is one
+                // of the skins, so a skin is never kept as the default
+                bool recognized = installed != L"default";
+                if (!recognized && !same_file(game_pak, backup))
+                {
+                    const auto known = skin_of(skins, game_pak);
+                    if (!known.empty())
+                        installed = known, recognized = true;
+                }
                 const auto record = [&](const std::wstring &name) {
                     FileStamp now;
                     std::error_code error;
@@ -265,6 +302,8 @@ namespace
                     report = L"already wearing " + want;
                     return;
                 }
+                if (recognized)
+                    record(installed);
                 // the game's own Crash.pak (or a Steam update of it) is kept before a skin first replaces it
                 if (installed == L"default")
                 {

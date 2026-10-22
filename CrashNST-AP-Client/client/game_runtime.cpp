@@ -6004,6 +6004,17 @@ namespace ingame
             static bool was_paused = false;
             const auto now = GetTickCount64();
             const bool paused = !state.player_ready || state.menu_paused;
+            // a trap that does nothing in this level waits for one where it works: its time stands still meanwhile
+            unsigned off_here = 0;
+            if (in_level && !paused)
+            {
+                if (gimmick_stage())
+                    off_here |= trap_bit(TrapMoveLock) | trap_bit(TrapSlippery);
+                if (slow_trap_exempt())
+                    off_here |= trap_bit(TrapSlow);
+                if (darkness_trap_exempt())
+                    off_here |= trap_bit(TrapDarkness);
+            }
             if (last_frame && now > last_frame)
             {
                 // the game didn't run for a while (the pause menu, a load): the client moved the trap times on while it
@@ -6020,14 +6031,17 @@ namespace ingame
                                 *until += now - from;
                 }
                 else
-                    // Slow, Slippery and Reverse take turns: one waiting for another to end stands still too
+                    // Slow, Slippery and Reverse take turns: one waiting for another to end stands still too, and so does
+                    // one with no effect in this level
                     for (const auto &[kind, until] : {std::pair{TrapReverse, &state.reverse_until}, std::pair{TrapSlippery, &state.slippery_until},
-                                                      std::pair{TrapSlow, &state.slow_until}})
-                        if ((state.traps_waiting & trap_bit(kind)) && *until > last_frame)
+                                                      std::pair{TrapSlow, &state.slow_until}, std::pair{TrapMoveLock, &state.move_lock_until},
+                                                      std::pair{TrapDarkness, &state.darkness_until}})
+                        if (((state.traps_waiting | off_here) & trap_bit(kind)) && *until > last_frame)
                             *until += now - last_frame;
             }
             last_frame = now, was_paused = paused;
             state.traps_paused = paused ? 1u : 0u;
+            state.traps_off_here = off_here;
             state.heartbeat_game = now;
         }
         vanilla_movement = state.vanilla_controls != 0;
