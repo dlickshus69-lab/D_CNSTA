@@ -39,6 +39,9 @@ namespace
     std::atomic_bool menu_open{false};
     // Darkness does nothing in gimmick stages
     std::atomic_bool darkness_exempt{false};
+    // how far the Darkness Trap has faded in (0 to 1), and when that was last moved on
+    float darkness_progress = 0;
+    std::uint64_t darkness_progress_at = 0;
     bool frozen() { return active && !menu_open && timer_active(freeze_until, GetTickCount64()); }
     bool reversed() { return active && !menu_open && timer_active(reverse_until, GetTickCount64()); }
     // the stick-momentum Slippery: only while the game's own ice can't be used
@@ -76,6 +79,8 @@ namespace
     // the latest popups, shown again while F2 is held
     std::deque<Line> popup_history;
     std::atomic_bool history_held{false};
+    // while F2 is held: how many of the newest lines are scrolled past (0 shows the newest at the bottom)
+    std::atomic_uint history_scroll{0};
     std::uint64_t popup_seen = 0;
     bool discard_popup_history = false;
     bool secret_input(const std::string &text) { return text.rfind("/password", 0) == 0 || text.rfind("!admin login", 0) == 0; }
@@ -568,12 +573,33 @@ namespace
         if (message == WM_KILLFOCUS && console_open && !startup_mode)
             toggle_console();
         if (message == WM_KILLFOCUS)
-            history_held = false;
-        // hold F2: the latest popups again (items found and received, traps, ...)
+            history_held = false, history_scroll = 0;
+        // hold F2: the latest popups again (items found and received, traps, ...); it opens at the newest each time
         if (wp == VK_F2 && (message == WM_KEYDOWN || message == WM_KEYUP))
         {
+            if (message == WM_KEYUP || !history_held)
+                history_scroll = 0;
             history_held = message == WM_KEYDOWN;
             return 0;
+        }
+        // ... and while it's held, the mouse wheel, Page Up/Down, the arrow keys and Home/End scroll through them
+        if (history_held && !console_open)
+        {
+            const auto scroll_by = [](int lines)
+            {
+                const int at = static_cast<int>(history_scroll.load()) + lines;
+                history_scroll = static_cast<unsigned>(std::clamp(at, 0, static_cast<int>(popup_history_lines)));
+            };
+            if (message == WM_MOUSEWHEEL)
+            {
+                scroll_by(GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 3 : -3);
+                return 0;
+            }
+            if (message == WM_KEYDOWN && (wp == VK_PRIOR || wp == VK_NEXT || wp == VK_UP || wp == VK_DOWN || wp == VK_HOME || wp == VK_END))
+            {
+                scroll_by(wp == VK_PRIOR ? 8 : wp == VK_NEXT ? -8 : wp == VK_UP ? 1 : wp == VK_DOWN ? -1 : wp == VK_HOME ? 100000 : -100000);
+                return 0;
+            }
         }
         // F10 is a system key. Consume releases and repeats too, so Windows is stopped here from entering menu mode
         if (wp == VK_F10 && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN || message == WM_KEYUP || message == WM_SYSKEYUP))
@@ -1297,7 +1323,20 @@ namespace
             r.text(24, r.height - 44, "/server host:port   /slot name   /password value   /connect", 0xffeeeeee);
         }
         // Darkness Trap: a spotlight that follows Crash, drawn under the AP HUD even when F7 hides markers
-        if (!startup_mode && scene.camera_active && !snapshot->traps_paused && !menu_open && !darkness_exempt && timer_active(snapshot->darkness_until, GetTickCount64()))
+        // it closes in slowly when the trap starts and lifts when it ends; a pause holds it where it is
+        const bool darkness_shown = !startup_mode && scene.camera_active && !darkness_exempt;
+        const bool darkness_paused = snapshot->traps_paused || menu_open;
+        {
+            const auto now = GetTickCount64();
+            const float step = darkness_progress_at ? static_cast<float>(std::min<std::uint64_t>(now - darkness_progress_at, 100)) : 0;
+            darkness_progress_at = now;
+            if (!darkness_shown)
+                darkness_progress = 0;
+            else if (!darkness_paused)
+                darkness_progress = timer_active(snapshot->darkness_until, now) ? std::min(1.0f, darkness_progress + step / darkness_fade_in_ms)
+                                                                                : std::max(0.0f, darkness_progress - step / darkness_fade_out_ms);
+        }
+        if (darkness_shown && !darkness_paused && darkness_progress > 0)
         {
             const float side = static_cast<float>(std::min(r.width, r.height));
             float cx = r.width / 2.0f, cy = r.height * 0.55f, px = 0, py = 0;
@@ -1311,7 +1350,8 @@ namespace
                                   return;
                               for (const auto *v : {&a, &b, &c})
                                   r.draw.push_back(r.vertex(v->x, v->y, 0.00024f, 0.00024f, v->color));
-                          });
+                          },
+                          darkness_strength(darkness_progress));
         }
         // the Nitro Trap's countdown, near the top middle of the screen (shown even with the HUD hidden), a number per
         // TNT beat; it goes away when the countdown ends and the Nitro comes
@@ -1568,25 +1608,40 @@ namespace
             const float right = std::min<float>(r.width - 16, 700), max_height = std::max(22.0f, (r.height - 40.0f) / 3 - 8);
             if (history_held && !startup_mode)
             {
-                // F2 held: the latest popups, newest at the bottom, as many as fit
-                std::vector<float> heights;
-                float total = 30;
-                const float line_max = std::max(22.0f, (r.height - 80.0f) / popup_history_lines);
-                for (const auto &line : popup_history)
+                // F2 held: the popups so far, newest at the bottom, as many as fit; scrolled back by history_scroll
+                const float line_max = std::max(22.0f, (r.height - 80.0f) / 4);
+                const float room = std::max(60.0f, r.height - 24.0f - 60); // the title above and the "newer" line below
+                const auto count = static_cast<unsigned>(popup_history.size());
+                const unsigned skip = std::min<unsigned>(history_scroll.load(), count ? count - 1 : 0);
+                history_scroll = skip;
+                const unsigned end_at = count - skip; // one past the newest line shown
+                unsigned begin_at = end_at;
+                std::vector<float> heights; // of the lines shown, oldest first
+                float used = 0;
+                while (begin_at > 0)
                 {
-                    const auto height = std::min(line_max, r.rich_line(20, 0, line, right, false));
-                    heights.push_back(height);
-                    total += height + 6;
+                    const auto height = std::min(line_max, r.rich_line(20, 0, popup_history[begin_at - 1], right, false));
+                    if (!heights.empty() && used + height + 6 > room)
+                        break;
+                    heights.insert(heights.begin(), height);
+                    used += height + 6;
+                    --begin_at;
                 }
+                const float total = 30 + used + (skip ? 30 : 0);
                 float y = std::max(8.0f, r.height - 16 - total);
                 r.quad(14, y - 4, right - 8, r.height - 12 - y, 0xdd141414);
-                r.text(20, y, popup_history.empty() ? std::string("Nothing found or received yet (hold F2)") : "Latest (hold F2)", 0xff20d8ff);
+                std::string title = count ? "Found and received (hold F2)" : "Nothing found or received yet (hold F2)";
+                if (begin_at)
+                    title += "  " + std::to_string(begin_at) + " older: wheel up / Page Up";
+                r.text(20, y, title, 0xff20d8ff);
                 y += 30;
-                for (unsigned i = 0; i < popup_history.size(); ++i)
+                for (unsigned i = begin_at; i < end_at; ++i)
                 {
-                    r.rich_line(20, y, popup_history[i], right, true, y + heights[i], 1.0f);
-                    y += heights[i] + 6;
+                    r.rich_line(20, y, popup_history[i], right, true, y + heights[i - begin_at], 1.0f);
+                    y += heights[i - begin_at] + 6;
                 }
+                if (skip)
+                    r.text(20, y, std::to_string(skip) + " newer: wheel down / Page Down (End: newest)", 0xff20d8ff);
             }
             else
             {

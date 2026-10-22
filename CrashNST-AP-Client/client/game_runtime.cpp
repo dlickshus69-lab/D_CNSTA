@@ -964,6 +964,21 @@ namespace ingame
             }
             return false;
         }
+        // a script type's field by name and size: its offset in the script's data, or 0
+        unsigned field_offset(Address meta, const char *name, unsigned size)
+        {
+            const auto count = value<unsigned>(meta + 24);
+            const auto fields = value<Address>(meta + 40);
+            if (!fields || count > 256)
+                return 0;
+            for (unsigned i = 0; i < count; ++i)
+            {
+                const auto field = value<Address>(fields + i * 8);
+                if (string(value<Address>(field + 48)) == name)
+                    return value<std::uint16_t>(field + 22) == size ? value<std::uint16_t>(field + 24) : 0;
+            }
+            return 0;
+        }
         bool request_scripted_death(Address actor)
         {
             if (!event_hook.installed && !code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
@@ -1242,9 +1257,17 @@ namespace ingame
                 std::cout << out.str() << "\n" << std::flush;
             }
         }
+        Address unbound_logged = 0;
+        unsigned unbound_rescan = 0;
+        // forms without a PlayerDied (seen by health): the actor and whether it was alive last frame
+        Address health_actor = 0;
+        bool health_alive = false;
         void bind_player_death(Address actor)
         {
             if (actor == last_actor && bound_player_died())
+                return;
+            // a form without a PlayerDied is looked over again about twice a second (its scripts may load late)
+            if (actor == last_actor && actor == unbound_logged && ++unbound_rescan % 30)
                 return;
             if (actor != last_actor)
             {
@@ -1255,17 +1278,32 @@ namespace ingame
             death_handle = 0;
             bonus_round_variable = 0;
             no_aku_variable = 0;
-            for (const auto c : list(value<Address>(actor + 24), 128))
+            const bool on_foot = actor == player();
+            std::string graphs;
+            // Crash_DamageManager first (DeathLink deaths are sent through it), then any other damage manager
+            const auto components = list(value<Address>(actor + 24), 128);
+            for (unsigned pass = 0; pass < 2; ++pass)
+            for (const auto c : components)
             {
                 if (!typed(c, 0x13bbbd0) || value<Address>(c + 24) != actor || !(value<unsigned>(c + 32) & 1) ||
                     (value<unsigned>(c + 32) & 24) || !(value<unsigned char>(c + 40) & 1))
                     continue;
                 const auto meta = value<Address>(c + 56), data = value<Address>(c + 16), dm = value<Address>(data + 32);
-                // DamageManager's data holds the PlayerDied handle at +80 , component+56 identifies the graph
-                if (!typed(meta, 0x1745d78) || string(value<Address>(meta + 16)) != "Scripts.Graph.Crash_DamageManager" ||
-                    !typed(data, 0x13bbb10) || !dm || dm != value<Address>(meta + 176) || !field_at(dm, "PlayerDied", 80, 8))
+                const auto graph = typed(meta, 0x1745d78) ? string(value<Address>(meta + 16)) : std::string();
+                if (!pass && !on_foot && !graph.empty() && graphs.size() < 1500)
+                    graphs += " " + graph;
+                if (!pass && graph != "Scripts.Graph.Crash_DamageManager")
                     continue;
-                death_handle = value<Address>(data + 80);
+                // Crash_DamageManager's data holds the PlayerDied handle at +80, component+56 identifies the graph. The
+                // hog, polar bear, jetpack and vehicle forms have damage managers of their own: any graph whose name
+                // says DamageManager and that has a PlayerDied handle is used, wherever the handle sits
+                const unsigned died_at = graph.find("DamageManager") != std::string::npos && typed(data, 0x13bbb10) && dm &&
+                                                 dm == value<Address>(meta + 176)
+                                             ? field_offset(dm, "PlayerDied", 8)
+                                             : 0;
+                if (!died_at)
+                    continue;
+                death_handle = value<Address>(data + died_at);
                 if (!bound_player_died())
                 {
                     death_handle = 0;
@@ -1305,8 +1343,9 @@ namespace ingame
                         slot.variable = variable;
                         names << " " << name;
                     }
-                    if (found != death_watch_count.load())
-                        std::cout << "Death watch: Crash_DamageManager uses" << names.str() << "\n" << std::flush;
+                    if (found != death_watch_count.load() || !on_foot)
+                        std::cout << "Death watch: " << graph.substr(graph.rfind('.') + 1) << " ("
+                                  << string(value<Address>(actor + 128), 64) << ") uses" << names.str() << "\n" << std::flush;
                     death_watch_count = found;
                 }
                 death_hook.attach(0x502000, {0x48, 0x89, 0x5c, 0x24, 8, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x40}, reinterpret_cast<Address>(player_died_set));
@@ -1324,6 +1363,12 @@ namespace ingame
                 }
                 log_variable_tables(bound_player_died(), aku_variable.load());
                 return;
+            }
+            if (!on_foot && actor != unbound_logged)
+            {
+                unbound_logged = actor;
+                std::cout << "DeathLink: " << string(value<Address>(actor + 128), 64)
+                          << " has no PlayerDied; its deaths are seen when its health runs out. Graphs:" << graphs << "\n" << std::flush;
             }
         }
         const BoxSpec flying_specs[]{
@@ -6143,32 +6188,45 @@ namespace ingame
             return;
         }
         // scripted deaths keep positive actor health. observe PlayerDied before the actor disappears
-        if (!actor)
+        // on foot that's Crash (or Coco); in hog, polar bear, jetpack and vehicle stages the form the player rides or flies
+        const auto body = actor ? actor : controlled_actor();
+        if (!body)
             return;
-        bind_player_death(actor);
+        bind_player_death(body);
         update_aku_watch();
         if (!code_matches(0x4df230, std::array<unsigned char, 16>{0x48, 0x89, 0x5c, 0x24, 8, 0x57, 0x48, 0x83,
                                                                   0xec, 0x20, 0x8b, 0xb9, 0xf8, 0, 0, 0}))
             throw std::runtime_error("DeathLink health getter differs");
-        const auto health = reinterpret_cast<int (*)(Address)>(base() + 0x4df230)(actor);
+        const auto health = reinterpret_cast<int (*)(Address)>(base() + 0x4df230)(body);
         if (health < 0 || health > 10000)
             return;
         const auto died_variable = bound_player_died();
         const bool scripted_death = died_variable && reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60)(died_variable);
-        const bool alive = health > 0 && !(value<unsigned char>(actor + 288) & 4) && !scripted_death;
+        const bool alive = health > 0 && !(value<unsigned char>(body + 288) & 4) && !scripted_death;
         if (!alive)
             state.death_ack = state.death_request;
+        // a form with no PlayerDied: a death is its health running out
+        if (!died_variable && body != actor)
+        {
+            if (body == health_actor && health_alive && !alive)
+            {
+                std::cout << "DeathLink: " << string(value<Address>(body + 128), 64) << " ran out of health.\n" << std::flush;
+                record_death_change(false, true);
+            }
+            health_actor = body;
+            health_alive = alive;
+        }
         if (remote_death && alive && GetTickCount64() > remote_deadline)
         {
             remote_death = false;
             copy(state.error, "DeathLink death was not observed after the game death script");
         }
         if (state.death_request != state.death_ack && alive && !remote_death && !state.console_open &&
-            death_controls_ready(actor, scene().camera_active))
+            death_controls_ready(body, scene().camera_active))
         {
             remote_death = true;
             remote_deadline = GetTickCount64() + 3000;
-            if (request_scripted_death(actor))
+            if (request_scripted_death(body))
                 state.death_ack = state.death_request;
             else
             {

@@ -311,14 +311,24 @@ namespace ingame
     };
     inline constexpr unsigned dark_alpha = 255; // pure black outside the light
     inline constexpr float dark_lit = 0.10f, dark_mid = 0.17f, dark_edge = 0.26f; // radii, share of the shorter side
+    // the darkness creeps in over a few seconds (the light closing in on Crash) and lifts quicker when the trap ends
+    inline constexpr float darkness_fade_in_ms = 5000, darkness_fade_out_ms = 1500;
+    // how dark it is drawn, 0 (not at all) to 1 (fully), for how far the fade has come: eased, so it starts and ends gently
+    inline float darkness_strength(float progress)
+    {
+        progress = progress < 0 ? 0 : progress > 1 ? 1 : progress;
+        return progress * progress * (3 - 2 * progress);
+    }
+    // strength: 1 is the full trap; below that the black is fainter and the light wider
     template <class Emit>
-    void darkness_mesh(float width, float height, float cx, float cy, Emit emit)
+    void darkness_mesh(float width, float height, float cx, float cy, Emit emit, float strength = 1)
     {
         constexpr unsigned segments = 64;
         constexpr float pi = 3.14159265358979f;
-        const float side = width < height ? width : height;
-        const float beyond = 2 * (width + height); // past every screen corner from any centre on screen
-        const auto black = [](float t) { return static_cast<unsigned>(dark_alpha * t + 0.5f) << 24; };
+        strength = strength < 0 ? 0 : strength > 1 ? 1 : strength;
+        const float side = (width < height ? width : height) * (1 + 2.5f * (1 - strength));
+        const float beyond = 2 * (width + height) + side * dark_edge; // past every screen corner from any centre on screen
+        const auto black = [strength](float t) { return static_cast<unsigned>(dark_alpha * t * strength + 0.5f) << 24; };
         // radius and darkness of each ring edge; nothing is drawn inside the lit circle
         const std::pair<float, unsigned> rings[]{{side * dark_lit, black(0)}, {side * dark_mid, black(0.45f)},
                                                  {side * dark_edge, black(1)}, {beyond, black(1)}};

@@ -86,6 +86,20 @@ namespace ingame::engine_memory
     {
         return player_at(value<Address>(base() + 0x1a665e8));
     }
+    // whatever the player controls, on foot or not: Crash or Coco, or the hog, polar bear, jetpack and vehicle forms
+    // (player() only finds Hero_Crash and Hero_Coco, the forms move rules apply to)
+    inline Address controlled_actor()
+    {
+        if (const auto actor = player())
+            return actor;
+        for (const auto p : list(value<Address>(value<Address>(base() + 0x1a665e8) + 16), 12))
+        {
+            const auto actor = resolve(value<Address>(p + 16));
+            if (typed(actor, 0x1592220) && value<unsigned char>(actor + 341) == 1 && resolve(value<Address>(actor + 328)) == p)
+                return actor;
+        }
+        return 0;
+    }
     template <std::size_t N> bool code_matches(Address rva, const std::array<unsigned char, N> &expected)
     {
         std::array<unsigned char, N> actual{};

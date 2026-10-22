@@ -1,12 +1,13 @@
 ## What's new
 
-- **More levels need their move (Ability Shuffle, new seeds).** Crash Crush needs Slide (the electric gates), Sewer or Later needs Spin and Crouch Jump (the crate walls and low pipes), Un-Bearable needs Body Slam and Slide, and The Eel Deal's bonus round needs Spin. Until you find the move, the level shows as not available yet, so you come back later instead of needing Crashsanity's vanilla controls.
-- With `spin_placement: anywhere`, moves really can land anywhere: in a test of 24 seeds with these settings, Spin was in the first checks you can do in about 4 of 10 seeds and took anywhere from 50 to 700 checks of jumping in the rest. Every seed was beatable with every check in logic.
+- **F2 scrolls.** Hold F2 to see what you found and received (and traps). It now keeps the last 300, and while you hold it the mouse wheel, Page Up/Down or the arrow keys scroll back through them (Home: oldest, End: newest).
+- **DeathLink from gimmick stages.** Dying on the hog, polar bear, jetpack or a vehicle now sends DeathLink like any other death. A DeathLink you receive there waits until you're on foot in that level.
+- **Darkness Trap fades in.** The darkness creeps in over 5 seconds, the light closing in on Crash, and lifts over 1.5 seconds when it ends.
 
 ## Recent builds
 
+- **V1.2.20:** Crash Crush, Sewer or Later, Un-Bearable and The Eel Deal's bonus round need their moves (Ability Shuffle, new seeds).
 - **V1.2.19:** popups stay 7 seconds, and holding F2 shows the latest 12 again.
-
 - **V1.2.18:** Ability Shuffle logic: Native Fortress needs Spin and Bee-Having needs Slide (new seeds). Spin Placement `early` removed (older YAMLs get `early_to_mid`).
 - **V1.2.17:** title screen and hubs show Available checks (green when you can get any) and Available levels.
 - **V1.2.16:** the game opens the way you last set it (window or full screen), in every seed. The Releases page shows these notes.
