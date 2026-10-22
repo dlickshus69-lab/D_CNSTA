@@ -1297,9 +1297,9 @@ namespace
                           });
         }
         // the falling Nitro's countdown, near the top middle of the screen (shown even with the HUD hidden), then
-        // "LOOK OUT!" while it falls
+        // "LOOK OUT!" until it lands (the game thread clears the countdown then)
         if (!startup_mode && scene.camera_active && snapshot->nitro_countdown_end)
-            if (const auto now = GetTickCount64(); now < snapshot->nitro_countdown_end + 1400)
+            if (const auto now = GetTickCount64(); now < snapshot->nitro_countdown_end + 2500)
             {
                 const bool falling = now >= snapshot->nitro_countdown_end;
                 const auto left = falling ? 0u : static_cast<unsigned>((snapshot->nitro_countdown_end - now + 999) / 1000);

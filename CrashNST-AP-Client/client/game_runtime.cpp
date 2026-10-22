@@ -2065,7 +2065,7 @@ namespace ingame
             std::uint64_t started = 0;
             std::string level, name;
         } nitro_spawn_state;
-        // the Nitro a trap spawned, watched so the log says how long it lasted
+        // the Nitro a trap spawned most recently (the falling Nitro waits for it)
         struct TrapNitro
         {
             Address entity = 0;
@@ -2073,23 +2073,32 @@ namespace ingame
             std::uint64_t appeared = 0;
             std::string level;
         } trap_nitro;
-        void watch_trap_nitro()
+        // A trap's Nitro is pinned where the trap put it. Left alone, a crate made by a borrowed spawner goes "home" to
+        // that spawner (onto the level's own Nitro there, stacking them) at its first hop, sometimes at once, and a new
+        // crate fills in some of its position copies (the one it is drawn from among them) a few frames late. So every
+        // frame, every copy of its position reachable from the crate goes back to the pin's spot, and copies filled in
+        // later are picked up as they appear. The falling Nitro moves its pin's spot down; once it lands it stays put.
+        struct PinnedNitro
         {
-            auto &t = trap_nitro;
-            if (!t.entity)
-                return;
-            const auto level = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
-            std::array<float, 3> at{}, crash{};
-            if (level == t.level && live_crate(t.entity) && read(t.entity + 32, at) && std::hypot(at[0] - t.at[0], at[1] - t.at[1]) < 20)
-                return;
-            const auto lasted = (GetTickCount64() - t.appeared) / 100;
-            std::cout << "Nitro Trap: its Nitro lasted " << lasted / 10 << "." << lasted % 10 << " s ("
-                      << (level != t.level ? std::string("level changed")
-                          : crash_position(crash) ? "Crash " + std::to_string(static_cast<int>(std::hypot(crash[0] - t.at[0], crash[1] - t.at[1]))) + " away from it"
-                                                  : std::string("Crash not found"))
-                      << ")\n" << std::flush;
-            t = {};
-        }
+            struct Copy
+            {
+                Address at = 0;
+                float dz = 0; // its own height above the crate (the physics body sits at the crate's centre)
+                const char *label = "";
+            };
+            Address entity = 0, components = 0, actor = 0;
+            std::string level;
+            std::array<float, 3> spot{}; // where the crate is kept; the falling Nitro lowers it
+            std::array<float, 3> high{}; // where it appeared: copies filled in late hold this
+            std::array<float, 3> home{}; // where the borrowed spawner is (only logged: its copies are never moved)
+            bool has_home = false;
+            std::uint64_t since = 0;
+            unsigned frames = 0, fights = 0;
+            bool falling = false, landed = true, reported_fight = false;
+            std::vector<Copy> copies;
+        };
+        std::vector<PinnedNitro> pinned_nitros;
+        void pin_trap_nitro(Address entity, const std::array<float, 3> &at, const std::string &level, const std::array<float, 3> *home);
         void finish_nitro_spawn(const char *how)
         {
             auto &s = nitro_spawn_state;
@@ -2156,17 +2165,18 @@ namespace ingame
                 read(crate + 32, at);
                 std::cout << "Nitro spawn: a new Nitro appeared at " << triple(at) << " after " << elapsed << " ms\n";
                 trap_nitro = {crate, at, GetTickCount64(), s.level};
+                pin_trap_nitro(crate, at, s.level, s.restore.empty() ? nullptr : &s.restore.front().second);
                 finish_nitro_spawn("done");
             }
             else if (elapsed > 2000)
                 finish_nitro_spawn("nothing spawned within 2 seconds");
         }
         // Nitro Trap, falling: a countdown ("NITRO INCOMING 3, 2, 1" on screen, a tick each second like a TNT crate),
-        // then at "1" a Nitro appears high above the spot where Crash stands and falls onto it over a second, so moving
-        // away dodges it. The game creates the crate on the ground there (a crate the game creates itself works fully),
-        // then every copy of its position (found the way /nitro_scan finds them) is lifted and lowered back a little
-        // each frame. A crate's first hop comes after more than a second, so the fall is over before the game moves it.
-        static constexpr std::uint64_t drop_countdown_ms = 3000, drop_fall_ms = 1000;
+        // then a Nitro appears high above Crash and drops onto the spot where he stands, so moving away dodges it. The
+        // game creates the crate up there (a crate the game creates itself works fully) and its pin keeps it there
+        // until the copy it is drawn from is filled in (a few frames, sometimes more); then the pin is lowered to the
+        // ground over 0.7 seconds, speeding up like a dropped crate, and the crate stays where it lands.
+        static constexpr std::uint64_t drop_countdown_ms = 3000, drop_fall_ms = 700, drop_settle_ms = 800;
         static constexpr float drop_height = 420;
         struct NitroDropTrap
         {
@@ -2177,7 +2187,6 @@ namespace ingame
             std::string level;
             std::array<float, 3> spot{};
             Address entity = 0;
-            std::vector<std::pair<Address, std::array<float, 3>>> copies; // a position copy and its value on the ground
         } nitro_drop;
         // a short tick, made once: 22050 Hz mono 16-bit, a fading square-ish tone
         const std::vector<unsigned char> &tick_sound()
@@ -2206,32 +2215,32 @@ namespace ingame
         {
             PlaySoundA(reinterpret_cast<LPCSTR>(tick_sound().data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
         }
+        PinnedNitro *find_pin(Address entity)
+        {
+            for (auto &p : pinned_nitros)
+                if (entity && p.entity == entity)
+                    return &p;
+            return nullptr;
+        }
         void stop_nitro_drop(Shared &state, const char *why)
         {
             auto &d = nitro_drop;
-            if (d.stage == NitroDropTrap::Falling)
-                for (const auto &[at, ground] : d.copies)
-                    if (readable(at, 12))
-                        write(at, ground);
+            // cut short after it appeared: it lands at once
+            if (d.stage == NitroDropTrap::Settling || d.stage == NitroDropTrap::Falling)
+                if (auto *p = find_pin(d.entity))
+                    p->spot[2] = d.spot[2], p->falling = false, p->landed = true;
             if (d.stage != NitroDropTrap::Idle && why)
                 std::cout << "Nitro drop: " << why << "\n" << std::flush;
             d = {};
             state.nitro_countdown_end = 0;
         }
-        // where the Nitro lands: where Crash was a third of a second ago (standing still, that's where he is; on the
-        // move, he has just left it), at the lowest height he was at in the last second (the ground, even mid-jump),
-        // nudged a hair so no copy of Crash's own position ever matches the crate's
+        // where the Nitro lands: where Crash is when the countdown ends, at the lowest height he was at in the last
+        // second (the ground, even mid-jump), nudged a hair so no copy of Crash's own position ever matches the crate's
         std::array<float, 3> drop_spot()
         {
             std::array<float, 3> at{};
             crash_position(at);
             const auto now = GetTickCount64();
-            for (auto it = crash_path.rbegin(); it != crash_path.rend(); ++it)
-                if (now - it->time >= 330)
-                {
-                    at[0] = it->at[0], at[1] = it->at[1];
-                    break;
-                }
             at[0] += 0.5f, at[1] += 0.5f;
             for (const auto &p : crash_path)
                 if (now - p.time <= 1000 && std::hypot(p.at[0] - at[0], p.at[1] - at[1]) < 400)
@@ -2249,33 +2258,28 @@ namespace ingame
                 return false;
             return at + size <= reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize;
         }
-        // the copies of a Nitro's position, along the exact paths /nitro_scan found them on Nitros, each checked: no
-        // search (searching around a crate created that frame froze the game). Each copy is kept with its own value;
-        // the physics body's copy sits at the crate's centre, up to a crate above the others.
-        std::vector<std::pair<Address, std::array<float, 3>>> nitro_copies(Address entity, Address model, const std::array<float, 3> &ground)
+        // every place a Nitro keeps a copy of its position, along the exact paths /nitro_scan and the V1.1.62 search
+        // found them on Nitros, each pointer checked: no search (searching around a crate created that frame froze the
+        // game). Slots that can't be reached come back without an address, for the log.
+        struct NitroSlot
         {
-            std::vector<std::pair<Address, std::array<float, 3>>> out;
+            Address at = 0;
+            const char *label = "";
+            const char *problem = "";
+        };
+        std::vector<NitroSlot> nitro_slots(Address entity, Address model)
+        {
+            std::vector<NitroSlot> out;
             std::set<Address> seen;
-            std::ostringstream log;
             const char *label = "";
             const auto add = [&](Address at)
             {
-                std::array<float, 3> v{};
                 if (!at || !seen.insert(at).second)
                     return;
-                if (!heap_page(at, 12) || !read(at, v))
-                {
-                    log << " " << label << "(unreadable)";
-                    return;
-                }
-                if (std::abs(v[0] - ground[0]) < 0.05f && std::abs(v[1] - ground[1]) < 0.05f && v[2] > ground[2] - 30 && v[2] < ground[2] + 110)
-                {
-                    out.push_back({at, v});
-                    log << " " << label << "(+" << static_cast<int>(v[2] - ground[2]) << ")";
-                }
+                if (heap_page(at, 12))
+                    out.push_back({at, label, ""});
                 else
-                    log << " " << label << "(no: " << static_cast<int>(v[0] - ground[0]) << "," << static_cast<int>(v[1] - ground[1]) << ","
-                        << static_cast<int>(v[2] - ground[2]) << ")";
+                    out.push_back({0, label, "unreadable"});
             };
             // a pointer read from a checked heap page
             const auto hop = [&](Address from, unsigned offset) -> Address
@@ -2292,16 +2296,16 @@ namespace ingame
                 if (from)
                     add(from + last);
                 else
-                    log << " " << label << "(no path)";
+                    out.push_back({0, label, "no path"});
             };
             label = "entity";
             add(entity + 0x20);
             label = "modelcomponent";
             if (const auto component = hop(entity, 176))
                 add(component + 0xf8);
+            label = "model";
             if (model)
             {
-                label = "model";
                 add(model + 0x60);
                 label = "model-a";
                 path(model, {0x180, 0x178}, 0x1e0);
@@ -2309,7 +2313,7 @@ namespace ingame
                 path(model, {0x180, 0x1d8}, 0x20);
             }
             else
-                log << " model(none)";
+                out.push_back({0, label, "none"});
             for (const auto c : list(value<Address>(entity + 24), 64))
             {
                 if (!heap_page(c, 0x160))
@@ -2330,8 +2334,9 @@ namespace ingame
                 }
                 else if (name == "Scripts.Graph.common_Crate")
                 {
-                    // found by a search on a crate the trap spawned: a whole matrix in the crate script (w 1) and a second
-                    // pair like crate-a/b
+                    // found by a search on a crate the trap spawned: a whole matrix in the crate script (w 1), the copy
+                    // the crate is drawn from (the one Nitro that fell had it, the ones that stayed up didn't yet), and
+                    // a second pair like crate-a/b
                     label = "crate-matrix";
                     add(c + 0x628);
                     label = "crate-h";
@@ -2354,8 +2359,149 @@ namespace ingame
                     path(c, {0x98, 0xd0, 0x138}, 0x1c4);
                 }
             }
-            std::cout << "Nitro drop: copies" << log.str() << "\n" << std::flush;
             return out;
+        }
+        // a copy of the crate at `ref`: x and y exact, height from a little below to a crate's height above (the physics
+        // body sits at the crate's centre)
+        bool copy_of(const std::array<float, 3> &v, const std::array<float, 3> &ref, float &dz)
+        {
+            if (!(std::abs(v[0] - ref[0]) < 0.05f && std::abs(v[1] - ref[1]) < 0.05f && v[2] > ref[2] - 30 && v[2] < ref[2] + 110))
+                return false;
+            dz = v[2] - ref[2];
+            return true;
+        }
+        std::string whole(float v)
+        {
+            return std::isfinite(v) && std::abs(v) < 1e9f ? std::to_string(static_cast<long long>(v)) : std::string("?");
+        }
+        // the copies line in the log: each slot with its height above the crate when it is one, "empty" while the game
+        // hasn't filled it in, otherwise what it holds
+        void log_nitro_slots(const PinnedNitro &p)
+        {
+            std::ostringstream log;
+            for (const auto &s : nitro_slots(p.entity, crate_model(p.entity)))
+            {
+                log << " " << s.label;
+                if (!s.at)
+                {
+                    log << "(" << s.problem << ")";
+                    continue;
+                }
+                const auto c = std::find_if(p.copies.begin(), p.copies.end(), [&](const PinnedNitro::Copy &c) { return c.at == s.at; });
+                std::array<float, 3> v{};
+                read(s.at, v);
+                if (c != p.copies.end())
+                    log << "(" << (c->dz >= 0 ? "+" : "") << whole(c->dz) << ")";
+                else if (std::isfinite(v[0] + v[1] + v[2]) && std::abs(v[0]) + std::abs(v[1]) + std::abs(v[2]) < 1)
+                    log << "(empty)";
+                else if (p.has_home && std::abs(v[0] - p.home[0]) < 0.05f && std::abs(v[1] - p.home[1]) < 0.05f)
+                    log << "(holds its spawner's spot " << (v[2] >= p.home[2] ? "+" : "") << whole(v[2] - p.home[2]) << ")";
+                else
+                    log << "(holds " << whole(v[0]) << "," << whole(v[1]) << "," << whole(v[2]) << ")";
+            }
+            std::cout << "Nitro drop: copies" << log.str() << "\n" << std::flush;
+        }
+        void pin_trap_nitro(Address entity, const std::array<float, 3> &at, const std::string &level, const std::array<float, 3> *home)
+        {
+            if (pinned_nitros.size() >= 6)
+            {
+                std::cout << "Nitro hold: six trap Nitros are being held; the oldest is let go\n" << std::flush;
+                pinned_nitros.erase(pinned_nitros.begin());
+            }
+            PinnedNitro p;
+            p.entity = entity, p.components = value<Address>(entity + 24), p.actor = player(), p.level = level;
+            p.spot = p.high = at, p.since = GetTickCount64();
+            if (home)
+                p.home = *home, p.has_home = true;
+            pinned_nitros.push_back(std::move(p));
+        }
+        std::string seconds(std::uint64_t ms)
+        {
+            return std::to_string(ms / 1000) + "." + std::to_string(ms / 100 % 10) + " s";
+        }
+        // one frame of a pin; false once it is over
+        bool hold_pinned_nitro(PinnedNitro &p, const std::string &level)
+        {
+            const auto now = GetTickCount64(), age = now - p.since;
+            if (level != p.level)
+                return false; // its memory went with the level: nothing to touch
+            const auto fought = p.fights ? ", kept in place on " + std::to_string(p.fights) + " frames the game moved it" : std::string();
+            if (!live_crate(p.entity) || value<Address>(p.entity + 24) != p.components)
+            {
+                std::cout << "Nitro hold: the Nitro is gone after " << seconds(age) << " (set off, broken or unloaded)" << fought << "\n" << std::flush;
+                return false;
+            }
+            // a respawn can free and reuse what the copies point at: stop writing at once
+            if (player() != p.actor)
+            {
+                std::cout << "Nitro hold: let go after " << seconds(age) << " (Crash respawned)" << fought << "\n" << std::flush;
+                return false;
+            }
+            ++p.frames;
+            // look for copies every frame for the first 2.5 seconds (a new crate fills them in over its first frames),
+            // then every 8th frame
+            if (age < 2500 || p.frames % 8 == 0)
+            {
+                std::array<float, 3> e{};
+                read(p.entity + 32, e);
+                const auto slots = nitro_slots(p.entity, crate_model(p.entity));
+                // a copy whose path now leads somewhere else is no longer this crate's
+                p.copies.erase(std::remove_if(p.copies.begin(), p.copies.end(), [&](const PinnedNitro::Copy &c)
+                                              { return std::none_of(slots.begin(), slots.end(), [&](const NitroSlot &s) { return s.at == c.at; }); }),
+                               p.copies.end());
+                for (const auto &s : slots)
+                {
+                    if (!s.at || std::any_of(p.copies.begin(), p.copies.end(), [&](const PinnedNitro::Copy &c) { return c.at == s.at; }))
+                        continue;
+                    // a copy of where the game has the crate now, where it appeared, or where it is kept
+                    std::array<float, 3> v{};
+                    float dz = 0;
+                    if (!read(s.at, v) || !(copy_of(v, e, dz) || copy_of(v, p.high, dz) || copy_of(v, p.spot, dz)))
+                        continue;
+                    p.copies.push_back({s.at, dz, s.label});
+                    if (p.frames > 1)
+                        std::cout << "Nitro hold: " << s.label << " filled in after " << age << " ms\n" << std::flush;
+                }
+            }
+            // every copy back to the spot. Once it sits still, a Nitro may still hop on the spot (straight up and down,
+            // like any Nitro); only leaving the spot is undone
+            const bool still = p.landed && !p.falling;
+            unsigned moved = 0;
+            std::string first;
+            for (const auto &c : p.copies)
+            {
+                const std::array<float, 3> goal{p.spot[0], p.spot[1], p.spot[2] + c.dz};
+                std::array<float, 3> v{};
+                if (!read(c.at, v) || same_place(v.data(), goal, 0.5f))
+                    continue;
+                if (still && std::abs(v[0] - goal[0]) < 1 && std::abs(v[1] - goal[1]) < 1 && v[2] > goal[2] - 5 && v[2] < goal[2] + 150)
+                    continue;
+                if (first.empty())
+                    first = std::string(c.label) + " to " + whole(v[0]) + ", " + whole(v[1]) + ", " + whole(v[2]) +
+                            (p.has_home && std::hypot(v[0] - p.home[0], v[1] - p.home[1]) < 20 ? ", its spawner's spot" : "");
+                ++moved;
+                write(c.at, goal);
+            }
+            // the game moving a crate that is sitting still: its hop (home to its spawner, for a borrowed one)
+            if (moved && still)
+            {
+                ++p.fights;
+                if (!p.reported_fight)
+                {
+                    p.reported_fight = true;
+                    std::cout << "Nitro hold: after " << seconds(age) << " the game moved " << moved << " of " << p.copies.size()
+                              << " copies (" << first << "); it stays where the trap put it\n" << std::flush;
+                }
+            }
+            return true;
+        }
+        void update_pinned_nitros(const std::string &level)
+        {
+            for (std::size_t i = 0; i < pinned_nitros.size();)
+                if (hold_pinned_nitro(pinned_nitros[i], level))
+                    ++i;
+                else
+                    pinned_nitros.erase(pinned_nitros.begin() + static_cast<std::ptrdiff_t>(i));
         }
         void update_nitro_drop(Shared &state, const std::string &level)
         {
@@ -2391,7 +2537,6 @@ namespace ingame
             }
             if (level != d.level)
             {
-                d.copies.clear(); // the level is gone, and its memory with it
                 stop_nitro_drop(state, "the level changed");
                 return;
             }
@@ -2429,54 +2574,42 @@ namespace ingame
                     return;
                 }
                 d.entity = trap_nitro.entity;
+                if (auto *p = find_pin(d.entity))
+                    p->falling = true, p->landed = false;
                 d.stage = NitroDropTrap::Settling, d.settle_frames = 0;
+                return;
+            }
+            auto *p = find_pin(d.entity);
+            if (!p)
+            {
+                stop_nitro_drop(state, "the Nitro went away before landing");
                 return;
             }
             if (d.stage == NitroDropTrap::Settling)
             {
-                // the game fills in a new crate's display copies over its first frames: wait for them
-                if (++d.settle_frames < 3 || now - d.spawned < 60)
+                // wait for the copy it is drawn from (the crate script's matrix); its pin keeps it up there meanwhile
+                const bool drawn = std::any_of(p->copies.begin(), p->copies.end(),
+                                               [](const PinnedNitro::Copy &c) { return std::string(c.label) == "crate-matrix"; });
+                ++d.settle_frames;
+                if ((d.settle_frames < 3 || now - d.spawned < 60 || !drawn) && now - d.spawned < drop_settle_ms)
                     return;
-                if (!live_crate(d.entity))
-                {
-                    stop_nitro_drop(state, "the Nitro went away before falling");
-                    return;
-                }
-                std::array<float, 3> high{};
-                read(d.entity + 32, high);
-                d.drop = std::max(0.0f, high[2] - d.spot[2]);
-                std::cout << "Nitro drop: the Nitro is at " << triple(high) << ", " << static_cast<int>(d.drop) << " above the spot\n" << std::flush;
-                // every copy, kept with where it ends up (its own offset from the crate, on the ground)
-                d.copies.clear();
-                // no search here: one through the crate's objects took 4.7 seconds on the game's frame, which froze the
-                // game and made the client give up on it. Every place that search found is a fixed path above.
-                const auto found = nitro_copies(d.entity, crate_model(d.entity), high);
-                for (const auto &[at, v] : found)
-                    d.copies.push_back({at, std::array<float, 3>{v[0], v[1], v[2] - d.drop}});
+                d.drop = std::max(0.0f, p->high[2] - d.spot[2]);
+                std::cout << "Nitro drop: " << (drawn ? "ready" : "the copy it is drawn from is still empty") << " after " << now - d.spawned
+                          << " ms; " << p->copies.size() << " copies; falling " << static_cast<int>(d.drop) << " onto " << triple(d.spot) << "\n"
+                          << std::flush;
+                log_nitro_slots(*p);
                 d.stage = NitroDropTrap::Falling, d.fall_start = now;
-                std::cout << "Nitro drop: " << d.copies.size() << " copies; falling onto " << triple(d.spot) << "\n" << std::flush;
                 return;
             }
-            // falling: speeding up like a dropped crate, landing a second later
-            const float p = std::min(1.0f, static_cast<float>(now - d.fall_start) / drop_fall_ms);
-            const float height = d.drop * (1 - p * p);
-            if (!live_crate(d.entity))
+            // falling: speeding up like a dropped crate, landing 0.7 seconds later
+            const float q = std::min(1.0f, static_cast<float>(now - d.fall_start) / drop_fall_ms);
+            p->spot[2] = p->high[2] - d.drop * q * q;
+            if (q >= 1)
             {
-                d.copies.clear(); // it exploded (or the game removed it): nothing left to move
-                stop_nitro_drop(state, "the Nitro went off while falling");
-                return;
-            }
-            for (const auto &[at, g] : d.copies)
-            {
-                std::array<float, 3> now_at{};
-                // only a copy that still holds this crate (the game may reuse memory)
-                if (read(at, now_at) && std::abs(now_at[0] - g[0]) < 0.05f && std::abs(now_at[1] - g[1]) < 0.05f)
-                    write(at, std::array<float, 3>{g[0], g[1], g[2] + height});
-            }
-            if (p >= 1)
-            {
-                d.copies.clear(); // already on the ground
-                stop_nitro_drop(state, "landed");
+                p->falling = false, p->landed = true;
+                std::cout << "Nitro drop: landed with " << p->copies.size() << " copies\n" << std::flush;
+                d = {};
+                state.nitro_countdown_end = 0;
             }
         }
         // requests from /nitro_spawn and the Nitro Trap; a request waits up to 5 seconds for a spot
@@ -2484,8 +2617,8 @@ namespace ingame
         {
             record_crash_path(level);
             nitro_spawn_followup();
-            watch_trap_nitro();
             update_nitro_drop(state, level);
+            update_pinned_nitros(level);
             const auto now = GetTickCount64();
             static std::uint64_t next_ready = 0, give_up = 0;
             if (now >= next_ready)
