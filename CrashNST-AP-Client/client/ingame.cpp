@@ -1300,19 +1300,18 @@ namespace
                           });
         }
         // the Nitro Trap's countdown, near the top middle of the screen (shown even with the HUD hidden), a number per
-        // TNT beat, then "LOOK OUT!" until it lands (the game thread clears the countdown then)
+        // TNT beat; it goes away when the countdown ends and the Nitro comes
         if (!startup_mode && scene.camera_active && snapshot->nitro_countdown_end)
-            if (const auto now = GetTickCount64(); now < snapshot->nitro_countdown_end + 2500)
+            if (const auto now = GetTickCount64(); now < snapshot->nitro_countdown_end)
             {
-                const bool falling = now >= snapshot->nitro_countdown_end;
                 const auto step = nitro_countdown_step_ms;
-                const auto left = falling ? 0u : static_cast<unsigned>((snapshot->nitro_countdown_end - now + step - 1) / step);
-                const std::string warning = falling ? std::string("LOOK OUT!") : "NITRO INCOMING!  " + std::to_string(left);
+                const auto left = static_cast<unsigned>((snapshot->nitro_countdown_end - now + step - 1) / step);
+                const std::string warning = "NITRO INCOMING!  " + std::to_string(left);
                 const float scale = r.height >= 1000 ? 2.0f : 1.6f;
                 const float width = r.text_width(warning) * scale, x = (r.width - width) / 2, y = r.height * 0.16f;
                 r.quad(x - 18 * scale, y - 6 * scale, width + 36 * scale, 34 * scale, 0xbb101010);
                 // Nitro green, blinking brighter as each number appears
-                const bool flash = falling ? (now / 120) % 2 == 0 : (snapshot->nitro_countdown_end - now) % step > step - 200;
+                const bool flash = (snapshot->nitro_countdown_end - now) % step > step - 200;
                 r.big_text(x + 2 * scale, y + 2 * scale, warning, 0xff000000, scale);
                 r.big_text(x, y, warning, flash ? 0xffb0ffb0 : 0xff30ff50, scale);
             }

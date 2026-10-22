@@ -2846,7 +2846,7 @@ namespace ingame
                 if (nitro_spawn(why))
                 {
                     d = {}; // the ahead Nitro stays where it appeared, nothing more to do
-                    state.nitro_countdown_end = std::min<std::uint64_t>(state.nitro_countdown_end, now) - 1500; // "LOOK OUT!" 1 s
+                    state.nitro_countdown_end = std::min<std::uint64_t>(state.nitro_countdown_end, now); // the countdown text goes away
                     return;
                 }
                 if (now - d.spawned < ahead_wait_ms)
