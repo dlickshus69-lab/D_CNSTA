@@ -53,25 +53,48 @@ namespace
         if (!ok || !MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
             throw std::runtime_error("Cannot persist AP display settings");
     }
-    void inherit_display(const std::filesystem::path &source, const std::filesystem::path &saves, const std::filesystem::path &marker)
+    // The game keeps its display settings (window or full screen, resolution) in GraphicsOptions.sav and
+    // WindowData.sav next to its saves, so each AP profile has its own. At every start the profile takes the newest
+    // copy of each from the normal game folder or any other AP profile, so the game opens the way you last set it
+    // anywhere, instead of in a window again for every new seed.
+    void inherit_display(const std::filesystem::path &source, const std::filesystem::path &saves, const std::filesystem::path &marker,
+                         const std::filesystem::path &profiles, const std::filesystem::path &own_profile)
     {
         no_reparse(marker);
-        if (std::filesystem::exists(marker))
-            return;
         no_reparse(saves);
         std::filesystem::create_directories(saves);
-        Json::Value inherited(Json::objectValue);
+        Json::Value inherited = std::filesystem::exists(marker) ? read_state_json(marker) : Json::Value(Json::objectValue);
+        if (!inherited.isObject())
+            inherited = Json::Value(Json::objectValue);
+        std::vector<std::filesystem::path> folders{source};
+        std::error_code error;
+        for (std::filesystem::directory_iterator it(profiles, error), end; !error && it != end; it.increment(error))
+            if (it->is_directory(error) && it->path() != own_profile)
+                folders.push_back(it->path() / "AppData" / source.filename());
         for (const char *name : {"GraphicsOptions.sav", "WindowData.sav"})
         {
-            const auto path = source / name;
-            if (!std::filesystem::exists(path))
-                continue;
-            no_reparse(path);
-            const auto bytes = save_probe::read_file(path);
-            if (bytes.size() > max_file)
-                throw std::runtime_error("Display preferences exceed their size bound");
             const auto target = saves / name;
             no_reparse(target);
+            std::filesystem::path newest;
+            std::filesystem::file_time_type newest_time{};
+            if (std::filesystem::exists(target))
+                newest_time = std::filesystem::last_write_time(target);
+            for (const auto &folder : folders)
+            {
+                const auto path = folder / name;
+                std::error_code missing;
+                if (!std::filesystem::is_regular_file(path, missing))
+                    continue;
+                const auto time = std::filesystem::last_write_time(path, missing);
+                if (!missing && time > newest_time)
+                    newest = path, newest_time = time;
+            }
+            if (newest.empty())
+                continue;
+            no_reparse(newest);
+            const auto bytes = save_probe::read_file(newest);
+            if (bytes.size() > max_file)
+                throw std::runtime_error("Display preferences exceed their size bound");
             if (std::filesystem::exists(target))
             {
                 auto backup = target;
@@ -80,7 +103,10 @@ namespace
                 std::filesystem::copy_file(target, backup, std::filesystem::copy_options::skip_existing);
             }
             write_binary(target, bytes);
+            // keep the source's time, so this copy doesn't count as newer than the setting it came from
+            std::filesystem::last_write_time(target, newest_time, error);
             inherited[name] = state_digest(std::string(bytes.begin(), bytes.end()));
+            std::cout << "Display settings: " << name << " taken from " << newest.parent_path().string() << "\n";
         }
         write_state_json(marker, inherited);
     }
@@ -305,7 +331,7 @@ void CloudSaves::adopt(const std::function<void(const std::filesystem::path &)> 
     const auto count = GetEnvironmentVariableW(L"APPDATA", appdata, std::size(appdata));
     if (!count || count >= std::size(appdata))
         throw std::runtime_error("Cannot locate normal display preferences");
-    inherit_display(std::filesystem::path(appdata) / save_folder, saves_, root_ / "display-inherited.json");
+    inherit_display(std::filesystem::path(appdata) / save_folder, saves_, root_ / "display-inherited.json", root_.parent_path(), root_);
     bind(root_ / L"AppData");
     bound_ = true;
     std::cout << "Standalone AP save profile active. NST continues startup.\n"
