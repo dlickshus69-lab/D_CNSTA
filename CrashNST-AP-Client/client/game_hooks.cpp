@@ -490,6 +490,10 @@ namespace
         bind(next_secret, secret_loop);
         const auto ordinary_load = jump();
         bind(secret_match, c.size());
+        // Secret Exit Checks: a secret stage loaded from its own source level means its secret exit was taken, even
+        // when the stage is still locked. Marked at +512 past its slot (state+3328+i*32): cmp rdi,[rcx]; jne;
+        // mov byte [rcx+0x200],1
+        emit({0x48, 0x3b, 0x39, 0x75, 7, 0xc6, 0x81, 0, 2, 0, 0, 1});
         emit({0x48, 0x8b, 0x41, 16, 0x49, 0x3b, 0x7c, 0x24, 16});
         const auto original_origin = branch(0x85);
         emit({0x49, 0x83, 0x7c, 0x24, 8, 0});
@@ -536,9 +540,13 @@ namespace
             imm(int_getter);
             emit({0xff, 0xd0, 0xff, 0xc8, 0x83, 0xf8, 4});
             ordinary_return.push_back(branch(0x87));
+            // keep the selector (0..4) in edx for the Secret Exit mark below
+            emit({0x89, 0xc2});
             // each selector is valid only for its own original source level
             emit({0x48, 0xc1, 0xe0, 3, 0x49, 0x8b, 0x84, 0x04, 0, 12, 0, 0, 0x48, 0x3b, 0xf8});
             ordinary_return.push_back(branch(0x85));
+            // Secret Exit Checks: this C2 secret exit was taken. mov byte [r12+rdx+0xc80],1 (state+3200+selector)
+            emit({0x41, 0xc6, 0x84, 0x14, 0x80, 0x0c, 0, 0, 1});
             emit({0x49, 0x89, 0x5c, 0x24, 16});
             done.push_back(jump());
             for (auto at : ordinary_return)
@@ -1148,6 +1156,21 @@ std::string LevelRouting::refused_entrance() const
     return {};
 }
 unsigned LevelRouting::secret_return_count() const { return read<unsigned>(process_, state() + 160); }
+std::set<std::string> LevelRouting::secret_exits() const
+{
+    // marked by the routing dispatcher: the five C2 secret-warp-room exits at +3200 (ECrashSecretZones order),
+    // and secret stages loaded straight from their source level at +3328 + slot * 32
+    static constexpr std::array<const char *, 5> c2_sources{{"L213", "L207", "L217", "L215", "L216"}};
+    std::set<std::string> result;
+    const auto c2 = read<std::array<unsigned char, 5>>(process_, state() + 3200);
+    for (unsigned i = 0; i < c2_sources.size(); ++i)
+        if (c2[i] == 1)
+            result.insert(c2_sources[i]);
+    for (unsigned i = 0; i < secret_stages.size(); ++i)
+        if (read<unsigned char>(process_, state() + 3328 + i * 32) == 1)
+            result.insert(secret_stages[i].second);
+    return result;
+}
 
 void LevelRouting::secrets(const std::set<std::string> &allowed)
 {

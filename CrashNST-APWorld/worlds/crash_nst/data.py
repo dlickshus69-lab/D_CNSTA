@@ -366,6 +366,20 @@ EXTRA_GEM_PATHS = {
     key: GEM_PATHS[key]
     for key in ("L212", "L219", "L225", "L304", "L309", "L311", "L316", "L321", "L325")
 }
+# Secret Exit Checks: levels with a secret exit, and where it leads. Crash 2's go through the secret warp room;
+# Crash 1 has none. Taking the exit is the check, whether or not its destination is unlocked.
+SECRET_EXITS = {
+    "L207": "Snow Go's secret entrance",
+    "L213": "Air Crash's secret entrance",
+    "L215": "Totally Bear",
+    "L216": "Totally Fly",
+    "L217": "Road to Ruin's secret entrance",
+    "L311": "Eggipus Rex",
+    "L314": "Hot Coco",
+}
+# the way to a secret exit: Dino Might!'s is on its yellow gem path, and Diggin' It's plant takes a body slam
+SECRET_EXIT_GEMS = {"L311": ("Yellow",)}
+SECRET_EXIT_MOVES = {"L217": ("Body Slam",)}
 # first chamber AFTER each boss's award
 C3_POWER_STAGES = (6, 11, 16, 21)
 # vehicle and riding stages do not use Crash's on-foot powers.
@@ -409,6 +423,8 @@ CRYSTAL_LEVELS = frozenset(
 
 
 def check_category(level, event):
+    if event == "secret_exit":
+        return "secret_exit"
     if event == "crystal":
         return "crystal"
     if event == "relic":
@@ -439,6 +455,8 @@ def checks(level):
     yield "relic", f"{level.name} - Relic (Any Tier)", address + 3
     if level.key in CRYSTAL_LEVELS:
         yield "crystal", f"{level.name} - Power Crystal", address + 4
+    if level.key in SECRET_EXITS:
+        yield "secret_exit", f"{level.name} - Secret Exit", address + 5
 
 
 LOCATIONS = {name: address for level in LEVELS for _, name, address in checks(level)}
@@ -460,7 +478,7 @@ VANILLA_REWARDS = {
     )
     for level in LEVELS
     for event, name, address in checks(level)
-    if event != "clear"
+    if event not in ("clear", "secret_exit")
 }
 VANILLA_ITEMS = {
     name: address - 7000
@@ -511,6 +529,8 @@ def requirements(level, event):
         colors = BOX_GEM_PATHS.get(level.key, ())
     elif event == "extra_gem":
         colors = EXTRA_GEM_PATHS.get(level.key, ())
+    elif event == "secret_exit":
+        colors = SECRET_EXIT_GEMS.get(level.key, ())
     else:
         colors = ()
     # a verified crate rule overrides the level-wide estimate, even when it is empty.
@@ -551,6 +571,12 @@ def move_requirements(level, event, spin_shuffled, jump_only_levels, relaxed=Fal
     """basic moves logic expects for a check while Ability Shuffle is on. relaxed (Ability Logic): level clears,
     crystals and boxes expect only jumping (enemies are jumped on, crates are jumped on or hit from below);
     bosses still expect Spin, gems and relics keep the cautious needs."""
+    if event == "secret_exit":
+        # what the level clear needs, and what the way to the exit adds
+        needed = move_requirements(level, "clear", spin_shuffled, jump_only_levels, relaxed)
+        if level.key not in GIMMICK_LEVELS:
+            needed = (*needed, *SECRET_EXIT_MOVES.get(level.key, ()))
+        return tuple(dict.fromkeys(needed))
     override = MOVE_OVERRIDES.get((level.key, event))
     if override is None and event.startswith("box:"):
         override = MOVE_OVERRIDES.get((level.key, "box:"))

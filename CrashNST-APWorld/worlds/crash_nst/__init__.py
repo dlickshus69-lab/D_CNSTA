@@ -431,6 +431,9 @@ class CrashWorld(World):
                 category = check_category(level, event)
                 if category == "clear":
                     self.active_checks.add(address)
+                elif category == "secret_exit":
+                    if self.options.secret_exit_checks:
+                        self.active_checks.add(address)
                 else:
                     groups[category].append(address)
         for category, addresses in groups.items():

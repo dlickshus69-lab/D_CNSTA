@@ -84,7 +84,18 @@ std::string LevelProgress::detail_text() const
     for (unsigned i = 0; i < collectibles.size(); ++i)
         if (collectibles[i].total)
             result += std::string("\n") + mark(collectibles[i]) + found_line(names[i], collectibles[i]);
+    if (secret_exit.total)
+        result += std::string("\n") + secret_exit_text();
     return result;
+}
+std::string LevelProgress::secret_exit_text() const
+{
+    if (!secret_exit.total)
+        return {};
+    return mark(secret_exit) + "Secret Exit: " + (secret_exit.done >= secret_exit.total ? "found"
+                                                  : !secret_exit.logic_known       ? "not yet"
+                                                  : secret_exit.available          ? "not yet, available now"
+                                                                                   : "not yet, not available yet");
 }
 std::string LevelProgress::collectible_text() const
 {
@@ -232,7 +243,7 @@ CheckProgress check_progress(const CheckRules &rules, const std::vector<std::pai
                             : event == "crystal"                     ? &count.collectibles[1]
                             : event == "relic"                       ? &count.collectibles[2]
                                                                      : nullptr;
-        auto *clear = event == "clear" ? &count.clear : nullptr;
+        auto *clear = event == "clear" ? &count.clear : event == "secret_exit" ? &count.secret_exit : nullptr;
         count.title = rule.title;
         ++count.total;
         if (collectible)

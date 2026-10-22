@@ -162,6 +162,8 @@ class ClientRuntime
     std::future<std::map<std::string, std::uintptr_t>> gate_discovery;
     std::string previous_seed_error;
     std::set<std::int64_t> submitted_checks;
+    // Secret Exit Checks: source levels whose secret exit was already announced in the console
+    std::set<std::string> announced_secret_exits;
     bool goal_sent = false;
     std::string previous_gameplay_state;
     std::map<char, std::string> previous_goal_progress;

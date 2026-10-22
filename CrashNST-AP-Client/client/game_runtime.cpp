@@ -550,6 +550,43 @@ namespace ingame
         // Aku Aku Sanity: Crash_DamageManager's NoAkuAkuMasks game variable (the game's own "no Aku Aku masks" switch) is
         // turned on while masks are locked, and off again when they unlock, only if the client turned it on
         std::atomic<Address> no_aku_variable{0};
+        // The Aku Aku lock and a mask already out: the game keeps the mask count in Crash_DamageManager's AkuAkuCount
+        // number variable. While the lock is on and Aku still shows, it is set to 0 with the game's own number setter
+        // (+0x502200: the number variables' "reset" entry, +0x4fb420, jumps there with its default value, just as the
+        // yes/no variables' one jumps to their setter +0x502000), a few tries per Crash, each logged.
+        void clear_aku_count(Address actor, bool shown)
+        {
+            static Address tried_for = 0;
+            static unsigned tries = 0;
+            static std::uint64_t last_try = 0;
+            static const bool verified = [] {
+                // number "reset": mov edx,[rcx+0x18]; jmp +0x502200
+                if (!code_matches(0x4fb420, std::array<unsigned char, 8>{0x8b, 0x51, 0x18, 0xe9, 0xd8, 0x6d, 0x00, 0x00}))
+                    return false;
+                // the yes/no "reset" next to it must jump to the yes/no setter the client already uses
+                std::array<unsigned char, 16> code{};
+                if (!read(base() + 0x4fb400, code))
+                    return false;
+                for (unsigned at = 2; at <= 5; ++at)
+                    if (code[at] == 0xe9)
+                    {
+                        std::int32_t rel = 0;
+                        std::memcpy(&rel, &code[at + 1], 4);
+                        if (0x4fb400 + at + 5 + rel == 0x502000)
+                            return true;
+                    }
+                return false;
+            }();
+            const auto variable = aku_variable.load();
+            if (actor != tried_for)
+                tried_for = actor, tries = 0;
+            const auto now = GetTickCount64();
+            if (!shown || !verified || !variable || !typed(variable, 0x155e9f8) || tries >= 3 || now - last_try < 2000)
+                return;
+            ++tries, last_try = now;
+            reinterpret_cast<void (*)(Address, int)>(base() + 0x502200)(variable, 0);
+            std::cout << "Aku Aku lock: Aku still shows; set AkuAkuCount to 0 (try " << tries << " of 3)\n" << std::flush;
+        }
         // the Aku Aku lock's message filter (event_sent) is on while the lock is
         std::atomic_bool aku_messages_blocked{false};
         // while the Aku Aku lock is on, logs when Crash's Aku Aku manager shows a mask
@@ -577,6 +614,7 @@ namespace ingame
                 return;
             const int state = value<int>(component + 0x90);
             const bool mask = resolve(value<Address>(component + 0x60)) != 0;
+            clear_aku_count(actor, state != 0 || mask);
             if ((state != last_state || mask != last_mask) && lines < 30)
             {
                 ++lines;
@@ -1006,7 +1044,7 @@ namespace ingame
         }
         bool aku_give_message(const std::string &name)
         {
-            static const char *const gives[]{"tm011evr", "5fw2bzv2", "zocmrwe4", "5bnreye5", "ju9pgu97", "s8h11iit", "fcbn65ha", "ibjgf1k9",
+            static const char *const gives[]{"tm011evr", "5fw2bzv2", "5bnreye5", "ju9pgu97", "s8h11iit", "fcbn65ha", "ibjgf1k9",
                                              "a9nnfx8i", "6ldq5n9r", "9nj5heau", "nr69k1wc", "cwmbdu2t", "barwfjg5", "5sryuo67"};
             for (const auto id : gives)
                 if (name.find(id) != std::string::npos)
@@ -1101,7 +1139,32 @@ namespace ingame
                 if (aku_messages_blocked.load() && component && target && aku_manager(component, target))
                 {
                     const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
-                    if (aku_give_message(name))
+                    // a respawn tells Aku how many masks Crash comes back with (V1.1.72: blocking it left a mask that
+                    // was already out on screen through every death): it goes through, with none
+                    if (name.find("zocmrwe4") != std::string::npos)
+                    {
+                        const auto meta = value<Address>(event + 16);
+                        const auto count = value<unsigned>(meta + 24);
+                        const auto fields = value<Address>(meta + 40);
+                        for (unsigned i = 0; fields && count <= 64 && i < count; ++i)
+                        {
+                            const auto field = value<Address>(fields + i * 8);
+                            const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                            if (bytes != 4 || offset < 32 || string(value<Address>(field + 48), 64).find("w7b6hopu") == std::string::npos)
+                                continue;
+                            const auto masks = value<int>(event + offset);
+                            if (masks != 0)
+                            {
+                                const int none = 0;
+                                SIZE_T done = 0;
+                                WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(event + offset), &none, sizeof(none), &done);
+                                std::lock_guard lock(event_mutex);
+                                if (aku_blocked_seen.size() < 40 && aku_blocked_seen.insert(name + std::to_string(masks)).second)
+                                    std::cout << "Aku Aku lock: a respawn gave Aku " << masks << " (zocmrwe4 w7b6hopu); made it 0\n" << std::flush;
+                            }
+                        }
+                    }
+                    else if (aku_give_message(name))
                     {
                         std::lock_guard lock(event_mutex);
                         if (aku_blocked_seen.size() < 40 && aku_blocked_seen.insert(name).second)
@@ -2476,12 +2539,12 @@ namespace ingame
                 finish_nitro_spawn("nothing spawned within 2 seconds");
         }
         // Nitro Trap, falling: a countdown ("NITRO INCOMING 3, 2, 1" on screen, a tick each second like a TNT crate),
-        // then a Nitro appears high above Crash and drops onto the spot where he stands in 0.45 seconds, speeding up like
+        // then a Nitro appears high above Crash and drops onto the spot where he stands in 0.35 seconds, speeding up like
         // a dropped crate, so moving away dodges it. The game creates the crate up there (a crate the game creates itself
         // works fully) and it is moved every frame with the game's own "set position", the one scripts use. That marks
         // it moved, so the game carries the move over to the crate's physics body and everything it is drawn from.
         // (Writing its position copies directly didn't: every frame the physics body put them back, V1.1.65's watch.)
-        static constexpr std::uint64_t drop_countdown_ms = 3000, drop_fall_ms = 450;
+        static constexpr std::uint64_t drop_countdown_ms = 3000, drop_fall_ms = 350;
         // the falling Nitro borrows a spawner at least this far away when there is one (see nitro_spawner_near)
         static constexpr float drop_spawner_away = 1500;
         static constexpr float drop_height = 420;
@@ -2760,7 +2823,7 @@ namespace ingame
                 d.stage = NitroDropTrap::Falling, d.fall_start = now;
                 return;
             }
-            // falling: speeding up like a dropped crate, landing 0.45 seconds later
+            // falling: speeding up like a dropped crate, landing 0.35 seconds later
             const float q = std::min(1.0f, static_cast<float>(now - d.fall_start) / drop_fall_ms);
             set_entity_position(d.entity, std::array<float, 3>{d.high[0], d.high[1], d.high[2] - d.drop * q * q});
             if (q < 1)

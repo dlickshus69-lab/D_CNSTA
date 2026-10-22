@@ -1464,9 +1464,15 @@ namespace
                     const unsigned checks_color = checks.empty() ? 0xff20d8ff : checks[0] == '\x01' ? 0xff4040ff : checks[0] == '\x02' ? 0xff40e040 : 0xff20d8ff;
                     if (!checks.empty() && (checks[0] == '\x01' || checks[0] == '\x02'))
                         checks.erase(0, 1);
+                    // line four (Secret Exit Checks): the level's secret exit, green or red by its leading mark
+                    std::string secret = target->secret_exit;
+                    const unsigned secret_color = secret.empty() ? 0xff20d8ff : secret[0] == '\x01' ? 0xff4040ff : secret[0] == '\x02' ? 0xff40e040 : 0xff20d8ff;
+                    if (!secret.empty() && (secret[0] == '\x01' || secret[0] == '\x02'))
+                        secret.erase(0, 1);
                     const float title_width = r.text_width(target->title);
-                    const float label_height = extra ? 68 : 46;
-                    const float label_width = std::min<float>(std::max({title_width + r.text_width(status), r.text_width(checks), r.text_width(plain)}) + 12, 480);
+                    const float label_height = (extra ? 68 : 46) + (secret.empty() ? 0 : 22);
+                    const float label_width = std::min<float>(std::max({title_width + r.text_width(status), r.text_width(checks), r.text_width(plain),
+                                                                         r.text_width(secret)}) + 12, 480);
                     for (const auto &previous : labels)
                         if (std::abs(previous[0] - center) < (previous[3] + label_width) / 2 &&
                             y < previous[1] + previous[2] + 2 && y + label_height > previous[1] - 2)
@@ -1489,6 +1495,8 @@ namespace
                             piece_x += r.text_width(piece) + r.text_width("   ");
                         }
                     }
+                    if (!secret.empty())
+                        r.text(x + 6, y + (extra ? 66 : 44), secret, secret_color);
                 }
             }
         }

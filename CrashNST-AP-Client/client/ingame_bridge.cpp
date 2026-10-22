@@ -291,6 +291,7 @@ void BoxMarkers::progress(const CheckProgress &counts, const std::map<std::strin
         ingame::copy(level.counts, p.label_text());
         level.all_done = p.total && p.done >= p.total;
         ingame::copy(level.collectible_counts, p.collectible_text());
+        ingame::copy(level.secret_exit, p.secret_exit_text());
         ingame::copy(level.detail, p.detail_text());
     }
     shared_->entrance_count = 0;

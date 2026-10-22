@@ -23,6 +23,8 @@ public:
     bool ready() const { return variable_ != 0; }
     unsigned start_count() const;
     unsigned secret_return_count() const;
+    // source levels whose secret exit was taken since routing attached (Secret Exit Checks)
+    std::set<std::string> secret_exits() const;
     void secrets(const std::set<std::string> &allowed);
     // a locked entrance loads its own hub instead of its level, so slipping past a hub gate just reloads the hub
     void lock_entrances(const std::set<std::string> &locked);

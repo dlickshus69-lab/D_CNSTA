@@ -11,6 +11,9 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
+#include <string>
+#include <thread>
 extern "C" bool NST_PrepareRenderer();
 
 namespace
@@ -25,16 +28,54 @@ namespace
         std::ofstream file;
         HANDLE console;
         std::mutex mutex;
+        // The Debug window gets its copy on a thread of its own. While text is selected in a console window (Ctrl+A,
+        // or dragging over it), Windows makes every write to it wait until the selection ends, and a log line written
+        // by the game's own thread then froze the game (V1.1.72: frozen for a minute and a half while the log was
+        // being copied). Now only this thread waits; the log file is written at once as before.
+        static constexpr std::size_t console_backlog = 4 << 20;
+        std::mutex console_mutex;
+        std::condition_variable console_ready;
+        std::string console_pending;
+        bool console_dropped = false;
+        void console_writer()
+        {
+            std::string chunk;
+            for (;;)
+            {
+                {
+                    std::unique_lock<std::mutex> lock(console_mutex);
+                    console_ready.wait(lock, [this] { return !console_pending.empty(); });
+                    chunk.swap(console_pending);
+                    console_dropped = false;
+                }
+                DWORD written = 0;
+                WriteFile(console, chunk.data(), static_cast<DWORD>(chunk.size()), &written, nullptr);
+                chunk.clear();
+            }
+        }
+        void to_console(const char *text, std::streamsize count)
+        {
+            if (!console || console == INVALID_HANDLE_VALUE)
+                return;
+            {
+                std::lock_guard<std::mutex> lock(console_mutex);
+                if (console_pending.size() + static_cast<std::size_t>(count) <= console_backlog)
+                    console_pending.append(text, static_cast<std::size_t>(count));
+                else if (!console_dropped)
+                {
+                    // the window has been held for a long time: the file still has everything
+                    console_dropped = true;
+                    console_pending += "\n[Debug window was paused; some lines are only in the log file]\n";
+                }
+            }
+            console_ready.notify_one();
+        }
         std::streamsize xsputn(const char *text, std::streamsize count) override
         {
             std::lock_guard<std::mutex> lock(mutex);
             file.write(text, count);
             file.flush();
-            if (console && console != INVALID_HANDLE_VALUE)
-            {
-                DWORD written = 0;
-                WriteFile(console, text, static_cast<DWORD>(count), &written, nullptr);
-            }
+            to_console(text, count);
             return file ? count : 0;
         }
         int_type overflow(int_type value) override
@@ -56,6 +97,9 @@ namespace
         {
             if (!file)
                 throw std::runtime_error("Cannot open AP runtime log");
+            // the log lives as long as NST does
+            if (console && console != INVALID_HANDLE_VALUE)
+                std::thread(&DebugLog::console_writer, this).detach();
         }
     };
     DebugLog *log_file = nullptr;

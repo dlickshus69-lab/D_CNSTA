@@ -20,10 +20,13 @@ struct LevelProgress : CheckCounts
     std::string title;
     std::array<CheckCounts, 3> collectibles{};
     CheckCounts clear{}; // the level's clear check
+    CheckCounts secret_exit{}; // Secret Exit Checks: the level's secret exit, when it has one and the seed has them
     // hub label line: Level Clear, C, G, R as tab-separated pieces; a leading \x01 marks red, \x02 green
     std::string collectible_text() const;
     // hub label line: checks found out of the level's total and how many are available now
     std::string label_text() const;
+    // hub label line four: the level's secret exit (empty when it has none), marked red or green
+    std::string secret_exit_text() const;
     // the level panel in the top-left corner: one spelled-out line for all checks, then one per collectible type
     std::string detail_text() const;
 };

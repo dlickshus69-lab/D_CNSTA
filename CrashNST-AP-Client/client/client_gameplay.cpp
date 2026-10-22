@@ -87,6 +87,39 @@ void ClientRuntime::update_routing(ClientTick &tick)
     if (!tick.room_valid)
         level_routing.reset();
     tick.room_ready = tick.room_valid && level_routing && level_routing->ready();
+    // Secret Exit Checks: the routing dispatcher marks each secret exit as it is taken (Crash 2's through the secret
+    // warp room, Crash 3's straight into Hot Coco or Eggipus Rex), whether or not the place it leads is unlocked
+    if (tick.room_ready && seed)
+        try
+        {
+            std::set<std::int64_t> found;
+            for (const auto &source : level_routing->secret_exits())
+            {
+                const auto check = tick.checks.find(CheckKey{source, "secret_exit"});
+                if (check == tick.checks.end())
+                    continue;
+                if (!tick.checked.count(check->second))
+                    found.insert(check->second);
+                if (announced_secret_exits.insert(source).second)
+                {
+                    const auto rule = std::find_if(seed->rules.checks.begin(), seed->rules.checks.end(),
+                                                   [&](const auto &r) { return r.id == check->second; });
+                    print_console("Secret exit found: " + (rule == seed->rules.checks.end() ? source : rule->title) + "!", true);
+                }
+            }
+            for (const auto id : session.queue(found))
+            {
+                std::cout << "AP secret exit check earned: " << id << '\n';
+                if (tick.online && submitted_checks.insert(id).second)
+                    AP_SendItem(id);
+            }
+        }
+        catch (const std::exception &e)
+        {
+            if (routing_error != e.what())
+                std::cerr << "Secret exits: " << e.what() << std::endl;
+            routing_error = e.what();
+        }
     if (tick.room_ready)
         try
         {

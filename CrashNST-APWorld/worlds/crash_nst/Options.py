@@ -99,6 +99,15 @@ class StartingLevels(Range):
     default = 2
 
 
+class SecretExitChecks(Toggle):
+    """Taking a secret exit is a check: Air Crash, Bear Down, Un-Bearable, Hangin' Out and Diggin' It in Crash 2,
+    Road Crash and Dino Might! in Crash 3 (in the levels you selected; Crash 1 has none). The exit counts even
+    when the level it leads to is still locked. Dino Might!'s needs the Yellow Gem, and with Ability Shuffle
+    Diggin' It's needs Body Slam."""
+
+    display_name = "Secret Exit Checks"
+
+
 class Goal(Choice):
     """Choose what the player must complete to win.
 
@@ -541,6 +550,7 @@ crash_option_groups = [
         LevelShuffle,
         LevelPool,
         StartingLevels,
+        SecretExitChecks,
     ]),
     OptionGroup("Crystals / Gems / Relics", [
         CollectibleRewards,
@@ -593,6 +603,7 @@ class CrashOptions(PerGameCommonOptions):
     crash2_levels: Crash2Levels
     crash3_levels: Crash3Levels
     starting_levels: StartingLevels
+    secret_exit_checks: SecretExitChecks
     white_gem_checks: WhiteGemChecks
     colored_gem_checks: ColoredGemChecks
     crystal_checks: CrystalChecks
