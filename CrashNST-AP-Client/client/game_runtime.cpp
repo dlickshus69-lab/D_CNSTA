@@ -3147,21 +3147,42 @@ namespace ingame
             std::lock_guard lock(nitro_find_mutex);
             return nitro_find.done && nitro_find.level == level;
         }
-        // the ready spawner of an ordinary crate (not a Nitro, TNT, checkpoint, switch or time trial outline) closest
-        // to the spot, at least `away` from it when there is one
-        NitroSpawner crate_spawner_near(const std::array<float, 3> &to, float away = 0)
+        // the scripts on an owner, by name ("common_Crate_LevelCount, ...")
+        std::string owner_scripts(Address owner)
+        {
+            std::string scripts;
+            for (const auto c : list(value<Address>(owner + 24), 64))
+                if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78))
+                {
+                    auto name = string(value<Address>(value<Address>(c + 56) + 16), 120);
+                    if (name.rfind("Scripts.Graph.", 0) == 0)
+                        name.erase(0, 14);
+                    scripts += (scripts.empty() ? "" : ", ") + name;
+                }
+            return scripts;
+        }
+        // a ready spawner to make the trap's Nitro with, closest to the spot (at least `away` from it when there is one).
+        // V1.2.65: never one whose thing counts toward the level's boxes. A crate's box count (common_Crate_LevelCount, on
+        // the spawner's owner) counts whatever its spawner makes: borrowing an Aku Aku crate's spawner counted the trap's
+        // Nitro as that crate (V1.2.64 log: "Crate_AkuAku005 in L123 counted"), and in Crash 2 and 3 borrowing a Nitro
+        // crate's spawner counted it as that Nitro. So: no owner with a box count, no enemies, checkpoints, time trial,
+        // gem, relic or boss things, nothing on a path, and nothing that is itself a Nitro or TNT.
+        NitroSpawner free_spawner_near(const std::array<float, 3> &to, float away = 0)
         {
             NitroSpawner best, distant;
             for (const auto owner : event_owners())
             {
                 const auto name = string(value<Address>(owner + 128));
-                if (name.rfind("Crate_", 0) != 0)
-                    continue;
-                bool skip = false;
-                for (const char *word : {"Nitro", "TNT", "Checkpoint", "Switch", "Outline", "AwarenessHelper", "Bonus"})
+                bool skip = name.empty();
+                for (const char *word : {"Nitro", "TNT", "Checkpoint", "Switch", "Outline", "LevelEnd", "TimeTrial", "Enemy", "Gem", "Relic",
+                                         "Portal", "Boss", "Bonus", "Spline", "Path", "Orbit", "Swing", "Rotating", "Aku"})
                     skip = skip || name.find(word) != std::string::npos;
                 std::array<float, 3> at{};
                 if (skip || !read(owner + 32, at))
+                    continue;
+                const auto scripts = owner_scripts(owner);
+                if (scripts.find("LevelCount") != std::string::npos || scripts.find("Count") != std::string::npos ||
+                    scripts.find("Checkpoint") != std::string::npos)
                     continue;
                 for (const auto c : list(value<Address>(owner + 24), 64))
                 {
@@ -3191,9 +3212,9 @@ namespace ingame
             else if (!ahead_spot(spot))
                 return why = "no spot ahead yet: Crash needs to be running on the ground", false;
             const auto level = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
-            // a level without Nitro spawners: an ordinary crate's spawner makes it from the Nitro's template (V1.2.52)
-            if (!any && !nitro_spawner_near(spot, away).component)
-                any = true;
+            // always made from the Nitro's template by a spawner that counts nothing (V1.2.65; before, a level's own Nitro
+            // spawner was borrowed where there was one, and its box count counted the trap's Nitro)
+            any = true;
             Address nitro_template = 0;
             if (any)
             {
@@ -3203,9 +3224,9 @@ namespace ingame
                 if (!nitro_template)
                     return why = nitro_template_searched(level) ? "no Nitro template loaded in this level" : "still looking for the Nitro in memory", false;
             }
-            const auto spawner = any ? crate_spawner_near(spot, away) : nitro_spawner_near(spot, away);
+            const auto spawner = free_spawner_near(spot, away);
             if (!spawner.component)
-                return why = any ? "no ordinary crate spawner to borrow here" : "no Nitro crates in this level", false;
+                return why = "no spawner here that counts nothing to borrow", false;
             std::vector<std::pair<Address, Address>> words;
             if (any)
             {
@@ -3237,6 +3258,9 @@ namespace ingame
             for (const auto &w : s.words)
                 write(w.first, w.second);
             s.words.clear();
+            static unsigned described = 0;
+            if (described++ < 6)
+                std::cout << "Nitro spawn: borrowing " << spawner.name << "'s spawner (its owner has: " << owner_scripts(spawner.owner) << ")\n";
             std::cout << "Nitro spawn: " << spawner.name << "'s spawner (" << static_cast<int>(spawner.distance)
                       << " from the spot" << (any ? ", making a Nitro from its template" : "") << ") spawns at " << triple(spot) << ", " << static_cast<int>(std::hypot(spot[0] - crash[0], spot[1] - crash[1]))
                       << " from Crash\n" << std::flush;
@@ -4123,12 +4147,12 @@ namespace ingame
                                  nitro_drop.stage == NitroDropTrap::Idle && trap_actor_position(crash);
                 // without Nitro crates: the Nitro's template (looked for in memory once per level while a Nitro Trap
                 // waits) and an ordinary crate's spawner to make it with
-                const bool own = can && nitro_spawner_near(crash).component;
-                if (can && !own && state.nitro_wanted && !nitro_template_searched(level))
+                const bool known = can && level_nitro_template(level);
+                if (can && !known && state.nitro_wanted && !nitro_template_searched(level))
                     nitro_template_search(level);
-                const bool borrowed = can && !own && level_nitro_template(level) && crate_spawner_near(crash).component;
-                state.nitro_ready = can && ahead_spot(spot) && (nitro_spawner_near(spot).component || borrowed);
-                state.nitro_drop_ready = own || borrowed;
+                const bool borrowed = known && free_spawner_near(crash).component;
+                state.nitro_ready = borrowed && ahead_spot(spot) && free_spawner_near(spot).component;
+                state.nitro_drop_ready = borrowed;
             }
             if (state.nitro_spawn_request == state.nitro_spawn_ack)
             {
