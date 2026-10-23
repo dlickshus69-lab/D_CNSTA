@@ -88,6 +88,8 @@ void ClientRuntime::initialize_ap()
                 console_notifications.pop_front();
             console_notifications.push_back("DeathLink from " + source.substr(0, 255) +
                                             (cause.empty() ? "." : ": " + cause.substr(0, 1024)));
+            if (deaths_seen.size() < 256)
+                deaths_seen.push_back(source.substr(0, 60));
         }));
     register_packet_callbacks();
     AP_SetItemClearCallback([] {});

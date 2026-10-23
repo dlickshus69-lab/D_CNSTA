@@ -1,13 +1,10 @@
 ## What's new
 
-- **Boxes that need a move (Ability Shuffle, new seeds).** Arrow crates, crates sitting on a TNT or Nitro (The High Road, Heavy Machinery) and crates in stacks four high (Cold Hard Crash) need Spin; iron-bound crates and Turtle Woods' underground room need Body Slam. Until you have the move they show as not available yet.
-- **Gimmick stages need no moves again** (Crashsanity gives them vanilla controls), so Un-Bearable is back in logic. Crash 2 gold relics on the polar bear, jetpack and jet board no longer expect Speed Shoes (Pack Attack's relic).
-- **Box checks after a death.** The box tracker now re-attaches when the level's crates are reloaded, matches crates the game made again after a death or a failed bonus round, and logs any broken crate it can't match.
-- **DeathLink:** deaths in time trials and Restart from the pause menu aren't sent. On rides, a death is also seen when the ride's health runs out, and a DeathLink you receive there waits for your next level on foot (taking a life instead didn't work).
-- **Darkness** is off on Coco's jet ski levels. **Crash 3's secret platform** is asked for again (up to 5 times) if it doesn't show up.
+- **Death counter.** With DeathLink on, the top-right corner shows the seed's DeathLink deaths ("Deaths: N" for everyone together) and, in the hubs, each player's count. It counts your sent deaths and every DeathLink received while you're connected, and is saved per seed.
 
 ## Recent builds
 
+- **V1.2.24:** boxes that need a move (arrow crates, crates on TNT, tall stacks: Spin; iron-bound crates, Turtle Woods' underground room: Body Slam), gimmick stages need no moves, box tracker re-attaches after reloads, DeathLink skips time trials and pause-menu Restart, rides hold received DeathLinks, no Darkness on Coco's jet ski, secret platform retries.
 - **V1.2.23:** trap mercy: each death takes 5 seconds off every timed trap.
 - **V1.2.22:** a DeathLink you receive on a ride (hog, polar bear, jet ski, jetpack, vehicles) costs a life instead of breaking the ride. The Great Gate needs Spin (Ability Shuffle, new seeds).
 - **V1.2.21:** F2 keeps the last 300 popups and scrolls (mouse wheel, Page Up/Down, arrows, Home/End). Deaths on rides send DeathLink. The Darkness Trap fades in over 5 seconds.

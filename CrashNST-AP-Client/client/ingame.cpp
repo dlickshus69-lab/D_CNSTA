@@ -1392,6 +1392,14 @@ namespace
                 // how many of this game's levels you can enter now
                 if (hub_game && snapshot->campaign_levels[hub_game - 1][0])
                     corner_box(snapshot->campaign_levels[hub_game - 1]);
+                // DeathLink deaths: the total everywhere, and each player's in the hubs
+                if (!main_menu(scene.zone) && snapshot->death_tally[0][0])
+                {
+                    corner_box(snapshot->death_tally[0]);
+                    if (hub_game)
+                        for (unsigned i = 1; i < std::size(snapshot->death_tally) && snapshot->death_tally[i][0]; ++i)
+                            corner_box(snapshot->death_tally[i]);
+                }
                 {
                     // running trap timers
                     const auto now = GetTickCount64();

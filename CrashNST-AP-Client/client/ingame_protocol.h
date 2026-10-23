@@ -185,6 +185,8 @@ namespace ingame
         char campaign_counts[3][48]{};
         char campaign_levels[3][40]{}; // "Available levels: open/total" for each game's hub entrances
         char goal_counts[64]{};
+        // DeathLink deaths this seed: "Deaths: N", then "Name: N" per player, most first (empty lines unused)
+        char death_tally[9][64]{};
         char completion[1024 * 1024]{}; // NUL-separated commands, item names, location names.
         unsigned completion_bytes = 0, item_start = 0, location_start = 0;
         Box boxes[max_boxes]{};
@@ -263,6 +265,9 @@ namespace ingame
                 return false;
         for (const auto &levels : s.campaign_levels)
             if (!terminated(levels))
+                return false;
+        for (const auto &line : s.death_tally)
+            if (!terminated(line))
                 return false;
         for (unsigned i = 0; i < s.collectible_count; ++i)
         {

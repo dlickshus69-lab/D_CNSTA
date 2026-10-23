@@ -2,6 +2,9 @@
 #include "ap_console.h"
 #include "game_runtime.h"
 #include "movement_rules.h"
+#include "standalone.h"
+#include "session.h"
+#include <filesystem>
 #include <algorithm>
 #include <iostream>
 #include "crate_catalogue.h"
@@ -91,11 +94,15 @@ void ClientRuntime::update_bridge(AP_ConnectionStatus status)
             next_marker_attach = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         }
     }
-    std::deque<std::string> notices;
+    std::deque<std::string> notices, deaths;
     {
         std::lock_guard<std::mutex> lock(state_mutex);
         notices.swap(console_notifications);
+        deaths.swap(deaths_seen);
     }
+    for (const auto &player : deaths)
+        count_death(player);
+    update_death_tally();
     for (const auto &text : notices)
         print_console(text);
     bool messages_drained = false;
@@ -303,6 +310,7 @@ void ClientRuntime::update_display(ClientTick &tick)
             {
                 AP_DeathLinkSend();
                 print_console("DeathLink sent.");
+                count_death(slot);
             }
             last_deaths = deaths;
         }
@@ -315,4 +323,57 @@ void ClientRuntime::update_display(ClientTick &tick)
         box_markers->collectibles({});
         box_markers->message(gameplay_state);
     }
+}
+
+void ClientRuntime::count_death(const std::string &player)
+{
+    update_death_tally(); // load this seed's tally first
+    if (death_tally_seed.empty() || player.empty())
+        return;
+    ++death_tally[player];
+    death_tally_dirty = true;
+    update_death_tally();
+}
+
+void ClientRuntime::update_death_tally()
+{
+    // the tally belongs to the seed: loaded when a seed is bound, saved whenever it changes
+    if (observed_seed.empty())
+        return;
+    const auto file = standalone::state_directory() / "deaths" / (observed_seed + ".json");
+    if (death_tally_seed != observed_seed)
+    {
+        death_tally_seed = observed_seed;
+        death_tally.clear();
+        const auto saved = read_state_json(file);
+        if (saved.isObject())
+            for (const auto &name : saved.getMemberNames())
+                if (saved[name].isUInt())
+                    death_tally[name] = saved[name].asUInt();
+        death_tally_dirty = true;
+    }
+    if (!death_tally_dirty || !box_markers)
+        return;
+    death_tally_dirty = false;
+    Json::Value out(Json::objectValue);
+    unsigned total = 0;
+    std::vector<std::pair<std::string, unsigned>> players(death_tally.begin(), death_tally.end());
+    for (const auto &[name, count] : players)
+        out[name] = count, total += count;
+    try
+    {
+        std::error_code error;
+        std::filesystem::create_directories(file.parent_path(), error);
+        write_state_json(file, out);
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Death tally: " << error.what() << std::endl;
+    }
+    std::stable_sort(players.begin(), players.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+    std::vector<std::string> lines{"Deaths: " + std::to_string(total)};
+    for (const auto &[name, count] : players)
+        if (lines.size() < 9)
+            lines.push_back(name.substr(0, 40) + ": " + std::to_string(count));
+    box_markers->death_tally(lines);
 }

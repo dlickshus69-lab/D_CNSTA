@@ -60,6 +60,14 @@ class ClientRuntime
     std::size_t ap_packet_bytes = 0;
     std::string ap_packet_error;
     std::deque<std::string> console_notifications;
+    // who sent each DeathLink received (filled by the AP thread), counted on the next update
+    std::deque<std::string> deaths_seen;
+    // DeathLink deaths per player for this seed (yours and everyone's), saved in the state folder
+    std::map<std::string, unsigned> death_tally;
+    std::string death_tally_seed;
+    bool death_tally_dirty = false;
+    void count_death(const std::string &player);
+    void update_death_tally();
     const std::vector<std::string> c2_regular_levels = c2_portal_levels();
     std::filesystem::path save_dir;
     std::map<char, std::string> bound_saves;

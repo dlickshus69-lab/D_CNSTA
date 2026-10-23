@@ -248,6 +248,14 @@ void BoxMarkers::goal(const std::string &text)
     ++shared_->revision;
     unlock();
 }
+void BoxMarkers::death_tally(const std::vector<std::string> &lines)
+{
+    lock();
+    for (unsigned i = 0; i < std::size(shared_->death_tally); ++i)
+        ingame::copy(shared_->death_tally[i], i < lines.size() ? lines[i] : std::string());
+    ++shared_->revision;
+    unlock();
+}
 void BoxMarkers::connection(const std::string &text)
 {
     lock();
