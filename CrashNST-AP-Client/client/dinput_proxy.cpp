@@ -11,7 +11,6 @@
 #include <iterator>
 #include <map>
 #include <set>
-#include <sstream>
 #include <string>
 #include <vector>
 #ifdef _MSC_VER
@@ -379,13 +378,14 @@ namespace
         unsigned long long original_size = 0, patched_size = 0, at = 0, length = 0;
         std::wstring file;
     };
+    // (no string streams here: statically linked, they pull in number parsing this DLL's toolchain can't link)
     std::vector<std::string> split_line(const std::string &line)
     {
         std::vector<std::string> parts;
-        std::string part;
-        std::istringstream in(line);
-        while (std::getline(in, part, '|'))
-            parts.push_back(part);
+        std::size_t from = 0;
+        for (auto bar = line.find('|'); bar != std::string::npos; bar = line.find('|', from))
+            parts.push_back(line.substr(from, bar - from)), from = bar + 1;
+        parts.push_back(line.substr(from));
         return parts;
     }
     bool from_hex(const std::string &text, unsigned char (&out)[16])
