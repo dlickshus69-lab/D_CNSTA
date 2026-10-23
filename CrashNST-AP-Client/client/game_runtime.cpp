@@ -3228,6 +3228,9 @@ namespace ingame
             if (!spawner.component)
                 return why = "no spawner here that counts nothing to borrow", false;
             std::vector<std::pair<Address, Address>> words;
+            static unsigned described = 0;
+            if (described++ < 6)
+                std::cout << "Nitro spawn: borrowing " << spawner.name << "'s spawner (its owner has: " << owner_scripts(spawner.owner) << ")\n" << std::flush;
             if (any)
             {
                 // the borrowed spawner makes the Nitro: its own handle to what it makes (its data's EntityToSpawn, a real
@@ -3236,9 +3239,21 @@ namespace ingame
                 const auto data = value<Address>(spawner.component + 16);
                 if (field_offset(value<Address>(data + 32), "EntityToSpawn", 8) != 0x48)
                     return why = "the borrowed spawner's settings differ", false;
+                // its own template can be any kind of game object (a crate's, a platform's: +0x14c8ef8 since V1.2.66
+                // borrows platforms); the spawner copies whatever its handle points at
                 const auto handle = value<Address>(data + 0x48), own = resolve(handle);
-                if (!handle || !typed(own, 0x141d490))
-                    return why = "the borrowed spawner's template differs", false;
+                if (!handle || !own || !(typed(own, 0x141d490) || typed(own, 0x14c8ef8) || typed(own, 0x14c7fb0) || typed(own, 0x1592220)))
+                {
+                    const auto type = value<Address>(own);
+                    std::ostringstream text;
+                    text << "the borrowed spawner's template is something else (type ";
+                    if (type >= base() && type < module_end())
+                        text << "+0x" << std::hex << (type - base());
+                    else
+                        text << "unknown";
+                    text << ")";
+                    return why = text.str(), false;
+                }
                 words.push_back({handle + 40, own});
                 write(handle + 40, nitro_template);
             }
@@ -3258,9 +3273,6 @@ namespace ingame
             for (const auto &w : s.words)
                 write(w.first, w.second);
             s.words.clear();
-            static unsigned described = 0;
-            if (described++ < 6)
-                std::cout << "Nitro spawn: borrowing " << spawner.name << "'s spawner (its owner has: " << owner_scripts(spawner.owner) << ")\n";
             std::cout << "Nitro spawn: " << spawner.name << "'s spawner (" << static_cast<int>(spawner.distance)
                       << " from the spot" << (any ? ", making a Nitro from its template" : "") << ") spawns at " << triple(spot) << ", " << static_cast<int>(std::hypot(spot[0] - crash[0], spot[1] - crash[1]))
                       << " from Crash\n" << std::flush;
