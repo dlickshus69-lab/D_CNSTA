@@ -78,6 +78,14 @@ namespace crash_colors
         {
             Hsv reference, color;
         };
+        // brightness: as much brighter or darker than the part's typical color as the game's was, but highlights ease
+        // off toward 0.86 instead of clipping to full white (V1.2.43: white fur glowed under the hubs' lights; the
+        // game's own orange fur is about 0.58 at its typical color)
+        double brightness(double raw)
+        {
+            constexpr double knee = 0.70, top = 0.86;
+            return raw <= knee ? raw : knee + (top - knee) * (1.0 - std::exp(-(raw - knee) / (top - knee)));
+        }
         std::uint16_t colorize(std::uint16_t c, const Target &t)
         {
             double rgb[3];
@@ -85,7 +93,7 @@ namespace crash_colors
             const auto [h, s, v] = hsv_of(rgb);
             const auto &[h0, s0, v0] = t.reference;
             const auto &[th, ts, tv] = t.color;
-            const double nv = std::min(1.0, tv * v / std::max(v0, 0.05));
+            const double nv = brightness(tv * v / std::max(v0, 0.05));
             const double ns = ts > 0.08 ? std::min(1.0, ts * (s / std::max(s0, 0.05))) : ts;
             const double dh = wrap(h - h0 + 0.5) - 0.5;
             double out[3];
@@ -209,8 +217,8 @@ namespace crash_colors
             {"gold", {199, 154, 34}},    {"lime", {120, 200, 30}},     {"green", {33, 154, 56}},    {"dark_green", {20, 80, 36}},
             {"teal", {18, 130, 130}},    {"cyan", {28, 180, 204}},     {"light_blue", {90, 162, 230}}, {"blue", {29, 88, 200}},
             {"navy", {26, 39, 102}},     {"purple", {106, 45, 182}},   {"violet", {150, 86, 208}},  {"pink", {224, 106, 162}},
-            {"magenta", {192, 34, 138}}, {"brown", {98, 56, 28}},      {"tan", {196, 154, 100}},    {"white", {236, 236, 236}},
-            {"light_gray", {180, 180, 180}}, {"gray", {118, 118, 118}}, {"black", {30, 30, 30}}};
+            {"magenta", {192, 34, 138}}, {"brown", {98, 56, 28}},      {"tan", {196, 154, 100}},    {"white", {214, 214, 214}},
+            {"light_gray", {168, 168, 168}}, {"gray", {118, 118, 118}}, {"black", {30, 30, 30}}};
         return colors;
     }
     std::string color_text(const std::string &text)

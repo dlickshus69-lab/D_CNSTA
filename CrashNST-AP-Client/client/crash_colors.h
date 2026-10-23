@@ -16,6 +16,8 @@ namespace crash_colors
     std::string describe(const Choice &choice);
     // /colors: shows the colors; /colors <part> <color> changes one; /colors reset goes back to normal. Console lines
     std::vector<std::string> command(const std::string &argument);
+    // after an update that colors differently: the chosen colors are made again (at each connection). Console lines
+    std::vector<std::string> keep_current();
     // the YAML's colors, once per seed (a later /colors stays until another seed). When the YAML also picks a skin mod,
     // the skin stays and the colors wait. Console lines
     std::vector<std::string> apply_seed_choice(const std::string &seed, const Choice &yaml, const std::string &yaml_skin);

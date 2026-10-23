@@ -36,7 +36,10 @@ namespace crash_colors
         // the skin's name for a combination: colors_ and 8 hex digits of its FNV-1a hash
         std::string skin_name(const Choice &choice)
         {
+            // the recolor's version goes in too, so a client that colors differently makes the skin again
             std::uint32_t hash = 2166136261u;
+            for (const char c : std::string(recolor_version) + ";")
+                hash = (hash ^ static_cast<unsigned char>(c)) * 16777619u;
             for (int p = 0; p < PartCount; ++p)
                 for (const char c : std::string(part_name(static_cast<Part>(p))) + "=" + color_text(choice[p]) + ";")
                     hash = (hash ^ static_cast<unsigned char>(c)) * 16777619u;
@@ -158,6 +161,18 @@ namespace crash_colors
         }
         save(choice);
         return prepare();
+    }
+    std::vector<std::string> keep_current()
+    {
+        const auto choice = chosen();
+        const auto worn = skins::chosen();
+        if (!colors_skin(worn) || all_default(choice) || worn == skin_name(choice))
+            return {};
+        auto lines = prepare();
+        for (auto &line : lines)
+            if (line.rfind("Crash colors: ", 0) == 0 && line.find("couldn't") == std::string::npos)
+                line.insert(12, " (made again with this update's colors)");
+        return lines;
     }
     std::vector<std::string> apply_seed_choice(const std::string &seed, const Choice &yaml, const std::string &yaml_skin)
     {

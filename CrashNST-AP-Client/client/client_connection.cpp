@@ -858,6 +858,9 @@ void ClientRuntime::process_packets(AP_ConnectionStatus status)
                                                                            slot_data["crash_skin"].asString());
                                 !note.empty())
                                 print_console(note);
+                        // a colored Crash made by an older client is made again with this one's colors
+                        for (const auto &line : crash_colors::keep_current())
+                            print_console(line);
                         // ... and its Crash colors (made from the game's own Crash.pak, also from the next game start)
                         if (slot_data["crash_colors"].isObject())
                         {
