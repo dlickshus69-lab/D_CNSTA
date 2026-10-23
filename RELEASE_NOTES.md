@@ -1,3 +1,5 @@
 ## What's new
 
-- **Aku Aku Mask: the mask should protect now.** In V1.2.35, `/aku_give` brought the mask out, but a hit still killed Crash, because the game's mask count never changed. A real pickup is a longer chain of messages Aku Aku sends himself, and the count changes partway through it. `/aku_give` now sends the whole chain in the game's order. If Crash had no mask before, it also sets the game's mask count to 1.
+- **Aku Aku Mask: the mask goes away after the hit (try).** In V1.2.36 the filler mask protected Crash from a hit, but its model stayed next to him afterward. Now, if a hit takes a filler mask and the mask is still showing 2.5 seconds later, Aku Aku gets the message the game sends him when Crash dies, which takes the mask away.
+- `/aku_give` no longer sends one message twice (sppqmskb). The game already sends it on its own partway through the chain.
+- Research: the log records Aku Aku's settings when a mask comes out, at a hit and when the mask goes away. This lets a crate's mask be compared with a filler mask.

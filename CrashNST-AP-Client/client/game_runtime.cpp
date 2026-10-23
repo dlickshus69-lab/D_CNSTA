@@ -434,6 +434,8 @@ namespace ingame
         // Aku watch (research for an Aku Aku filler): the AkuAkuCount and WumpaCount game variables; their first
         // bytes are logged whenever they change, to see where the game keeps the mask count
         std::atomic<Address> aku_variable{0}, wumpa_variable{0};
+        // Crash_DamageManager's DamagedInvulnerable game variable: on for the moment after a hit
+        std::atomic<Address> hurt_variable{0};
         // the variable's first 0x100 bytes, then 0x80 bytes where its +0x28 points (its value may live there)
         using AkuWords = std::array<std::uint64_t, 48>;
         bool read_aku_words(Address variable, AkuWords &out)
@@ -626,6 +628,8 @@ namespace ingame
         // when the client last handed Crash a mask (the filler); 0 when none is out. With Aku Aku Sanity's lock on, the
         // lock steps aside while that mask is out (masks protect, it isn't cleared); crates stay blocked
         std::atomic<std::uint64_t> filler_mask_since{0};
+        // the filler mask was given while Crash had none: after a hit while it is out, its model goes if the hit left it
+        std::atomic_bool filler_alone{false};
         // while the Aku Aku lock is on, logs when Crash's Aku Aku manager shows a mask
         void watch_aku_manager(bool locked)
         {
@@ -1488,6 +1492,8 @@ namespace ingame
                             no_aku_variable = variable;
                         if (name == "WumpaCount")
                             wumpa_variable = variable;
+                        if (name == "DamagedInvulnerable")
+                            hurt_variable = variable;
                         std::snprintf(slot.name, sizeof(slot.name), "%s", name.c_str());
                         slot.variable = variable;
                         names << " " << name;
@@ -3350,6 +3356,7 @@ namespace ingame
             }
             log_aku_messages(component);
             const bool had_mask = aku_manager_state(actor).second;
+            filler_alone = !had_mask;
             // A real pickup (V1.2.35's log) is a chain of messages Aku's manager sends himself: fcbn65ha with "yes"
             // (from one node of his script), a9nnfx8i (his handling of it sends 6ldq5n9r, which brings the mask out),
             // then 9becl2sc, tjpwzf3m, sppqmskb, 202aweq4, 9nj5heau and nr69k1wc, and the game's mask count changes.
@@ -3357,7 +3364,8 @@ namespace ingame
             // chain, in order, then the mask count.
             AkuGiveStep chain;
             chain.label = "the pickup's whole chain";
-            chain.ids = {"a9nnfx8i", "9becl2sc", "tjpwzf3m", "sppqmskb", "202aweq4", "9nj5heau", "nr69k1wc"};
+            // (sppqmskb isn't sent: tjpwzf3m's own handling sends it, as in a real pickup)
+            chain.ids = {"a9nnfx8i", "9becl2sc", "tjpwzf3m", "202aweq4", "9nj5heau", "nr69k1wc"};
             chain.count = !had_mask;
             const auto meta = value<Address>(component + 56);
             const auto message = aku_message(component, "fcbn65ha").first;
@@ -3393,6 +3401,87 @@ namespace ingame
             aku_steps.push_back({"6ldq5n9r on its own", 0, 0, 0, {"6ldq5n9r"}, !had_mask});
             aku_step = 0;
             aku_run_step(actor);
+        }
+        // research (V1.2.36: a filler mask's model stayed by Crash after the hit that took it): Aku's manager's settings,
+        // and Crash_DamageManager's, a second after a mask comes out, at a hit while one is out, 1.5 s after it, and
+        // when the mask goes away. A crate's mask and a filler mask side by side show what the filler's is missing
+        void dump_crash_scripts(Address actor, const std::string &why)
+        {
+            static unsigned dumps = 0, damage_dumps = 0;
+            if (dumps >= 14)
+                return;
+            ++dumps;
+            std::cout << "Aku research: " << why << "\n" << std::flush;
+            for (const auto c : list(value<Address>(actor + 24), 128))
+            {
+                if (!typed(c, 0x13bbbd0) || !typed(value<Address>(c + 56), 0x1745d78))
+                    continue;
+                const auto name = string(value<Address>(value<Address>(c + 56) + 16));
+                if (name == "Scripts.Graph.Crash_AkuAkuManager")
+                    log_graph_fields(c, "Aku manager");
+                else if (name == "Scripts.Graph.Crash_DamageManager" && damage_dumps < 7)
+                    ++damage_dumps, log_graph_fields(c, "Damage manager");
+            }
+        }
+        void aku_research_tick()
+        {
+            static Address actor_seen = 0;
+            static bool last_mask = false, last_hurt = false, hit_with_filler = false;
+            static std::uint64_t next_look = 0, dump_at = 0, cleanup_at = 0, check_at = 0;
+            static std::string dump_why;
+            const auto actor = player();
+            const auto now = GetTickCount64();
+            if (!actor || now < next_look)
+                return;
+            next_look = now + 100;
+            const bool mask = aku_manager_state(actor).second;
+            const auto hurt_at = hurt_variable.load();
+            const bool hurt = hurt_at && typed(hurt_at, 0x155ebf0) && reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60)(hurt_at);
+            if (actor != actor_seen)
+            {
+                actor_seen = actor, last_mask = mask, last_hurt = hurt, hit_with_filler = false, dump_at = cleanup_at = check_at = 0;
+                return;
+            }
+            const bool filler = filler_alone.load() && filler_mask_since.load();
+            if (mask && !last_mask)
+                dump_at = now + 1000, dump_why = std::string("a second after a mask came out") + (filler ? " (a filler mask)" : " (not the filler's)");
+            if (!mask && last_mask)
+            {
+                dump_crash_scripts(actor, "the mask went away");
+                hit_with_filler = false, filler_alone = false, cleanup_at = 0;
+            }
+            if (hurt && !last_hurt && last_mask)
+            {
+                dump_crash_scripts(actor, std::string("a hit while a mask was out") + (filler ? " (a filler mask)" : ""));
+                dump_at = now + 1500, dump_why = "1.5 s after the hit";
+                if (filler)
+                    hit_with_filler = true, cleanup_at = now + 2500;
+            }
+            last_mask = mask, last_hurt = hurt;
+            if (dump_at && now >= dump_at)
+                dump_at = 0, dump_crash_scripts(actor, dump_why);
+            // the hit took the filler mask's protection (the game's count went down) but its model is still by Crash:
+            // Aku's manager gets what he gets when Crash dies (xvpkmc2n, his first message then), which takes it away
+            if (cleanup_at && now >= cleanup_at)
+            {
+                cleanup_at = 0;
+                if (mask && hit_with_filler)
+                {
+                    const auto component = aku_manager_component(actor);
+                    const bool sent = component && aku_send_message(component, "xvpkmc2n");
+                    std::cout << "Aku Aku Mask: the hit took the filler mask but it still shows; " << (sent ? "sent Aku xvpkmc2n" : "couldn't send xvpkmc2n")
+                              << "\n" << std::flush;
+                    check_at = now + 600;
+                }
+                hit_with_filler = false;
+            }
+            if (check_at && now >= check_at)
+            {
+                check_at = 0;
+                std::cout << "Aku Aku Mask: after xvpkmc2n the mask " << (mask ? "STILL shows" : "is gone") << "\n" << std::flush;
+                if (mask)
+                    dump_crash_scripts(actor, "the filler mask still shows after xvpkmc2n");
+            }
         }
         // requests from /nitro_spawn and the Nitro Trap; a request waits up to 5 seconds for a spot
         void update_nitro_trap(Shared &state, const std::string &level)
@@ -6434,6 +6523,7 @@ namespace ingame
             aku_give();
         }
         aku_give_followup();
+        aku_research_tick();
         if (!level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))).empty())
             update_aku_lock(state.aku_lock != 0);
         // Crash's colors (research), in levels and hubs
