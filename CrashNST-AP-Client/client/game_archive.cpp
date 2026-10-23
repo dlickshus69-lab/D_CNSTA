@@ -646,6 +646,67 @@ namespace ingame
             return why = std::string("its file could not be read (") + e.what() + ")", Bytes{};
         }
     }
+    std::vector<std::string> archive_member_report(const std::string &text)
+    {
+        std::vector<std::string> lines;
+        const auto wanted = lower(text);
+        const auto root = game_archives();
+        const auto paks = archives();
+        struct Seen
+        {
+            std::uint64_t size = 0;
+            std::vector<std::string> where;
+        };
+        std::map<std::string, Seen> members;
+        std::string names;
+        unsigned with = 0, unreadable = 0, listed = 0;
+        for (const auto &path : paks)
+        {
+            std::error_code error;
+            auto relative = std::filesystem::relative(path, root, error);
+            const auto label = (error ? path.filename() : relative).generic_string();
+            try
+            {
+                Archive a(path);
+                bool any = false;
+                for (unsigned i = 0; i < a.count; ++i)
+                {
+                    const auto name = a.name(i);
+                    if (lower(name).find(wanted) == std::string::npos)
+                        continue;
+                    any = true;
+                    auto &m = members[lower(name)];
+                    m.size = a.length(i);
+                    m.where.push_back(label);
+                }
+                with += any;
+                names += (listed++ % 10 ? ", " : "\n  ") + label + " (" + std::to_string(a.count) + ")";
+            }
+            catch (const std::exception &)
+            {
+                ++unreadable;
+            }
+        }
+        lines.push_back("Archive search \"" + text + "\": " + std::to_string(members.size()) + " different files in " + std::to_string(with) + " of " +
+                        std::to_string(paks.size()) + " archives" + (unreadable ? " (" + std::to_string(unreadable) + " unreadable)" : ""));
+        std::vector<std::pair<std::string, const Seen *>> sorted;
+        for (const auto &[name, seen] : members)
+            sorted.push_back({name, &seen});
+        std::stable_sort(sorted.begin(), sorted.end(), [](const auto &a, const auto &b) { return a.second->where.size() > b.second->where.size(); });
+        for (std::size_t i = 0; i < sorted.size() && i < 120; ++i)
+        {
+            const auto &where = sorted[i].second->where;
+            std::string list;
+            for (std::size_t j = 0; j < where.size() && j < 4; ++j)
+                list += (j ? ", " : "") + where[j];
+            lines.push_back("  " + sorted[i].first + " (" + std::to_string(sorted[i].second->size) + " bytes) in " + std::to_string(where.size()) +
+                            (where.size() == 1 ? " archive: " : " archives: ") + list + (where.size() > 4 ? ", ..." : ""));
+        }
+        if (sorted.size() > 120)
+            lines.push_back("  ... and " + std::to_string(sorted.size() - 120) + " more");
+        lines.push_back("Archives (files inside):" + names);
+        return lines;
+    }
     std::filesystem::path dump_archive_member(const std::string &text, const std::filesystem::path &folder)
     {
         const auto wanted = lower(text);

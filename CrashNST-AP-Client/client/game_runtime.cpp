@@ -23,6 +23,8 @@
 #include <chrono>
 #include <unordered_map>
 #include <string_view>
+#include <cctype>
+#include <map>
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
@@ -277,6 +279,17 @@ namespace ingame
         bool trap_gimmick_level(const std::string &key)
         {
             return special_level(key) || key == "L203" || key == "L207" || key == "L211";
+        }
+        // gimmick levels the Nitro Trap still strikes in (V1.2.46): the hog levels (Hog Wild, Whole Hog), the Crash 2
+        // jet-board levels (Hang Eight, Air Crash, Plant Food) and polar bear levels (Bear It, Bear Down, Un-Bearable,
+        // Totally Bear), and Coco's jet ski levels (Makin' Waves, Tell No Tales, Ski Crazed, Hot Coco). The chase levels
+        // (boulders, bear, dinosaur) were never gimmick levels. Still off: jetpack, motorcycle, plane, scuba, Coco's
+        // tiger and Baby T levels.
+        bool nitro_gimmick_ok(const std::string &key)
+        {
+            static const std::set<std::string> ok{"L107", "L114", "L203", "L207", "L211", "L208", "L213", "L215", "L226",
+                                                  "L305", "L318", "L326", "L331"};
+            return ok.count(key) != 0;
         }
         std::mutex movement_mutex;
         std::map<std::string, unsigned> movement_styles;
@@ -2029,6 +2042,7 @@ namespace ingame
             out << ", spawn routine " << (routine ? "KNOWN" : "unknown");
             return out.str();
         }
+        void nitro_template_probe();
         void nitro_probe()
         {
             const auto world = value<Address>(base() + 0x1a64690);
@@ -2088,6 +2102,7 @@ namespace ingame
             std::cout << "Nitro probe done: " << nitros << " Nitro and " << tnts << " TNT crates, " << routines
                       << " spawners with the known spawn routine. Nothing was changed.\n"
                       << std::flush;
+            nitro_template_probe();
         }
         // /nitro_test research (experimental): move the nearest live Nitro crate next to Crash by rewriting
         // its entity position, its render-model translation and every copy /nitro_scan found. No game code is
@@ -2177,6 +2192,236 @@ namespace ingame
         bool crate_copy(const float *v, const std::array<float, 3> &t)
         {
             return std::abs(v[0] - t[0]) < 0.05f && std::abs(v[1] - t[1]) < 0.05f && std::abs(v[2] - t[2]) < 25;
+        }
+        // ---- V1.2.46 research for a Nitro in any level (read-only: every read is checked, no game code is called) ----
+        // What a spawner holds that says what it makes, what the crate it made points to, which kinds of things in
+        // the level have spawners, and (in the background) which Nitro names are anywhere in the game's memory. Run in
+        // a level with Nitros and in one without (Crash 1 has none): the difference shows whether the Nitro's
+        // description is loaded only with levels that use it, and what a borrowed spawner would need to make one.
+        std::string printable_text(Address at, unsigned max = 64)
+        {
+            if (at < 0x10000 || at > 0x7ffffffeffffULL || !readable(at, 4))
+                return {};
+            const auto text = string(at, max);
+            return text.size() >= 3 && std::all_of(text.begin(), text.end(), [](unsigned char c) { return c >= 32 && c < 127; }) ? text : std::string{};
+        }
+        // an object's type (as an offset in the game's .exe) and up to `most` names it points to in its first `span` bytes
+        std::string object_brief(Address p, unsigned span = 0x80, unsigned most = 3)
+        {
+            if (p < 0x10000 || p > 0x7ffffffeffffULL || !readable(p, 16))
+                return {};
+            std::ostringstream out;
+            const auto vt = value<Address>(p);
+            if (vt >= base() && vt < module_end())
+                out << "type " << hex(static_cast<unsigned>(vt - base()));
+            else if (const auto text = printable_text(p); !text.empty())
+                return "\"" + text + "\"";
+            else
+                return {};
+            unsigned shown = 0;
+            for (unsigned off = 8; off < span && shown < most; off += 8)
+                if (const auto text = printable_text(value<Address>(p + off)); !text.empty())
+                    out << " " << hex(off) << "=\"" << text << "\"", ++shown;
+            return out.str();
+        }
+        // a pointer-sized value: what it points to, directly or as a handle
+        std::string pointer_brief(Address v)
+        {
+            if (!v)
+                return "0";
+            std::ostringstream out;
+            out << "0x" << std::hex << v << std::dec;
+            if (const auto direct = object_brief(v); !direct.empty())
+                out << " [" << direct << "]";
+            if (const auto target = resolve(v); target && target != v)
+                if (const auto via = object_brief(target, 0x100, 4); !via.empty())
+                    out << " -> [" << via << "]";
+            return out.str();
+        }
+        // every field a type's description lists, with its value in `object`
+        void dump_fields(Address object, Address meta, const std::string &who, unsigned most = 80)
+        {
+            const unsigned count = value<unsigned>(meta + 24), size = value<std::uint16_t>(meta + 90);
+            const auto fields = value<Address>(meta + 40);
+            std::cout << who << ": " << (string(value<Address>(meta + 16), 120).empty() ? "(unnamed type)" : string(value<Address>(meta + 16), 120))
+                      << ", " << size << " bytes, " << count << " fields\n";
+            if (!fields || count > 512)
+                return;
+            for (unsigned i = 0; i < count && i < most; ++i)
+            {
+                const auto field = value<Address>(fields + i * 8);
+                const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                const auto kind = value<Address>(field);
+                std::ostringstream line;
+                line << who << ":   " << string(value<Address>(field + 48), 64) << " @" << hex(offset) << " (" << bytes << " bytes, field type "
+                     << (kind >= base() && kind < module_end() ? hex(static_cast<unsigned>(kind - base())) : std::string("?")) << ") = ";
+                if (!bytes || (size && offset + bytes > size + 0x40u))
+                    line << "-";
+                else if (bytes == 1)
+                    line << unsigned(value<unsigned char>(object + offset));
+                else if (bytes == 2)
+                    line << value<std::uint16_t>(object + offset);
+                else if (bytes == 4)
+                    line << value<int>(object + offset) << " / " << value<float>(object + offset);
+                else if (bytes == 8)
+                    line << pointer_brief(value<Address>(object + offset));
+                else
+                {
+                    std::array<float, 4> f{};
+                    read(object + offset, f);
+                    line << "(" << f[0] << ", " << f[1] << ", " << f[2] << (bytes >= 16 ? ", " + std::to_string(f[3]) : std::string()) << ")";
+                }
+                std::cout << line.str() << "\n";
+            }
+        }
+        // the objects an object points to in its first `span` bytes, with their types and names
+        void dump_pointees(Address object, const std::string &who, unsigned span = 0x200)
+        {
+            std::cout << who << ": " << object_brief(object, 0x100, 6) << "\n";
+            for (unsigned off = 8; off < span; off += 8)
+            {
+                const auto p = value<Address>(object + off);
+                const auto brief = object_brief(p, 0x100, 4);
+                if (!brief.empty())
+                    std::cout << who << ":   " << hex(off) << " -> " << brief << "\n";
+            }
+        }
+        std::string kind_of(const std::string &name)
+        {
+            auto end = name.size();
+            while (end && (std::isdigit(static_cast<unsigned char>(name[end - 1])) || name[end - 1] == '_'))
+                --end;
+            return name.substr(0, end);
+        }
+        std::atomic_bool nitro_memory_scan_running{false};
+        // every distinct name holding "Nitro" or "nitro" in the game's data memory (not the .exe or the mod's own
+        // code), with how often it is there. Reads go through ReadProcessMemory a block at a time, so memory freed
+        // meanwhile only ends that block's read.
+        void nitro_memory_scan(const std::string &level)
+        {
+            if (nitro_memory_scan_running.exchange(true))
+                return;
+            std::thread([level]
+                        {
+                const auto start = GetTickCount64();
+                std::map<std::string, unsigned> found;
+                std::uint64_t scanned = 0;
+                std::vector<char> block(4 << 20);
+                const std::string needle = "itro";
+                for (Address at = 0x10000; at < 0x7ffffffe0000ULL;)
+                {
+                    MEMORY_BASIC_INFORMATION info{};
+                    if (!VirtualQuery(reinterpret_cast<void *>(at), &info, sizeof(info)))
+                        break;
+                    const auto region = reinterpret_cast<Address>(info.BaseAddress), end = region + info.RegionSize;
+                    if (info.State == MEM_COMMIT && info.Type != MEM_IMAGE && !(info.Protect & (PAGE_GUARD | PAGE_NOACCESS | PAGE_NOCACHE | PAGE_WRITECOMBINE)) &&
+                        (info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
+                        for (Address chunk = region; chunk < end; chunk += block.size() - 256)
+                        {
+                            const auto want = static_cast<std::size_t>(std::min<Address>(block.size(), end - chunk));
+                            SIZE_T got = 0;
+                            if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(chunk), block.data(), want, &got) || !got)
+                                break;
+                            scanned += got;
+                            const std::string_view view(block.data(), got);
+                            for (auto hit = view.find(needle); hit != view.npos; hit = view.find(needle, hit + 4))
+                            {
+                                if (!hit || (view[hit - 1] != 'N' && view[hit - 1] != 'n'))
+                                    continue;
+                                auto from = hit - 1, to = hit + 4;
+                                const auto plain = [](char c) { return c > 32 && c < 127; };
+                                while (from > 0 && hit - from < 120 && plain(view[from - 1]))
+                                    --from;
+                                while (to < view.size() && to - hit < 120 && plain(view[to]))
+                                    ++to;
+                                if (found.size() < 4000 || found.count(std::string(view.substr(from, to - from))))
+                                    ++found[std::string(view.substr(from, to - from))];
+                            }
+                            if (want < block.size())
+                                break;
+                        }
+                    at = end > at ? end : at + 0x1000;
+                }
+                std::ostringstream out;
+                out << "Nitro memory: " << found.size() << " different names with \"Nitro\" in " << scanned / (1024 * 1024) << " MB of game memory ("
+                    << (level.empty() ? "no level" : "level " + level) << ", " << (GetTickCount64() - start) << " ms)\n";
+                unsigned shown = 0;
+                for (const auto &[text, count] : found)
+                    if (shown++ < 150)
+                        out << "Nitro memory:   " << text << (count > 1 ? " x" + std::to_string(count) : std::string()) << "\n";
+                if (found.size() > 150)
+                    out << "Nitro memory:   ... and " << found.size() - 150 << " more\n";
+                std::cout << out.str() << std::flush;
+                nitro_memory_scan_running = false; })
+                .detach();
+        }
+        void nitro_template_probe()
+        {
+            const auto key = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
+            // the kinds of things in the level (names without their numbers), and which kinds have a spawner
+            std::map<std::string, unsigned> kinds;
+            std::map<std::string, std::pair<unsigned, Address>> spawners; // kind -> how many, one spawner component
+            std::map<std::string, Address> owners;                        // kind -> one owner with a spawner
+            for (const auto owner : event_owners())
+            {
+                const auto kind = kind_of(string(value<Address>(owner + 128)));
+                ++kinds[kind];
+                for (const auto c : list(value<Address>(owner + 24), 64))
+                    if (typed(c, 0x13bbbd0) && value<Address>(c + 24) == owner && typed(value<Address>(c + 56), 0x1745d78) &&
+                        string(value<Address>(value<Address>(c + 56) + 16)) == "Scripts.Graph.common_Spawner_Template")
+                    {
+                        auto &s = spawners[kind];
+                        if (!s.first++)
+                            s.second = c, owners[kind] = owner;
+                    }
+            }
+            std::vector<std::pair<unsigned, std::string>> sorted;
+            for (const auto &[kind, count] : kinds)
+                sorted.push_back({count, kind});
+            std::sort(sorted.rbegin(), sorted.rend());
+            std::ostringstream census;
+            census << "Nitro research: level " << (key.empty() ? "(none)" : key) << ", " << sorted.size() << " kinds of things:";
+            for (std::size_t i = 0; i < sorted.size() && i < 80; ++i)
+                census << (i % 8 ? ", " : "\nNitro research:   ") << sorted[i].second << " x" << sorted[i].first
+                       << (spawners.count(sorted[i].second) ? " (spawner)" : "");
+            std::cout << census.str() << "\n";
+            // up to 8 kinds of spawner in full: Nitro first, then TNT, then the most common
+            std::vector<std::string> pick;
+            for (const auto &[kind, s] : spawners)
+                if (kind.find("Nitro") != std::string::npos)
+                    pick.push_back(kind);
+            for (const auto &[kind, s] : spawners)
+                if (kind.find("TNT") != std::string::npos && pick.size() < 8)
+                    pick.push_back(kind);
+            for (const auto &[count, kind] : sorted)
+                if (spawners.count(kind) && pick.size() < 8 && std::find(pick.begin(), pick.end(), kind) == pick.end())
+                    pick.push_back(kind);
+            std::cout << "Nitro research: " << spawners.size() << " kinds have a spawner; in full: ";
+            for (std::size_t i = 0; i < pick.size(); ++i)
+                std::cout << (i ? ", " : "") << pick[i];
+            std::cout << "\n";
+            for (const auto &kind : pick)
+            {
+                const auto c = spawners[kind].second, owner = owners[kind];
+                const auto who = "Spawner " + kind;
+                dump_fields(c, value<Address>(c + 56), who);
+                if (const auto data = value<Address>(c + 16); data)
+                    dump_fields(data, value<Address>(data + 32), who + " data");
+                dump_pointees(owner, who + " owner");
+                if (const auto made = resolve(value<Address>(c + 232)))
+                {
+                    std::string scripts;
+                    for (const auto m : list(value<Address>(made + 24), 64))
+                        if (typed(m, 0x13bbbd0) && typed(value<Address>(m + 56), 0x1745d78))
+                            scripts += (scripts.empty() ? "" : ", ") + string(value<Address>(value<Address>(m + 56) + 16), 120);
+                    std::cout << who << " made: " << string(value<Address>(made + 128)) << ", scripts: " << (scripts.empty() ? "(none)" : scripts) << "\n";
+                    dump_pointees(made, who + " made");
+                }
+                else
+                    std::cout << who << " made: nothing out right now\n";
+            }
+            std::cout << "Nitro research: done here; the memory search runs in the background (a few seconds)\n" << std::flush;
+            nitro_memory_scan(key);
         }
         // follow pointers from the crate's spawner, entity, models and every script on them (each script read in
         // full) up to four levels deep, and list every place holding one of the targets
@@ -2497,6 +2742,13 @@ namespace ingame
         // ground he came back over) comes first; otherwise it goes straight ahead along the line he is running, at
         // his ground height and following the slope he is on, and only while he is on the ground. Never on a crate.
         static constexpr float nitro_ahead = 230, nitro_near = 190, nitro_far = 290;
+        // where the player is for the Nitro Trap: Crash or Coco, or the hog, polar bear, jet board or jet ski they ride
+        // (crash_position only finds them on foot)
+        bool trap_actor_position(std::array<float, 3> &at)
+        {
+            const auto actor = controlled_actor();
+            return actor && read(actor + 32, at);
+        }
         struct PathSample
         {
             std::array<float, 3> at;
@@ -2513,7 +2765,7 @@ namespace ingame
             if (!crash_path.empty() && now - crash_path.back().time < 100)
                 return;
             std::array<float, 3> at{};
-            if (!crash_position(at))
+            if (!trap_actor_position(at))
                 return;
             // a respawn or teleport starts a new path (the floor seen so far stays known)
             if (!crash_path.empty() && std::hypot(at[0] - crash_path.back().at[0], at[1] - crash_path.back().at[1]) > 1500)
@@ -2697,10 +2949,10 @@ namespace ingame
         {
             if (nitro_spawn_state.component)
                 return why = "one is still spawning", false;
-            if (gimmick_stage())
+            if (nitro_trap_exempt())
                 return why = "gimmick level", false;
             std::array<float, 3> crash{}, spot{};
-            if (!crash_position(crash))
+            if (!trap_actor_position(crash))
                 return why = "Crash not found", false;
             if (forced)
                 spot = *forced;
@@ -2928,7 +3180,7 @@ namespace ingame
         std::array<float, 3> drop_spot()
         {
             std::array<float, 3> at{};
-            crash_position(at);
+            trap_actor_position(at);
             const auto now = GetTickCount64();
             at[0] += 0.5f, at[1] += 0.5f;
             for (const auto &p : crash_path)
@@ -2996,7 +3248,7 @@ namespace ingame
                 state.nitro_drop_ack = state.nitro_drop_request;
                 if (d.stage != NitroDropTrap::Idle)
                     std::cout << "Nitro drop: one is already falling\n" << std::flush;
-                else if (level.empty() || gimmick_stage())
+                else if (level.empty() || nitro_trap_exempt())
                     std::cout << "Nitro drop: not in a level with Nitros\n" << std::flush;
                 else
                 {
@@ -3565,8 +3817,8 @@ namespace ingame
             {
                 next_ready = now + 500;
                 std::array<float, 3> crash{}, spot{};
-                const bool can = !level.empty() && !gimmick_stage() && state.player_ready && !nitro_spawn_state.component &&
-                                 nitro_drop.stage == NitroDropTrap::Idle && crash_position(crash);
+                const bool can = !level.empty() && !nitro_trap_exempt() && state.player_ready && !nitro_spawn_state.component &&
+                                 nitro_drop.stage == NitroDropTrap::Idle && trap_actor_position(crash);
                 state.nitro_ready = can && ahead_spot(spot) && nitro_spawner_near(spot).component;
                 state.nitro_drop_ready = can && nitro_spawner_near(crash).component;
             }
@@ -6768,6 +7020,11 @@ namespace ingame
     bool gimmick_stage()
     {
         return trap_gimmick_level(level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
+    }
+    bool nitro_trap_exempt()
+    {
+        const auto key = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
+        return trap_gimmick_level(key) && !nitro_gimmick_ok(key);
     }
     bool slow_trap_exempt()
     {

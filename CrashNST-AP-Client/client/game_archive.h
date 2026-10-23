@@ -37,6 +37,9 @@ namespace ingame
     std::vector<GameSound> find_game_sounds(const std::string &text, bool everywhere, SoundScan &scan, unsigned limit = 200);
     // the sound as a WAV file in memory, when its codec is one the client can play (PCM); empty with a reason otherwise
     std::vector<unsigned char> game_sound_wav(const GameSound &sound, std::string &why);
+    // console lines: every archive file, and each member whose name contains `text` (any case) with how many archives
+    // hold it and which (Nitro research: is the Nitro crate in an archive every level loads, or only in some levels')
+    std::vector<std::string> archive_member_report(const std::string &text);
     // copies the first archive member whose name contains `text` to `folder`; the file's path, or empty
     std::filesystem::path dump_archive_member(const std::string &text, const std::filesystem::path &folder);
     // console lines describing the archives: how many, and where their sound files are and what they're called

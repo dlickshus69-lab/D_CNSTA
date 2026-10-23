@@ -444,10 +444,13 @@ void ClientRuntime::handle_commands()
             }
             else if (command == "/nitro_probe")
             {
+                // V1.2.46 Nitro research: the game's archives are searched for Nitro files in the background too
+                start_sound_job([] { return ingame::archive_member_report("nitro"); });
                 if (box_markers)
                 {
                     box_markers->request_nitro_probe();
-                    print_console("Nitro probe requested (read-only, changes nothing). Run it inside a level that has Nitro crates.");
+                    print_console("Nitro probe requested (read-only, changes nothing). Run it in a level with Nitros and in one without; "
+                                  "it takes a few seconds, then send the log.");
                 }
                 else
                     print_console("Nitro probe needs the in-game adapter. Load into a level first.");

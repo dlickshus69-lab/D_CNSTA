@@ -395,8 +395,9 @@ class NitroTrapWeight(Range):
     in step with a TNT crate's own countdown and sound. Then a coin flip: a real Nitro crate appears about
     1.5 crates ahead of Crash in the direction he is running, or a Nitro falls onto the spot where he
     stands (in 0.31 seconds). It only happens in levels that have Nitro crates (it borrows one of their
-    spawners) and never in gimmick or Crash 2 jet-board levels; until then it waits without holding up
-    other traps."""
+    spawners). It also strikes on the hog, the Crash 2 jet board and polar bear, and Coco's jet ski, but
+    never in the jetpack, motorcycle, plane, scuba, Coco's tiger or Baby T levels; until then it waits
+    without holding up other traps."""
 
     display_name = "Nitro Trap Weight"
     range_start = 0
