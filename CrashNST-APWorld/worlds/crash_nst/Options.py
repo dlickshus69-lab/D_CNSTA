@@ -394,7 +394,7 @@ class NitroTrapWeight(Range):
     """How often Nitro Traps appear compared to other traps. Each one starts with "NITRO INCOMING! 3, 2, 1",
     in step with a TNT crate's own countdown and sound. Then a coin flip: a real Nitro crate appears about
     1.3 crates ahead of Crash in the direction he is running (floating in midair if he is jumping), or a
-    Nitro falls onto the spot where he stands (in 0.31 seconds). It happens in every normal level, and it
+    Nitro falls onto the spot where he stands (in 0.31 seconds) and blows up there. It happens in every normal level, and it
     never counts as a box. It also strikes on the hog, the Crash 2 jet board and polar bear and in the
     chases, and in the scuba levels (only ahead of Crash there, floating in the water), but never in the
     jetpack, motorcycle, plane, Coco's jet ski, Coco's tiger or Baby T levels; until then it waits without

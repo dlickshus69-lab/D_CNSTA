@@ -3032,11 +3032,11 @@ namespace ingame
             for (unsigned i = 0; i < 6; ++i)
                 if (l.varied[i] && l.score[i] >= 15 && (best < 0 || l.score[i] > l.score[best]))
                     best = static_cast<int>(i);
-            if (best != l.axis)
+            // once learned it stays (V1.2.75's log learned it twice: a turn had dropped it in between)
+            if (best >= 0 && best != l.axis)
             {
                 l.axis = best;
-                if (best >= 0)
-                    std::cout << "Nitro Trap: learned which way Crash faces (axis " << best << ")\n" << std::flush;
+                std::cout << "Nitro Trap: learned which way Crash faces (axis " << best << ")\n" << std::flush;
             }
         }
         bool crash_facing(float &hx, float &hy)
@@ -3586,7 +3586,6 @@ namespace ingame
             bool ahead = false; // the coin flip: a Nitro appears ahead of Crash instead of falling onto him
             bool any = false;   // /nitro_drop any: an ordinary crate's spawner makes it (research)
             bool waited = false; // a scuba level's Nitro is waiting for a spot ahead (said once)
-            bool boom = false;   // /nitro_drop boom (test): set off where it lands
             std::uint64_t start = 0, spawned = 0, fall_start = 0;
             int ticks = 0, settle_frames = 0;
             float drop = 0; // how far it falls
@@ -3970,7 +3969,6 @@ namespace ingame
                     if (nitro_ahead_only_level(level) && !d.ahead)
                         d.ahead = true, std::cout << "Nitro Trap: in a scuba level it only appears ahead of Crash\n" << std::flush;
                     d.any = state.nitro_drop_kind == 3;
-                    d.boom = state.nitro_drop_kind == 4;
                     // a fresh look at the level during the countdown (and, in a level without Nitro crates, a search
                     // for the Nitro's template in memory after it)
                     nitro_level_scan(level);
@@ -4105,9 +4103,10 @@ namespace ingame
             std::cout << "Nitro drop: landed (the game has it at " << whole(e[0]) << ", " << whole(e[1]) << ", " << whole(e[2])
                       << (has_body ? ", its body at " + whole(body[0]) + ", " + whole(body[1]) + ", " + whole(body[2]) : std::string(", its body not found"))
                       << ")\n" << std::flush;
-            // /nitro_drop boom (test): it blows up where it lands, also when Crash got out of the way (it already went off
-            // if it hit him). Only on that test since V1.2.74: V1.2.72's set-off crashed the game the moment it landed
-            if (d.boom && !trap_nitro_went_off(d.entity))
+            // it blows up where it lands, also when Crash got out of the way (it already went off if it hit him). V1.2.72's
+            // set-off crashed the game the moment it landed; V1.2.75's (our own nodes, /nitro_drop boom) worked every
+            // time, so the trap does it since V1.3
+            if (!trap_nitro_went_off(d.entity))
             {
                 std::string how;
                 if (set_off_trap_nitro(d.entity, how))
