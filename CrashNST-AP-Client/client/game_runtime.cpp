@@ -1102,6 +1102,9 @@ namespace ingame
         std::array<std::atomic<Address>, 4> trap_event_entity{};
         std::array<std::atomic<std::uint64_t>, 4> trap_event_since{};
         std::atomic_uint trap_event_lines{0}, trap_event_next{0};
+        // which events each watched trap Nitro has had logged (each kind once: spinning near one sends it one per spin)
+        std::mutex trap_event_mutex;
+        std::array<std::set<std::string>, 4> trap_event_seen;
         std::mutex event_mutex;
         std::set<std::string> events_seen;
         // Aku Aku lock: the game's NoAkuAkuMasks switch stops masks from protecting Crash and crates from giving them,
@@ -1296,9 +1299,14 @@ namespace ingame
                         // common_Crate_Nitro_Spawned, and that a trap Nitro's hops carry it "home" to the spawner it was
                         // borrowed from (9000 away, a few thousand units per hop). A trap Nitro doesn't hop.
                         blocked = name == "common_Crate_c.New_Graph_Event_1_id_uphse9ht" || name == "common_Crate_Nitro_Spawned.New_Graph_Event_1_id_h1ogxqqw";
+                        auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
+                        {
+                            std::lock_guard lock(trap_event_mutex);
+                            if (!trap_event_seen[i].insert(graph + "|" + name).second)
+                                break;
+                        }
                         if (trap_event_lines.fetch_add(1) >= 160)
                             break;
-                        auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
                         if (graph.rfind("Scripts.Graph.", 0) == 0)
                             graph.erase(0, 14);
                         std::array<float, 3> at{};
@@ -2387,15 +2395,17 @@ namespace ingame
         struct NitroTemplateFind
         {
             std::string level;
-            Address handle = 0, entity = 0, data = 0;
+            Address entity = 0, data = 0;
+            std::uint64_t when = 0;
             bool done = false;
         };
         std::mutex nitro_find_mutex;
         NitroTemplateFind nitro_find;
-        bool nitro_template_valid(Address handle, Address entity)
+        // the Nitro's template: an entity (+0x141d490) described as "...Crash_Crate_Nitro", not a crate live in the level
+        bool nitro_template_valid(Address entity)
         {
             const auto data = value<Address>(entity + 0x40);
-            return handle && entity && resolve(handle) == entity && typed(entity, 0x141d490) && typed(data, 0x141d3f0) &&
+            return entity && typed(entity, 0x141d490) && typed(data, 0x141d3f0) && !event_owner(entity) &&
                    string(value<Address>(data + 0x48)).find("Crash_Crate_Nitro") != std::string::npos;
         }
         std::string find_nitro_template(const std::string &level)
@@ -2420,18 +2430,12 @@ namespace ingame
                 }
             }
             NitroTemplateFind pick;
-            pick.level = level, pick.done = true;
-            for (const auto &[where, e] : memory_pointers(users))
-            {
-                const auto h = where - 40;
-                if (resolve(h) != e)
-                    continue;
-                out << "Nitro find:   handle 0x" << std::hex << h << " -> 0x" << e << std::dec << "\n";
-                // a template: not a live crate in the level (spawned Nitros are named ..._Spawned_Entity and live)
-                if (!pick.handle && nitro_template_valid(h, e) && !event_owner(e))
-                    pick.handle = h, pick.entity = e, pick.data = value<Address>(e + 0x40);
-            }
-            out << "Nitro find: " << (pick.handle ? "a Nitro template is loaded here; /nitro_drop any can try it" : "no Nitro template loaded here") << "\n";
+            pick.level = level, pick.done = true, pick.when = GetTickCount64();
+            // the template (spawned Nitros are named ..._Spawned_Entity and live in the level)
+            for (const auto e : users)
+                if (!pick.entity && nitro_template_valid(e))
+                    pick.entity = e, pick.data = value<Address>(e + 0x40);
+            out << "Nitro find: " << (pick.entity ? "the Nitro's template is loaded here" : "no Nitro template loaded here") << "\n";
             std::lock_guard lock(nitro_find_mutex);
             nitro_find = pick;
             return out.str();
@@ -3094,13 +3098,19 @@ namespace ingame
                     const auto data = value<Address>(c + 16);
                     if (field_offset(value<Address>(data + 32), "EntityToSpawn", 8) != 0x48)
                         continue;
-                    const auto h = value<Address>(data + 0x48);
-                    if (nitro_template_valid(h, resolve(h)))
-                        return h;
+                    if (const auto e = resolve(value<Address>(data + 0x48)); nitro_template_valid(e))
+                        return e;
                 }
             }
             std::lock_guard lock(nitro_find_mutex);
-            return nitro_find.level == level && nitro_template_valid(nitro_find.handle, nitro_find.entity) ? nitro_find.handle : 0;
+            if (nitro_find.level != level)
+                return 0;
+            if (nitro_template_valid(nitro_find.entity))
+                return nitro_find.entity;
+            // gone since (or never found): look again, at most every 10 seconds
+            if (nitro_find.done && GetTickCount64() - nitro_find.when > 10000)
+                nitro_find.done = false;
+            return 0;
         }
         bool nitro_template_searched(const std::string &level)
         {
@@ -3169,16 +3179,17 @@ namespace ingame
             std::vector<std::pair<Address, Address>> words;
             if (any)
             {
-                // the borrowed spawner makes the Nitro: its override, its own copy and its data's EntityToSpawn all point
-                // at the Nitro's template until it is made
-                const auto meta = value<Address>(spawner.component + 56), data = value<Address>(spawner.component + 16);
-                if (field_offset(meta, "OverrideEntityToSpawn", 8) != 0x78 || field_offset(meta, "spawnEntity", 8) != 0x50 ||
-                    field_offset(value<Address>(data + 32), "EntityToSpawn", 8) != 0x48)
+                // the borrowed spawner makes the Nitro: its own handle to what it makes (its data's EntityToSpawn, a real
+                // handle with the game's own layout) points at the Nitro's template for the spawn call, and back right
+                // after (V1.2.59; V1.2.58 used a handle found in memory, and one was on a thread's stack and went stale)
+                const auto data = value<Address>(spawner.component + 16);
+                if (field_offset(value<Address>(data + 32), "EntityToSpawn", 8) != 0x48)
                     return why = "the borrowed spawner's settings differ", false;
-                for (const auto at : {spawner.component + 0x78, spawner.component + 0x50, data + 0x48})
-                    words.push_back({at, value<Address>(at)});
-                for (const auto &w : words)
-                    write(w.first, nitro_template);
+                const auto handle = value<Address>(data + 0x48), own = resolve(handle);
+                if (!handle || !typed(own, 0x141d490))
+                    return why = "the borrowed spawner's template differs", false;
+                words.push_back({handle + 40, own});
+                write(handle + 40, nitro_template);
             }
             auto &s = nitro_spawn_state;
             s = {spawner.component, spawner.owner, value<Address>(spawner.component + 232), {}, std::move(words), GetTickCount64(), level, spawner.name};
@@ -3192,6 +3203,10 @@ namespace ingame
             }
             write(spawner.component + 232, Address{0}); // its own crate is set aside, not destroyed
             reinterpret_cast<void (*)(Address, Address, unsigned, Address)>(base() + 0xc988c0)(spawner.method, spawner.component, 0, 0);
+            // the borrowed handle goes back at once: other spawners of that kind use it too
+            for (const auto &w : s.words)
+                write(w.first, w.second);
+            s.words.clear();
             std::cout << "Nitro spawn: " << spawner.name << "'s spawner (" << static_cast<int>(spawner.distance)
                       << " from the spot" << (any ? ", making a Nitro from its template" : "") << ") spawns at " << triple(spot) << ", " << static_cast<int>(std::hypot(spot[0] - crash[0], spot[1] - crash[1]))
                       << " from Crash\n" << std::flush;
@@ -3427,6 +3442,10 @@ namespace ingame
             TrapNitroWatch w;
             w.entity = entity, w.components = value<Address>(entity + 24), w.level = level, w.spot = at, w.since = GetTickCount64();
             const auto slot = trap_event_next.fetch_add(1) % trap_event_entity.size();
+            {
+                std::lock_guard lock(trap_event_mutex);
+                trap_event_seen[slot].clear();
+            }
             trap_event_since[slot] = w.since, trap_event_entity[slot] = entity;
             if (home)
                 w.home = *home, w.has_home = true;
