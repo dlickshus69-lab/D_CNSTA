@@ -286,8 +286,14 @@ namespace crash_colors
                 // the chest's and jaw's light, pinkish colors, also on the fur's edge
                 if (chest_map[k] && (!fur_map[k] || c.v > 0.7 || (c.h >= 0.07 && c.h <= 0.16) || c.h >= 0.9))
                     return chest_t ? &*chest_t : nullptr;
-                // next to them: the lips (dark, pinkish) and the jaw's rim, but not the fur
+                // next to them: the jaw's pinkish rim, but not the fur
                 if (near_chest[k] && c.v > 0.5 && (c.s < 0.6 || c.h >= 0.9 || c.h < 0.015))
+                    return chest_t ? &*chest_t : nullptr;
+                // the lips: the dark red band along the mouth and its pink corners (in the game's texture, blocks 130 to 178
+                // down and 90 to 196 across of 256). They take a dark shade of the chest color; still red they showed
+                // as an orange spot at the corner of his grin (V1.2.48 screenshot). The fur there is more orange.
+                const std::size_t row = k / per_row * 256 / per_row, col = k % per_row * 256 / per_row;
+                if (row >= 130 && row < 178 && col >= 90 && col < 196 && (c.h >= 0.95 || c.h < 0.015) && c.s >= 0.3 && c.v < 0.76)
                     return chest_t ? &*chest_t : nullptr;
                 if (fur_map[k] && c.h >= 0.015 && c.h <= 0.14 && c.s >= 0.35)
                     return fur_t ? &*fur_t : nullptr;
