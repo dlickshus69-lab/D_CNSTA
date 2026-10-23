@@ -1323,6 +1323,11 @@ namespace ingame
                         // common_Crate_Nitro_Spawned, and that a trap Nitro's hops carry it "home" to the spawner it was
                         // borrowed from (9000 away, a few thousand units per hop). A trap Nitro doesn't hop.
                         blocked = name == "common_Crate_c.New_Graph_Event_1_id_uphse9ht" || name == "common_Crate_Nitro_Spawned.New_Graph_Event_1_id_h1ogxqqw";
+                        // its spawner isn't told it's gone (V1.2.63): the spawner was borrowed from a crate in the level,
+                        // and that crate's box count took the trap Nitro's explosion for its own crate breaking (V1.2.62:
+                        // the counter went from 0/18 to 1/18). The trap Nitro still explodes and disappears as usual.
+                        const bool spawner_note = name == "common_Spawner_Template_c.GraphEvent_id_van6ltro_Definition";
+                        blocked = blocked || spawner_note;
                         auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
                         {
                             std::lock_guard lock(trap_event_mutex);
@@ -1338,7 +1343,7 @@ namespace ingame
                         std::cout << "Trap Nitro +" << GetTickCount64() - trap_event_since[i].load() << " ms (at " << static_cast<int>(at[0]) << ", "
                                   << static_cast<int>(at[1]) << ", " << static_cast<int>(at[2]) << "): " << graph << " gets " << name
                                   << (typed(event, 0x13bc390) ? send_target(event) + send_arguments(event) : std::string())
-                                  << (blocked ? " (its hop: stopped)" : "") << "\n" << std::flush;
+                                  << (spawner_note ? " (kept from its spawner: no box counted)" : blocked ? " (its hop: stopped)" : "") << "\n" << std::flush;
                         break;
                     }
                 if (blocked)

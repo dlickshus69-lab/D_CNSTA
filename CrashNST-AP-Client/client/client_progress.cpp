@@ -1,3 +1,4 @@
+#include <set>
 #include "client_runtime.h"
 #include <algorithm>
 #include <cctype>
@@ -345,6 +346,10 @@ void ClientRuntime::drain_crates(ClientTick &tick)
                     }
                     continue;
                 }
+                // every crate the box count counts, once each (V1.2.63: shows a trap Nitro never counts as one)
+                static std::set<std::string> told;
+                if (told.size() < 400 && told.insert(level + "|" + spec->name).second)
+                    std::cout << "Box observer: " << spec->name << " in " << level << " counted\n" << std::flush;
                 const auto check = tick.checks.find({level, spec->event_name()});
                 if (check == tick.checks.end() || check->second != spec->id)
                     continue;
