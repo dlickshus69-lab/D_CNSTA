@@ -163,6 +163,9 @@ FILLER = ("1-Up", "Wumpa Fruit")
 ITEMS.update({name: BASE + 2201 + index for index, name in enumerate(FILLER)})
 TOKEN = "AP Token"
 ITEMS[TOKEN] = BASE + 2203
+# filler: an Aku Aku mask for Crash right away (experimental; the client hands it over like an Aku Aku crate's pickup)
+AKU_MASK = "Aku Aku Mask"
+ITEMS[AKU_MASK] = BASE + 2204
 HUB_ITEMS = {
     (1, 2): "Crash 1 - Progressive Island Access",
     (2, 2): "Crash 2 - Progressive Elevator Access",

@@ -197,6 +197,8 @@ void Session::open(const std::filesystem::path &directory, const std::string &se
             // sessions from before traps have no trap cursor
             if (data_.isMember("trap_cursor") && (!data_["trap_cursor"].isUInt() || trap_cursor() > max_items))
                 throw std::runtime_error("Invalid saved trap cursor");
+            if (data_.isMember("aku_cursor") && (!data_["aku_cursor"].isUInt() || aku_cursor() > max_items))
+                throw std::runtime_error("Invalid saved Aku Aku Mask cursor");
             if (data_.isMember("nitro_pending") && (!data_["nitro_pending"].isUInt() || nitro_pending() > max_items))
                 throw std::runtime_error("Invalid saved Nitro Trap count");
             if (data_.isMember("move_lock_pending") && (!data_["move_lock_pending"].isUInt() || move_lock_pending() > max_items))
@@ -525,6 +527,29 @@ bool Session::reserve_trap(unsigned index)
     catch (...)
     {
         data_["trap_cursor"] = old;
+        dirty_ = true;
+        throw;
+    }
+    return true;
+}
+bool Session::reserve_aku(unsigned index)
+{
+    if (!ready() || index >= data_["items"].size())
+        throw std::runtime_error("Invalid Aku Aku Mask receipt index");
+    if (index < aku_cursor())
+        return false;
+    if (data_["items"][index]["item"].asInt64() != 0xCB0000 + 2204)
+        throw std::runtime_error("Receipt is not an Aku Aku Mask");
+    const Json::Value old = data_.isMember("aku_cursor") ? data_["aku_cursor"] : Json::Value(0u);
+    data_["aku_cursor"] = index + 1;
+    dirty_ = true;
+    try
+    {
+        flush();
+    }
+    catch (...)
+    {
+        data_["aku_cursor"] = old;
         dirty_ = true;
         throw;
     }

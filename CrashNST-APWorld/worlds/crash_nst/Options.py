@@ -309,6 +309,17 @@ class OneUpWeight(Range):
     default = 50
 
 
+class AkuAkuMaskWeight(Range):
+    """Experimental. How often a filler item is an Aku Aku Mask compared to the other fillers. When it arrives,
+    Crash gets a mask as if he had picked one up from an Aku Aku crate (in the next level, once he can move). It
+    works with Aku Aku Sanity too, before you have found the Aku Aku item. 0 (the default) leaves it out."""
+
+    display_name = "Aku Aku Mask Filler Weight"
+    range_start = 0
+    range_end = 100
+    default = 0
+
+
 class TrapFillPercentage(Range):
     """Replace a percentage of junk items in the item pool with random traps.
 
@@ -608,6 +619,7 @@ crash_option_groups = [
     OptionGroup("Filler / Traps", [
         WumpaFruitWeight,
         OneUpWeight,
+        AkuAkuMaskWeight,
         TrapFillPercentage,
         LifeLossTrapWeight,
         MoveLockTrapWeight,
@@ -659,6 +671,7 @@ class CrashOptions(PerGameCommonOptions):
     aku_aku_sanity: AkuAkuSanity
     wumpa_fruit_weight: WumpaFruitWeight
     one_up_weight: OneUpWeight
+    aku_aku_mask_weight: AkuAkuMaskWeight
     trap_fill_percentage: TrapFillPercentage
     life_loss_trap_weight: LifeLossTrapWeight
     move_lock_trap_weight: MoveLockTrapWeight

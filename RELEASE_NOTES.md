@@ -1,9 +1,10 @@
 ## What's new
 
-- **The death counter is always on screen** (with DeathLink on), in the hubs and in levels: the total, then every player in the room, starting at 0.
+- **Aku Aku Mask filler (experimental).** New YAML option `aku_aku_mask_weight` (0–100, default 0). Each Aku Aku Mask gives Crash a mask in the next level once he can move, even with Aku Aku Sanity before you've found Aku Aku. Try `/aku_give` in a level first: it uses the same hand-over and logs whether a mask came out.
 
 ## Recent builds
 
+- **V1.2.29:** the death counter is always on screen (total and every player, hubs and levels).
 - **V1.2.28:** fixed the game not opening on V1.2.25 to V1.2.27 (the death counter read a file that didn't exist yet).
 - **V1.2.27:** a level's clear is sent when you pick up its box gem or relic, if the save missed it.
 - **V1.2.26:** the Crash 3 secret pad is asked for once per hub visit again (V1.2.24's retry left the next ride on a black screen).

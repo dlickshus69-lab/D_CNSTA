@@ -537,6 +537,31 @@ void ClientRuntime::update_ownership(ClientTick &tick)
             std::cerr << "Filler delivery: " << e.what() << std::endl;
         }
     }
+    // Aku Aku Mask filler: one mask each, in a level once Crash can move, a couple of seconds apart. It goes through with
+    // Aku Aku Sanity too
+    if (tick.room_ready && box_markers && std::chrono::steady_clock::now() >= next_aku_mask)
+        try
+        {
+            for (unsigned index = session.aku_cursor(); index < tick.items.size(); ++index)
+            {
+                if (tick.items[index].first != 0xCB0000 + 2204)
+                    continue;
+                const auto scene = read_scene(GetCurrentProcess());
+                if (!scene.camera_active || level_key(scene.zone).empty() || !box_markers->player_ready())
+                    break;
+                if (session.reserve_aku(index))
+                {
+                    box_markers->request_aku_give();
+                    print_console("Aku Aku Mask!", true);
+                    next_aku_mask = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                }
+                break;
+            }
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Aku Aku Mask delivery: " << e.what() << std::endl;
+        }
     // running traps pause outside levels: hubs, maps, menus and loading screens
     if (box_markers)
         try

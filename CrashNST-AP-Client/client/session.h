@@ -43,6 +43,9 @@ public:
     bool reserve_filler(unsigned index); // persist before game-thread reward dispatch
     // traps are applied once each; the cursor stays local (cloud progress keeps its two fields)
     unsigned trap_cursor() const { return ready() && data_["trap_cursor"].isUInt() ? data_["trap_cursor"].asUInt() : 0; }
+    // Aku Aku Mask fillers handed over so far (receipts before this index are done)
+    unsigned aku_cursor() const { return ready() && data_["aku_cursor"].isUInt() ? data_["aku_cursor"].asUInt() : 0; }
+    bool reserve_aku(unsigned index);
     bool reserve_trap(unsigned index);
     // Nitro Traps wait for a level with Nitro crates without holding up other traps
     unsigned nitro_pending() const { return ready() && data_["nitro_pending"].isUInt() ? data_["nitro_pending"].asUInt() : 0; }

@@ -619,6 +619,13 @@ namespace ingame
         }
         // the Aku Aku lock's message filter (event_sent) is on while the lock is
         std::atomic_bool aku_messages_blocked{false};
+        // set while the client itself hands Aku a mask (/aku_give, the Aku Aku filler): that message goes through
+        std::atomic_bool own_aku_message{false};
+        // after /aku_give: when to look at Aku Aku's manager again, to log whether a mask came out
+        std::atomic<std::uint64_t> aku_give_check_at{0};
+        // when the client last handed Crash a mask (the filler); 0 when none is out. With Aku Aku Sanity's lock on, the
+        // lock steps aside while that mask is out (masks protect, it isn't cleared); crates stay blocked
+        std::atomic<std::uint64_t> filler_mask_since{0};
         // while the Aku Aku lock is on, logs when Crash's Aku Aku manager shows a mask
         void watch_aku_manager(bool locked)
         {
@@ -653,6 +660,22 @@ namespace ingame
             }
             last_state = state, last_mask = mask;
         }
+        std::pair<int, bool> aku_manager_state(Address actor);
+        // a filler mask is out: from the hand-over until Aku's manager shows no mask (after a 2 s grace for it to appear)
+        bool filler_mask_out()
+        {
+            const auto since = filler_mask_since.load();
+            if (!since)
+                return false;
+            if (GetTickCount64() - since < 2000)
+                return true;
+            // (the manager's state isn't 0 with no mask: logs show 32835 with none out, so only the mask counts)
+            if (aku_manager_state(player()).second)
+                return true;
+            filler_mask_since = 0;
+            std::cout << "Aku Aku Mask: the filler mask is gone; Aku Aku Sanity's lock is back\n" << std::flush;
+            return false;
+        }
         void update_aku_lock(bool locked)
         {
             static Address forced = 0;
@@ -661,7 +684,9 @@ namespace ingame
             // has turned the switch on, a respawn can turn it on again after the lock is lifted: it is turned off then too
             static bool ever = false;
             aku_messages_blocked = locked;
-            watch_aku_manager(locked);
+            // with a filler mask out, the lock doesn't clear masks or keep them from protecting
+            const bool hold = locked && !filler_mask_out();
+            watch_aku_manager(hold);
             const auto variable = no_aku_variable.load();
             if (!variable)
                 return;
@@ -676,7 +701,7 @@ namespace ingame
             const auto getter = reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60);
             const auto setter = reinterpret_cast<void (*)(Address, unsigned char)>(death_hook.original ? death_hook.original : base() + 0x502000);
             const bool on = getter(variable) != 0;
-            if (locked && !on)
+            if (hold && !on)
             {
                 setter(variable, 1);
                 if (forced != variable)
@@ -684,7 +709,7 @@ namespace ingame
                               << "\n" << std::flush;
                 forced = variable, ever = true;
             }
-            else if (!locked && on && (forced == variable || ever))
+            else if (!hold && on && (forced == variable || ever))
             {
                 setter(variable, 0);
                 std::cout << "Aku Aku lock: Aku Aku masks are back on" << (forced == variable ? "" : " (a respawn had put the switch back)") << "\n"
@@ -1181,7 +1206,7 @@ namespace ingame
                     }
                 if (blocked)
                     return 0;
-                if (aku_messages_blocked.load() && component && target && aku_manager(component, target))
+                if (aku_messages_blocked.load() && !own_aku_message.load() && component && target && aku_manager(component, target))
                 {
                     const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
                     // a respawn tells Aku how many masks Crash comes back with (V1.1.72: blocking it left a mask that
@@ -3029,6 +3054,85 @@ namespace ingame
             }
             std::cout << out.str() << "\n" << std::flush;
         }
+        // Aku Aku's manager: its state (0 when no mask is out) and whether a mask is out
+        std::pair<int, bool> aku_manager_state(Address actor)
+        {
+            for (const auto c : actor ? list(value<Address>(actor + 24), 128) : std::vector<Address>{})
+                if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78) &&
+                    string(value<Address>(value<Address>(c + 56) + 16)) == "Scripts.Graph.Crash_AkuAkuManager")
+                    return {value<int>(c + 0x90), resolve(value<Address>(c + 0x60)) != 0};
+            return {-1, false};
+        }
+        // a message field by name: its offset and size, or {0, 0}
+        std::pair<unsigned, unsigned> message_field(Address message, const std::string &name)
+        {
+            const auto count = value<unsigned>(message + 24);
+            const auto fields = value<Address>(message + 40);
+            for (unsigned i = 0; fields && count <= 64 && i < count; ++i)
+            {
+                const auto field = value<Address>(fields + i * 8);
+                if (string(value<Address>(field + 48), 64) == name)
+                    return {value<std::uint16_t>(field + 24), value<std::uint16_t>(field + 22)};
+            }
+            return {0, 0};
+        }
+        // the Aku Aku filler's way: Crash's Aku Aku manager gets the message an Aku Aku crate's mask sends it when Crash
+        // picks it up (s8h11iit; the logs show it right after an Aku Aku crate breaks, with 232 in its one field), sent
+        // the same way a DeathLink death is. Works in any level, no crate needed. False if the message isn't there as
+        // expected (nothing is sent then)
+        bool aku_give_message_now(Address actor)
+        {
+            if (!event_hook.installed && !code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0}))
+            {
+                std::cout << "Aku give: the game's message sender differs from the verified build\n" << std::flush;
+                return false;
+            }
+            for (const auto component : list(value<Address>(actor + 24), 128))
+            {
+                const auto meta = value<Address>(component + 56);
+                if (!typed(component, 0x13bbbd0) || value<Address>(component + 24) != actor || !(value<unsigned>(component + 32) & 1) ||
+                    !typed(meta, 0x1745d78) || string(value<Address>(meta + 16)) != "Scripts.Graph.Crash_AkuAkuManager")
+                    continue;
+                for (const auto delegator : list(value<Address>(meta + 160), 128))
+                {
+                    const auto message = value<Address>(delegator + 24), target = value<Address>(delegator + 32);
+                    if (!typed(delegator, 0x13bc268) || !typed(message, 0x17b6578) || !typed(target, 0x13bbcb8) ||
+                        string(value<Address>(message + 16), 120) != "Crash_AkuAkuManager_c.New_Graph_Event_1_id_s8h11iit")
+                        continue;
+                    const auto [offset, size] = message_field(message, "Field_id_8h9y0rce");
+                    if (!field_at(message, "_sender", 32, 8) || offset < 40 || offset + size > 88 || (size != 1 && size != 4 && size != 8))
+                    {
+                        std::cout << "Aku give: the pickup message's layout differs (its field at +" << offset << ", " << size << " bytes); nothing sent\n"
+                                  << std::flush;
+                        return false;
+                    }
+                    std::array<Address, 11> sender{base() + 0x13bc390, 0, message, target};
+                    const std::uint64_t value = 232;
+                    std::memcpy(reinterpret_cast<unsigned char *>(sender.data()) + offset, &value, size);
+                    std::array<Address, 6> context{component};
+                    own_aku_message = true;
+                    reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(reinterpret_cast<Address>(sender.data()),
+                                                                                        reinterpret_cast<Address>(context.data()));
+                    own_aku_message = false;
+                    return true;
+                }
+                std::cout << "Aku give: Crash's Aku Aku manager has no pickup message (s8h11iit) here\n" << std::flush;
+                return false;
+            }
+            std::cout << "Aku give: Crash's Aku Aku manager wasn't found\n" << std::flush;
+            return false;
+        }
+        void aku_give_followup()
+        {
+            const auto at = aku_give_check_at.load();
+            if (!at || GetTickCount64() < at)
+                return;
+            aku_give_check_at = 0;
+            const auto [state, mask] = aku_manager_state(player());
+            std::cout << "Aku give: a second later Aku's manager is in state " << state << (mask ? ", with a mask out" : ", no mask out") << "\n"
+                      << std::flush;
+        }
         void aku_give()
         {
             std::array<float, 3> crash{};
@@ -3038,6 +3142,20 @@ namespace ingame
                 std::cout << "Aku give: Crash not found. Try it inside a level.\n" << std::flush;
                 return;
             }
+            {
+                const auto [state, mask] = aku_manager_state(actor);
+                std::cout << "Aku give: before, Aku's manager is in state " << state << (mask ? ", with a mask out" : ", no mask out") << "\n" << std::flush;
+            }
+            filler_mask_since = GetTickCount64();
+            if (aku_give_message_now(actor))
+            {
+                const auto [state, mask] = aku_manager_state(actor);
+                std::cout << "Aku give: sent the pickup message to Aku Aku; right after, his manager is in state " << state
+                          << (mask ? ", with a mask out" : ", no mask out") << "\n" << std::flush;
+                aku_give_check_at = GetTickCount64() + 1000;
+                return;
+            }
+            std::cout << "Aku give: trying an Aku Aku crate's spawner instead\n" << std::flush;
             // research: Crash's Aku Aku manager as it is now (compare with a mask that protects and one that doesn't)
             for (const auto c : list(value<Address>(actor + 24), 128))
                 if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78) &&
@@ -6157,6 +6275,7 @@ namespace ingame
             state.aku_give_ack = state.aku_give_request;
             aku_give();
         }
+        aku_give_followup();
         if (!level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))).empty())
             update_aku_lock(state.aku_lock != 0);
         // Crash's colors (research), in levels and hubs

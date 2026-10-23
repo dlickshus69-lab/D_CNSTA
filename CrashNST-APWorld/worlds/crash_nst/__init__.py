@@ -8,6 +8,7 @@ from BaseClasses import Item, ItemClassification, Location, Region
 from worlds.AutoWorld import WebWorld, World
 from .Options import CrashOptions, crash_option_groups
 from .data import (
+    AKU_MASK,
     GIMMICK_LEVELS,
     GAME,
     PROTOCOL,
@@ -91,7 +92,7 @@ class CrashWorld(World):
     def create_item(self, name):
         classification = (
             ItemClassification.filler
-            if name in (*FILLER, "Nothing")
+            if name in (*FILLER, AKU_MASK, "Nothing")
             else ItemClassification.progression
         )
         if name in VANILLA_ITEMS:
@@ -102,7 +103,11 @@ class CrashWorld(World):
 
     def get_filler_item_name(self):
         # Filler / Traps weights; all 0 means an even mix
-        weights = {"1-Up": self.options.one_up_weight.value, "Wumpa Fruit": self.options.wumpa_fruit_weight.value}
+        weights = {
+            "1-Up": self.options.one_up_weight.value,
+            "Wumpa Fruit": self.options.wumpa_fruit_weight.value,
+            AKU_MASK: self.options.aku_aku_mask_weight.value,
+        }
         if not any(weights.values()):
             return self.random.choice(FILLER)
         return self.random.choices(list(weights), weights=list(weights.values()))[0]
