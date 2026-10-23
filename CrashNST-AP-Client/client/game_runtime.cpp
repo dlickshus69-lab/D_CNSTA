@@ -3244,7 +3244,26 @@ namespace ingame
             // a send node of the game's, run as is (still of this type and for this message), or messages with no values
             Address node = 0, type = 0, message = 0;
             std::vector<std::string> ids;
+            // and then the game's mask count set to 1 (when Crash had no mask before)
+            bool count = false;
         };
+        // AkuAkuCount (Crash_DamageManager's mask count, what decides whether a hit costs a mask or a life) set with the
+        // game's own number setter (+0x502200, where the number variables' "reset" entry +0x4fb420 jumps). False if it
+        // can't be done safely
+        bool aku_give_count(int count)
+        {
+            const bool verified = code_matches(0x4fb420, std::array<unsigned char, 8>{0x8b, 0x51, 0x18, 0xe9, 0xd8, 0x6d, 0x00, 0x00});
+            const auto variable = aku_variable.load();
+            if (!verified || !variable || !typed(variable, 0x155e9f8))
+            {
+                std::cout << "Aku give: AkuAkuCount can't be set here (" << (!verified ? "setter differs" : !variable ? "not found" : "wrong type") << ")\n"
+                          << std::flush;
+                return false;
+            }
+            reinterpret_cast<void (*)(Address, int)>(base() + 0x502200)(variable, count);
+            std::cout << "Aku give: set AkuAkuCount to " << count << " with the game's own setter\n" << std::flush;
+            return true;
+        }
         std::vector<AkuGiveStep> aku_steps;
         unsigned aku_step = 0;
         void aku_run_step(Address actor)
@@ -3257,6 +3276,8 @@ namespace ingame
                 aku_send(component, step.node), sent = true;
             for (const auto &id : step.ids)
                 sent = (component && aku_send_message(component, id)) || sent;
+            if (step.count && component)
+                aku_give_count(1);
             const auto [state, mask] = aku_manager_state(actor);
             std::cout << "Aku give: tried " << step.label << (sent ? "" : " (nothing could be sent)") << "; right after, Aku's manager is in state " << state
                       << (mask ? ", WITH A MASK OUT" : ", no mask out") << "\n" << std::flush;
@@ -3328,39 +3349,48 @@ namespace ingame
                 }
             }
             log_aku_messages(component);
-            // V1.2.34's log: when a crate's mask became Crash's, the first thing his manager did was send himself
-            // fcbn65ha, with two values, from a node of his own script (at a level's start and a respawn he sends it from
-            // another node). The values come from the node, so the very same node is run first; the earlier tries sent
-            // the message empty.
+            const bool had_mask = aku_manager_state(actor).second;
+            // A real pickup (V1.2.35's log) is a chain of messages Aku's manager sends himself: fcbn65ha with "yes"
+            // (from one node of his script), a9nnfx8i (his handling of it sends 6ldq5n9r, which brings the mask out),
+            // then 9becl2sc, tjpwzf3m, sppqmskb, 202aweq4, 9nj5heau and nr69k1wc, and the game's mask count changes.
+            // V1.2.35 sent only a9nnfx8i and 6ldq5n9r: the mask showed but a hit still killed Crash. Now the whole
+            // chain, in order, then the mask count.
+            AkuGiveStep chain;
+            chain.label = "the pickup's whole chain";
+            chain.ids = {"a9nnfx8i", "9becl2sc", "tjpwzf3m", "sppqmskb", "202aweq4", "9nj5heau", "nr69k1wc"};
+            chain.count = !had_mask;
             const auto meta = value<Address>(component + 56);
-            const auto [message, target] = aku_message(component, "fcbn65ha");
-            const auto pickup = aku_pickup_node.load();
-            if (pickup && message && value<Address>(pickup) == aku_pickup_type.load() && value<Address>(pickup + 16) == message)
-                aku_steps.push_back({"the crate pickup's own fcbn65ha (caught when a crate's mask was picked up)", pickup, value<Address>(pickup), message, {}});
-            else
-                std::cout << "Aku give: " << (pickup ? "the crate pickup's fcbn65ha isn't there anymore" : "no crate pickup caught yet this game") << "\n"
-                          << std::flush;
+            const auto message = aku_message(component, "fcbn65ha").first;
+            // fcbn65ha's "yes" node: the one a pickup runs (two values: a +0x1754fe0 source, then a constant yes)
+            const auto says_yes = [&](Address node)
+            {
+                const auto sources = list(value<Address>(node + 32), 16);
+                return typed(node, 0x13bc390) && value<Address>(node + 16) == message && typed(value<Address>(node + 32), 0x1745070) && sources.size() == 2 &&
+                       typed(sources[0], 0x1754fe0) && typed(sources[1], 0x1748280) && (value<std::uint64_t>(sources[1] + 24) & 0xff) == 1;
+            };
             if (message)
             {
-                const auto nodes = aku_send_nodes(meta, message);
-                std::cout << "Aku give: " << nodes.size() << " senders of fcbn65ha around Aku's script\n" << std::flush;
-                for (const auto node : nodes)
-                {
-                    const auto type = value<Address>(node);
-                    std::ostringstream where;
-                    where << "script " << (node >= meta ? "+0x" : "-0x") << std::hex << (node >= meta ? node - meta : meta - node) << ", type +0x" << (type - base());
-                    std::cout << "Aku give:  0x" << std::hex << node << std::dec << " (" << where.str() << ")" << (node == pickup ? " = the pickup's" : "")
-                              << send_arguments(node) << "\n" << std::flush;
-                    const auto sender_type = pickup ? aku_pickup_type.load() : base() + 0x1624f10;
-                    if (node != pickup && type == sender_type && value<Address>(node + 32) && aku_steps.size() < 6)
-                        aku_steps.push_back({"fcbn65ha from Aku's script (" + where.str() + ")", node, type, message, {}});
-                }
+                if (const auto pickup = aku_pickup_node.load(); pickup && says_yes(pickup))
+                    chain.node = pickup;
+                else
+                    for (const auto node : aku_send_nodes(meta, message))
+                        if (says_yes(node))
+                        {
+                            chain.node = node;
+                            break;
+                        }
             }
-            // what his manager sent himself next in the pickup, in order (all with no values)
-            aku_steps.push_back({"a9nnfx8i and 6ldq5n9r", 0, 0, 0, {"a9nnfx8i", "6ldq5n9r"}});
-            aku_steps.push_back({"9nj5heau and nr69k1wc", 0, 0, 0, {"9nj5heau", "nr69k1wc"}});
-            aku_steps.push_back({"barwfjg5, 5fw2bzv2 and cwmbdu2t", 0, 0, 0, {"barwfjg5", "5fw2bzv2", "cwmbdu2t"}});
-            aku_steps.push_back({"fcbn65ha with no values", 0, 0, 0, {"fcbn65ha"}});
+            if (chain.node)
+            {
+                chain.type = value<Address>(chain.node), chain.message = message;
+                std::cout << "Aku give: fcbn65ha's yes node is at script " << (chain.node >= meta ? "+0x" : "-0x") << std::hex
+                          << (chain.node >= meta ? chain.node - meta : meta - chain.node) << std::dec << send_arguments(chain.node) << "\n" << std::flush;
+            }
+            else
+                std::cout << "Aku give: fcbn65ha's yes node wasn't found; the rest of the chain goes anyway\n" << std::flush;
+            aku_steps.push_back(chain);
+            // if a9nnfx8i didn't bring the mask out, 6ldq5n9r on its own (V1.2.35: what brought it out)
+            aku_steps.push_back({"6ldq5n9r on its own", 0, 0, 0, {"6ldq5n9r"}, !had_mask});
             aku_step = 0;
             aku_run_step(actor);
         }

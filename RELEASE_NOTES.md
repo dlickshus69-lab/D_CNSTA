@@ -1,4 +1,3 @@
 ## What's new
 
-- **Aku Aku Mask, fifth try.** Your last log caught a real mask pickup. It showed that the game's messages carry their values in a separate list, so the earlier tries were sending Aku Aku empty messages. The client now remembers the exact message Aku Aku sent himself when a crate's mask became yours (fcbn65ha). `/aku_give` replays that same message first, then a few others from the pickup, one per second, and the log says which one worked.
-- While a filler mask is being handed over, the Aku Aku Sanity lock no longer blocks the messages that bring it out.
+- **Aku Aku Mask: the mask should protect now.** In V1.2.35, `/aku_give` brought the mask out, but a hit still killed Crash, because the game's mask count never changed. A real pickup is a longer chain of messages Aku Aku sends himself, and the count changes partway through it. `/aku_give` now sends the whole chain in the game's order. If Crash had no mask before, it also sets the game's mask count to 1.

@@ -473,7 +473,7 @@ void ClientRuntime::handle_commands()
                 if (box_markers)
                 {
                     box_markers->request_aku_give();
-                    print_console("Aku give test: trying a few ways to hand Crash an Aku Aku mask, one a second (the log says which worked). Not sent to AP.");
+                    print_console("Aku give test: handing Crash an Aku Aku mask the way a crate pickup does (the log shows each step). Not sent to AP.");
                 }
                 else
                     print_console("Aku give needs the in-game adapter. Load into a level first.");
