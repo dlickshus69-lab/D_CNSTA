@@ -1330,24 +1330,10 @@ namespace ingame
                         // the counter went from 0/18 to 1/18). The trap Nitro still explodes and disappears as usual.
                         const bool spawner_note = name == "common_Spawner_Template_c.GraphEvent_id_van6ltro_Definition";
                         blocked = blocked || spawner_note;
-                        auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
-                        if (graph == "Scripts.Graph.common_Crate_Explode")
+                        // its explosion script spoke: it went off. (Until V1.2.70 every kind of message a trap Nitro got went
+                        // to the log, over 20 lines in the frame it exploded; that research is done.)
+                        if (string(value<Address>(value<Address>(component + 56) + 16), 120) == "Scripts.Graph.common_Crate_Explode")
                             trap_event_exploded[i] = true;
-                        {
-                            std::lock_guard lock(trap_event_mutex);
-                            if (!trap_event_seen[i].insert(graph + "|" + name).second)
-                                break;
-                        }
-                        if (trap_event_lines.fetch_add(1) >= 160)
-                            break;
-                        if (graph.rfind("Scripts.Graph.", 0) == 0)
-                            graph.erase(0, 14);
-                        std::array<float, 3> at{};
-                        read(target + 32, at);
-                        std::cout << "Trap Nitro +" << GetTickCount64() - trap_event_since[i].load() << " ms (at " << static_cast<int>(at[0]) << ", "
-                                  << static_cast<int>(at[1]) << ", " << static_cast<int>(at[2]) << "): " << graph << " gets " << name
-                                  << (typed(event, 0x13bc390) ? send_target(event) + send_arguments(event) : std::string())
-                                  << (spawner_note ? " (kept from its spawner: no box counted)" : blocked ? " (its hop: stopped)" : "") << "\n" << std::flush;
                         break;
                     }
                 if (blocked)
@@ -2959,13 +2945,13 @@ namespace ingame
         }
         // the way Crash is going: his movement over half a second, from the latest half second in the last 3 seconds
         // in which he covered at least 60 units
-        bool crash_heading(float &hx, float &hy, std::size_t &end)
+        bool crash_heading(float &hx, float &hy, std::size_t &end, std::uint64_t window_ms = 3000)
         {
             const auto n = crash_path.size();
             if (n < 6)
                 return false;
             const auto latest = crash_path.back().time;
-            for (std::size_t i = n - 1; i >= 5 && latest - crash_path[i].time <= 3000; --i)
+            for (std::size_t i = n - 1; i >= 5 && latest - crash_path[i].time <= window_ms; --i)
             {
                 const auto &a = crash_path[i - 5].at, &b = crash_path[i].at;
                 const float dx = b[0] - a[0], dy = b[1] - a[1], d = std::hypot(dx, dy);
@@ -2977,21 +2963,70 @@ namespace ingame
             }
             return false;
         }
+        // V1.2.71: what the Nitro Trap needs from the level (the Nitro's template, spawners it may borrow, where the crates
+        // are) is gathered on a thread of its own, at most every 4 seconds and only while a Nitro Trap waits or runs.
+        // Going over every object in the level takes tens of thousands of checked reads; V1.2.66-70 did it on the game's
+        // thread twice a second, all the time, and the game hitched every half second (V1.2.69's clips). The game thread
+        // checks whatever it picks from this list before using it.
+        struct FreeSpawner
+        {
+            Address component = 0, owner = 0;
+            std::string name;
+            std::array<float, 3> at{};
+        };
+        struct NitroLevelScan
+        {
+            std::string level;
+            std::uint64_t when = 0;
+            Address nitro_template = 0; // from one of the level's Nitro crate spawners, if it has any
+            std::vector<FreeSpawner> spawners;
+            std::vector<std::array<float, 3>> crates;
+        };
+        std::mutex nitro_scan_mutex;
+        NitroLevelScan nitro_scan;
+        std::atomic_bool nitro_scan_running{false};
+        bool nitro_scan_ready(const std::string &level)
+        {
+            std::lock_guard lock(nitro_scan_mutex);
+            return !level.empty() && nitro_scan.level == level;
+        }
         bool ahead_spot(std::array<float, 3> &spot, bool *floating = nullptr)
         {
             if (floating)
                 *floating = false;
-            float hx = 0, hy = 0;
-            std::size_t end = 0;
-            if (!crash_heading(hx, hy, end))
+            const auto n = crash_path.size();
+            if (n < 6)
                 return false;
             const auto &now = crash_path.back().at;
-            std::vector<std::array<float, 3>> crates;
-            for (const auto owner : event_owners())
+            // in the air: his height changed in the last 0.2 s, he is more than 30 above his lowest point of the last
+            // half second, and that half second wasn't a smooth slope
+            bool in_air = false;
             {
-                std::array<float, 3> at{};
-                if (string(value<Address>(owner + 128)).rfind("Crate_", 0) == 0 && read(owner + 32, at))
-                    crates.push_back(at);
+                const auto &back = crash_path[n - 6].at;
+                float low = now[2], high = now[2], lowest = now[2];
+                bool line = true;
+                for (std::size_t j = n - 6; j < n; ++j)
+                {
+                    const float z = crash_path[j].at[2];
+                    lowest = std::min(lowest, z);
+                    if (j >= n - 3)
+                        low = std::min(low, z), high = std::max(high, z);
+                    line = line && std::abs(z - (back[2] + (now[2] - back[2]) * (j - (n - 6)) / 5.0f)) < 8;
+                }
+                in_air = high - low > 8 && now[2] - lowest > 30 && !line;
+            }
+            // the way he is going; in the air also the way he last ran, up to 8 seconds back (V1.2.69's clip: a jump on
+            // the spot after standing through the countdown had no way to go, so it fell instead)
+            float hx = 0, hy = 0;
+            std::size_t end = 0;
+            if (!crash_heading(hx, hy, end) && !(in_air && crash_heading(hx, hy, end, 10000)))
+                return false;
+            // the crates, from the last look at the level (a few seconds old at most; see nitro_level_scan)
+            std::vector<std::array<float, 3>> crates;
+            {
+                std::lock_guard lock(nitro_scan_mutex);
+                if (nitro_scan.level == crash_path_level)
+                    crates = nitro_scan.crates;
             }
             const auto clear = [&](const std::array<float, 3> &p)
             {
@@ -3007,7 +3042,7 @@ namespace ingame
                 for (const auto &c : crates)
                 {
                     const float dx = c[0] - from[0], dy = c[1] - from[1], cd = std::hypot(dx, dy);
-                    if (cd < pd + 40 || cd > 700 || std::abs(c[2] - p[2]) > 300)
+                    if (cd < pd + 40 || cd > 900 || std::abs(c[2] - p[2]) > 300)
                         continue;
                     const float t = ((p[0] - from[0]) * dx + (p[1] - from[1]) * dy) / (cd * cd);
                     if (std::hypot(from[0] + dx * t - p[0], from[1] + dy * t - p[1]) < 70)
@@ -3016,22 +3051,9 @@ namespace ingame
                 return std::any_of(level_floor.begin(), level_floor.end(), [&](const std::array<float, 3> &f)
                                    { return std::hypot(f[0] - p[0], f[1] - p[1]) < 80 && std::abs(f[2] - p[2]) < 200; });
             };
-            // in the air: his height changed in the last 0.2 s, he is more than 30 above his lowest point of the last
-            // half second, and that half second wasn't a smooth slope. Then it appears straight ahead at his height.
+            // in the air it appears straight ahead at his height, and floats there
             {
-                const auto n = crash_path.size();
-                const auto &back = crash_path[n - 6].at;
-                float low = now[2], high = now[2], lowest = now[2];
-                bool line = true;
-                for (std::size_t j = n - 6; j < n; ++j)
-                {
-                    const float z = crash_path[j].at[2];
-                    lowest = std::min(lowest, z);
-                    if (j >= n - 3)
-                        low = std::min(low, z), high = std::max(high, z);
-                    line = line && std::abs(z - (back[2] + (now[2] - back[2]) * (j - (n - 6)) / 5.0f)) < 8;
-                }
-                if (high - low > 8 && now[2] - lowest > 30 && !line)
+                if (in_air)
                 {
                     std::array<float, 3> at = now;
                     trap_actor_position(at); // where he is this moment (the path is up to 0.1 s old)
@@ -3063,7 +3085,6 @@ namespace ingame
             if (best < 1e9f)
                 return true;
             // straight ahead: only while he is on the ground (the last 0.2 s at one height) and not turning
-            const auto n = crash_path.size();
             float low = now[2], high = now[2];
             for (std::size_t j = n - 3; j < n; ++j)
                 low = std::min(low, crash_path[j].at[2]), high = std::max(high, crash_path[j].at[2]);
@@ -3177,20 +3198,10 @@ namespace ingame
         // else from the memory search (/nitro_probe), or 0
         Address level_nitro_template(const std::string &level)
         {
-            for (const auto owner : event_owners())
             {
-                if (kind_of(string(value<Address>(owner + 128))) != "Crate_Nitro")
-                    continue;
-                for (const auto c : list(value<Address>(owner + 24), 64))
-                {
-                    if (!typed(c, 0x13bbbd0) || string(value<Address>(value<Address>(c + 56) + 16)) != "Scripts.Graph.common_Spawner_Template")
-                        continue;
-                    const auto data = value<Address>(c + 16);
-                    if (field_offset(value<Address>(data + 32), "EntityToSpawn", 8) != 0x48)
-                        continue;
-                    if (const auto e = resolve(value<Address>(data + 0x48)); nitro_template_valid(e))
-                        return e;
-                }
+                std::lock_guard lock(nitro_scan_mutex);
+                if (nitro_scan.level == level && nitro_scan.nitro_template && nitro_template_valid(nitro_scan.nitro_template))
+                    return nitro_scan.nitro_template;
             }
             std::lock_guard lock(nitro_find_mutex);
             if (nitro_find.level != level)
@@ -3227,32 +3238,116 @@ namespace ingame
         // Nitro as that crate (V1.2.64 log: "Crate_AkuAku005 in L123 counted"), and in Crash 2 and 3 borrowing a Nitro
         // crate's spawner counted it as that Nitro. So: no owner with a box count, no enemies, checkpoints, time trial,
         // gem, relic or boss things, nothing on a path, and nothing that is itself a Nitro or TNT.
-        NitroSpawner free_spawner_near(const std::array<float, 3> &to, float away = 0)
+        // the scan itself (any thread: it only reads). A spawner it may borrow: none whose thing counts toward the boxes,
+        // see free_spawner_near
+        NitroLevelScan scan_level_for_nitro(const std::string &level)
         {
-            NitroSpawner best, distant;
+            NitroLevelScan scan;
+            scan.level = level;
             for (const auto owner : event_owners())
             {
                 const auto name = string(value<Address>(owner + 128));
-                bool skip = name.empty();
+                std::array<float, 3> at{};
+                if (name.empty() || !read(owner + 32, at))
+                    continue;
+                if (name.rfind("Crate_", 0) == 0)
+                    scan.crates.push_back(at);
+                // the Nitro's template, from a Nitro crate's spawner
+                if (!scan.nitro_template && kind_of(name) == "Crate_Nitro")
+                    for (const auto c : list(value<Address>(owner + 24), 64))
+                    {
+                        if (!typed(c, 0x13bbbd0) || string(value<Address>(value<Address>(c + 56) + 16)) != "Scripts.Graph.common_Spawner_Template")
+                            continue;
+                        const auto data = value<Address>(c + 16);
+                        if (field_offset(value<Address>(data + 32), "EntityToSpawn", 8) != 0x48)
+                            continue;
+                        if (const auto e = resolve(value<Address>(data + 0x48)); nitro_template_valid(e))
+                        {
+                            scan.nitro_template = e;
+                            break;
+                        }
+                    }
+                bool skip = false;
                 for (const char *word : {"Nitro", "TNT", "Checkpoint", "Switch", "Outline", "LevelEnd", "TimeTrial", "Enemy", "Gem", "Relic",
                                          "Portal", "Boss", "Bonus", "Spline", "Path", "Orbit", "Swing", "Rotating", "Aku"})
                     skip = skip || name.find(word) != std::string::npos;
-                std::array<float, 3> at{};
-                if (skip || !read(owner + 32, at))
+                if (skip)
                     continue;
                 const auto scripts = owner_scripts(owner);
                 if (scripts.find("LevelCount") != std::string::npos || scripts.find("Count") != std::string::npos ||
                     scripts.find("Checkpoint") != std::string::npos)
                     continue;
                 for (const auto c : list(value<Address>(owner + 24), 64))
+                    if (spawner_method(c, owner, true))
+                        scan.spawners.push_back({c, owner, name, at});
+            }
+            scan.when = GetTickCount64();
+            return scan;
+        }
+        // a fresh look at the level, on its own thread, if the last one is for another level or 4 seconds old
+        void nitro_level_scan(const std::string &level)
+        {
+            if (level.empty())
+                return;
+            {
+                std::lock_guard lock(nitro_scan_mutex);
+                if (nitro_scan.level == level && GetTickCount64() - nitro_scan.when < 4000)
+                    return;
+            }
+            if (nitro_scan_running.exchange(true))
+                return;
+            std::thread([level]
+                        {
+                auto scan = scan_level_for_nitro(level);
+                const bool none = !scan.nitro_template;
                 {
-                    const auto m = spawner_method(c, owner, true);
-                    const float d = std::hypot(at[0] - to[0], at[1] - to[1]);
-                    if (m && (!best.component || d < best.distance))
-                        best = {c, owner, m, d, name};
-                    if (m && d >= away && (!distant.component || d < distant.distance))
-                        distant = {c, owner, m, d, name};
+                    std::lock_guard lock(nitro_scan_mutex);
+                    nitro_scan = std::move(scan);
                 }
+                nitro_scan_running = false;
+                // a level without Nitro crates: the Nitro's template is looked for in all of the game's memory (once)
+                if (none && !nitro_template_searched(level))
+                    nitro_template_search(level); })
+                .detach();
+        }
+        // a ready spawner to make the trap's Nitro with, closest to the spot (at least `away` from it when there is one),
+        // from the level scan, checked again here before it is used. V1.2.65: never one whose thing counts toward the
+        // level's boxes. A crate's box count (common_Crate_LevelCount, on the spawner's owner) counts whatever its spawner
+        // makes: borrowing an Aku Aku crate's spawner counted the trap's Nitro as that crate (V1.2.64 log: "Crate_AkuAku005
+        // in L123 counted"), and in Crash 2 and 3 borrowing a Nitro crate's spawner counted it as that Nitro. So: no owner
+        // with a box count, no enemies, checkpoints, time trial, gem, relic or boss things, nothing on a path, and nothing
+        // that is itself a Nitro or TNT.
+        NitroSpawner free_spawner_near(const std::array<float, 3> &to, float away = 0)
+        {
+            std::vector<FreeSpawner> spawners;
+            {
+                std::lock_guard lock(nitro_scan_mutex);
+                if (nitro_scan.level == crash_path_level)
+                    spawners = nitro_scan.spawners;
+            }
+            const auto distance = [&](const FreeSpawner &f) { return std::hypot(f.at[0] - to[0], f.at[1] - to[1]); };
+            std::sort(spawners.begin(), spawners.end(), [&](const FreeSpawner &a, const FreeSpawner &b) { return distance(a) < distance(b); });
+            NitroSpawner best, distant;
+            unsigned checked = 0;
+            for (const auto &f : spawners)
+            {
+                if (best.component && (away <= 0 || distant.component))
+                    break;
+                // past the closest one, only one at least `away` from the spot is still wanted
+                if (best.component && distance(f) < away)
+                    continue;
+                if (++checked > 16)
+                    break;
+                // still the same thing, still a ready spawner, where it is now
+                std::array<float, 3> at{};
+                const auto m = string(value<Address>(f.owner + 128)) == f.name && read(f.owner + 32, at) ? spawner_method(f.component, f.owner, true) : 0;
+                if (!m)
+                    continue;
+                const float d = std::hypot(at[0] - to[0], at[1] - to[1]);
+                if (!best.component || d < best.distance)
+                    best = {f.component, f.owner, m, d, f.name};
+                if (d >= away && (!distant.component || d < distant.distance))
+                    distant = {f.component, f.owner, m, d, f.name};
             }
             return away > 0 && distant.component ? distant : best;
         }
@@ -3279,6 +3374,12 @@ namespace ingame
             Address nitro_template = 0;
             if (any)
             {
+                // (the level scan runs on its own thread; the falling Nitro waits for it, see update_nitro_drop)
+                if (!nitro_scan_ready(level))
+                {
+                    nitro_level_scan(level);
+                    return why = "still looking at the level", false;
+                }
                 nitro_template = level_nitro_template(level);
                 if (!nitro_template && !nitro_template_searched(level))
                     nitro_template_search(level);
@@ -3364,23 +3465,8 @@ namespace ingame
                         scripts += (scripts.empty() ? "" : ", ") + string(value<Address>(value<Address>(m + 56) + 16), 120);
                 std::cout << "Nitro spawn: a new " << string(value<Address>(crate + 0x80)) << " (" << string(value<Address>(value<Address>(crate + 0x40) + 0x48))
                           << "; " << (scripts.empty() ? "no scripts" : scripts) << ") appeared at " << triple(at) << " after " << elapsed << " ms\n";
-                // V1.2.61 research, once per game start: every setting of the trap Nitro's scripts and their data, to find
-                // what makes it count as a box when it explodes. Data shared with other crates shows the same address
-                // on the next Nitro.
-                static unsigned dumped = 0;
-                if (dumped++ < 2)
-                    for (const auto m : list(value<Address>(crate + 24), 64))
-                        if (typed(m, 0x13bbbd0) && typed(value<Address>(m + 56), 0x1745d78))
-                        {
-                            auto who = "Trap Nitro script " + string(value<Address>(value<Address>(m + 56) + 16), 120);
-                            dump_fields(m, value<Address>(m + 56), who);
-                            if (const auto data = value<Address>(m + 16))
-                            {
-                                std::ostringstream at_text;
-                                at_text << who << " data 0x" << std::hex << data;
-                                dump_fields(data, value<Address>(data + 32), at_text.str());
-                            }
-                        }
+                // (V1.2.61-70 also wrote every setting of its scripts here, the first two times: about 250 lines in one
+                // frame, which froze the game for most of a second when the Nitro appeared, V1.2.69's clip)
                 trap_nitro = {crate, at, GetTickCount64(), s.level};
                 watch_trap_nitro(crate, at, s.level, s.restore.empty() ? nullptr : &s.restore.front().second, s.floats);
                 finish_nitro_spawn("done");
@@ -3644,52 +3730,113 @@ namespace ingame
                     return trap_event_exploded[i].load();
             return false;
         }
-        // sets off a trap Nitro the way Crash running into it does (V1.2.70). V1.2.68's logs, every falling Nitro that hit
-        // Crash: its common_Crate script first sends the crate xyvfghry (no values), and the whole explosion follows from
-        // that in the same frame. The same message is sent here, from the same script, through the game's own sender
-        // (the event hook still keeps the spawner's box note from going out). Game thread only.
-        bool set_off_trap_nitro(Address crate, std::string &why)
+        std::vector<Address> aku_send_nodes(Address meta, Address message);
+        // one of a crate's scripts by name ("Scripts.Graph.common_Crate"), or 0
+        Address crate_script(Address crate, const std::string &script)
         {
-            if (!event_hook.installed && !code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
-                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0}))
-                return why = "the game's message sender differs from the verified build", false;
-            if (!live_crate(crate))
-                return why = "the Nitro is gone", false;
-            Address sender = 0, message = 0, target = 0;
-            std::ostringstream takes;
+            for (const auto c : list(value<Address>(crate + 24), 64))
+            {
+                const auto meta = value<Address>(c + 56);
+                if (typed(c, 0x13bbbd0) && typed(meta, 0x1745d78) && value<Address>(c + 24) == crate && string(value<Address>(meta + 16), 120) == script)
+                    return c;
+            }
+            return 0;
+        }
+        // a message one of the crate's scripts takes, by its id: the message and where it goes, or {0, 0}
+        std::pair<Address, Address> crate_message(Address crate, const std::string &id)
+        {
             for (const auto c : list(value<Address>(crate + 24), 64))
             {
                 const auto meta = value<Address>(c + 56);
                 if (!typed(c, 0x13bbbd0) || !typed(meta, 0x1745d78) || value<Address>(c + 24) != crate)
                     continue;
-                const auto script = string(value<Address>(meta + 16), 120);
-                if (script == "Scripts.Graph.common_Crate")
-                    sender = c;
-                takes << " " << (script.rfind("Scripts.Graph.", 0) == 0 ? script.substr(14) : script) << ":";
                 for (const auto delegator : list(value<Address>(meta + 160), 128))
                 {
                     const auto m = value<Address>(delegator + 24), t = value<Address>(delegator + 32);
-                    if (!typed(delegator, 0x13bc268) || !typed(m, 0x17b6578) || !typed(t, 0x13bbcb8))
-                        continue;
-                    const auto name = string(value<Address>(m + 16), 120);
-                    const auto id = name.find("_id_");
-                    takes << " " << (id == std::string::npos ? name : name.substr(id + 4));
-                    if (!message && name.find("_id_xyvfghry") != std::string::npos)
-                        message = m, target = t;
+                    if (typed(delegator, 0x13bc268) && typed(m, 0x17b6578) && typed(t, 0x13bbcb8) &&
+                        string(value<Address>(m + 16), 120).find("_id_" + id) != std::string::npos)
+                        return {m, t};
                 }
             }
-            // research, once: every message each of the trap Nitro's scripts takes (another one to try, if this isn't it)
-            static bool listed = false;
-            if (!listed)
-                listed = true, std::cout << "Nitro drop: the trap Nitro's scripts take" << takes.str() << "\n" << std::flush;
+            return {0, 0};
+        }
+        // sets off a trap Nitro the way the game does when Crash runs into one. V1.2.68's logs, every falling Nitro that
+        // hit Crash: its common_Crate_Nitro_Spawned script sends the crate tuqrv6vb, 06rjdce1, gy91r6w7 and then
+        // bovldql9, which its common_Crate_Explode script takes, and the whole explosion follows from that in the same
+        // frame. (V1.2.70 sent xyvfghry, the first message of that frame: the crate took it and nothing followed.)
+        // Each is sent with the game's own send node from that script when it is found in memory next to the script
+        // (as /aku_give finds Aku's), so it carries the same values; one with no values is sent as a message of its own
+        // otherwise. Everything goes through the game's own sender and the event hook. Game thread only.
+        std::map<std::pair<Address, Address>, Address> nitro_send_nodes; // (script description, message) -> its send node
+        bool set_off_trap_nitro(Address crate, std::string &how)
+        {
+            if (!event_hook.installed && !code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0}))
+                return how = "the game's message sender differs from the verified build", false;
+            if (!live_crate(crate))
+                return how = "the Nitro is gone", false;
+            const auto sender = crate_script(crate, "Scripts.Graph.common_Crate_Nitro_Spawned");
             if (!sender)
-                return why = "its common_Crate script wasn't found", false;
-            if (!message)
-                return why = "none of its scripts takes xyvfghry", false;
-            std::array<Address, 11> node{base() + 0x13bc390, 0, message, target};
-            std::array<Address, 6> context{sender};
-            reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(reinterpret_cast<Address>(node.data()), reinterpret_cast<Address>(context.data()));
-            return true;
+                return how = "its common_Crate_Nitro_Spawned script wasn't found", false;
+            const auto meta = value<Address>(sender + 56);
+            const auto send = [&](Address node)
+            {
+                std::array<Address, 6> context{sender};
+                reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(node, reinterpret_cast<Address>(context.data()));
+            };
+            std::ostringstream out;
+            bool exploded_sent = false;
+            // the message, whether it carries values in the game's send (tuqrv6vb and bovldql9 carry five)
+            for (const auto &step : std::vector<std::pair<std::string, unsigned>>{{"tuqrv6vb", 5}, {"06rjdce1", 0}, {"gy91r6w7", 0}, {"bovldql9", 5}})
+            {
+                const std::string &id = step.first;
+                const unsigned values = step.second;
+                const auto taken = crate_message(crate, id);
+                const Address message = taken.first, target = taken.second;
+                if (!message)
+                {
+                    out << " " << id << ": not taken";
+                    continue;
+                }
+                // the game's own node: a send node of this message, with as many values as the game's send had
+                const auto fits = [&](Address node)
+                {
+                    const auto args = value<Address>(node + 32);
+                    return typed(node, 0x13bc390) && value<Address>(node + 16) == message && value<Address>(node + 24) &&
+                           (values ? typed(args, 0x1745070) && list(args, 16).size() == values : !args || typed(args, 0x1745070));
+                };
+                auto &node = nitro_send_nodes[{meta, message}];
+                if (!node || !fits(node))
+                {
+                    node = 0;
+                    for (const auto found : aku_send_nodes(meta, message))
+                        if (fits(found))
+                        {
+                            node = found;
+                            break;
+                        }
+                }
+                if (node)
+                {
+                    send(node);
+                    out << " " << id << ": the game's node";
+                }
+                else if (!values || id == "bovldql9")
+                {
+                    // no node found: the message on its own, with no values (as a DeathLink death is sent to Aku)
+                    std::array<Address, 11> own{base() + 0x13bc390, 0, message, target};
+                    send(reinterpret_cast<Address>(own.data()));
+                    out << " " << id << ": sent without values";
+                }
+                else
+                {
+                    out << " " << id << ": no node found, skipped";
+                    continue;
+                }
+                exploded_sent = exploded_sent || id == "bovldql9";
+            }
+            how = out.str();
+            return exploded_sent;
         }
         // the falling Nitro that landed without hitting Crash: set off at once, then a look whether it went off
         struct NitroSetOff
@@ -3705,7 +3852,7 @@ namespace ingame
                 return;
             if (level == o.level)
                 std::cout << (trap_nitro_went_off(o.entity) ? "Nitro drop: it went off where it landed\n"
-                                                             : "Nitro drop: it didn't go off where it landed (xyvfghry wasn't enough)\n")
+                                                             : "Nitro drop: it didn't go off where it landed\n")
                           << std::flush;
             o = {};
         }
@@ -3728,10 +3875,9 @@ namespace ingame
                     static std::mt19937 coin{std::random_device{}()};
                     d.ahead = state.nitro_drop_kind == 2 || (state.nitro_drop_kind == 0 && std::bernoulli_distribution(0.5)(coin));
                     d.any = state.nitro_drop_kind == 3;
-                    // a level without Nitro spawners: look for the Nitro's template in memory during the countdown
-                    // (V1.2.57: for every Nitro Trap, not only /nitro_drop any)
-                    if (!level_nitro_template(level) && !nitro_template_searched(level))
-                        nitro_template_search(level);
+                    // a fresh look at the level during the countdown (and, in a level without Nitro crates, a search
+                    // for the Nitro's template in memory after it)
+                    nitro_level_scan(level);
                     state.nitro_countdown_end = now + drop_countdown_ms;
                     std::cout << "Nitro Trap: countdown, then a Nitro " << (d.ahead ? "appears ahead of Crash" : "falls onto Crash")
                               << (d.any ? " (test: made by an ordinary crate's spawner)" : "") << "\n" << std::flush;
@@ -3859,14 +4005,14 @@ namespace ingame
             // it blows up where it lands, also when Crash got out of the way (it already went off if it hit him)
             if (!trap_nitro_went_off(d.entity))
             {
-                std::string why;
-                if (set_off_trap_nitro(d.entity, why))
+                std::string how;
+                if (set_off_trap_nitro(d.entity, how))
                 {
-                    std::cout << "Nitro drop: set it off where it landed\n" << std::flush;
+                    std::cout << "Nitro drop: set it off where it landed (" << how << " )\n" << std::flush;
                     nitro_set_off = {d.entity, now, d.level};
                 }
                 else
-                    std::cout << "Nitro drop: couldn't set it off (" << why << ")\n" << std::flush;
+                    std::cout << "Nitro drop: couldn't set it off (" << how << ")\n" << std::flush;
             }
             d = {};
             state.nitro_countdown_end = 0;
@@ -4302,6 +4448,10 @@ namespace ingame
             if (level != sound_level)
                 sound_level = level, forget_game_sounds();
             record_crash_path(level);
+            // the level scan, every few seconds on its own thread, only while a Nitro Trap waits or runs
+            if (!level.empty() && (state.nitro_wanted || nitro_drop.stage != NitroDropTrap::Idle || state.nitro_spawn_request != state.nitro_spawn_ack) &&
+                !nitro_trap_exempt())
+                nitro_level_scan(level);
             nitro_spawn_followup();
             update_nitro_drop(state, level);
             update_nitro_set_off(level);
@@ -4314,13 +4464,19 @@ namespace ingame
                 std::array<float, 3> crash{}, spot{};
                 const bool can = !level.empty() && !nitro_trap_exempt() && state.player_ready && !nitro_spawn_state.component &&
                                  nitro_drop.stage == NitroDropTrap::Idle && trap_actor_position(crash);
-                // without Nitro crates: the Nitro's template (looked for in memory once per level while a Nitro Trap
-                // waits) and an ordinary crate's spawner to make it with
+                // the Nitro's template (in a level without Nitro crates, looked for in memory once while a Nitro Trap
+                // waits) and a spawner that counts nothing to make it with, from the level scan (cheap here: no
+                // going over the level's objects on the game's thread)
                 const bool known = can && level_nitro_template(level);
-                if (can && !known && state.nitro_wanted && !nitro_template_searched(level))
+                if (can && !known && state.nitro_wanted && nitro_scan_ready(level) && !nitro_template_searched(level))
                     nitro_template_search(level);
-                const bool borrowed = known && free_spawner_near(crash).component;
-                state.nitro_ready = borrowed && ahead_spot(spot) && free_spawner_near(spot).component;
+                bool borrowed = false;
+                if (known)
+                {
+                    std::lock_guard lock(nitro_scan_mutex);
+                    borrowed = nitro_scan.level == level && !nitro_scan.spawners.empty();
+                }
+                state.nitro_ready = borrowed && ahead_spot(spot);
                 state.nitro_drop_ready = borrowed;
             }
             if (state.nitro_spawn_request == state.nitro_spawn_ack)
