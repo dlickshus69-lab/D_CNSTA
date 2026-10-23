@@ -66,6 +66,8 @@ class ClientRuntime
     std::map<std::string, unsigned> death_tally;
     std::string death_tally_seed;
     bool death_tally_dirty = false;
+    std::vector<std::string> death_tally_shown;
+    std::chrono::steady_clock::time_point death_tally_refresh{};
     void count_death(const std::string &player);
     void update_death_tally();
     const std::vector<std::string> c2_regular_levels = c2_portal_levels();

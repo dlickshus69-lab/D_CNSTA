@@ -1,10 +1,11 @@
 ## What's new
 
-- **Fixed: the game didn't open on V1.2.25 and V1.2.26.** The new death counter stopped the client when its save file didn't exist yet (the first start of a seed). It now starts from 0 instead.
-- **Level clears the save missed.** Picking up a level's box gem or its relic means you reached the end, so the level's clear is sent too if the game didn't write it to the save (Guicho's Hog Wild: gem, relic and time trial, but no clear).
+- **The death counter is always on screen** (with DeathLink on), in the hubs and in levels: the total, then every player in the room, starting at 0.
 
 ## Recent builds
 
+- **V1.2.28:** fixed the game not opening on V1.2.25 to V1.2.27 (the death counter read a file that didn't exist yet).
+- **V1.2.27:** a level's clear is sent when you pick up its box gem or relic, if the save missed it.
 - **V1.2.26:** the Crash 3 secret pad is asked for once per hub visit again (V1.2.24's retry left the next ride on a black screen).
 - **V1.2.25:** death counter (everyone's DeathLink deaths this seed, each player's in the hubs).
 - **V1.2.24:** boxes that need a move (arrow crates, crates on TNT, tall stacks: Spin; iron-bound crates, Turtle Woods' underground room: Body Slam), gimmick stages need no moves, box tracker re-attaches after reloads, DeathLink skips time trials and pause-menu Restart, rides hold received DeathLinks, no Darkness on Coco's jet ski.

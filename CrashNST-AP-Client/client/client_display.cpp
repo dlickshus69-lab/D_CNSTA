@@ -387,28 +387,50 @@ void ClientRuntime::update_death_tally()
             std::cerr << "Death tally: couldn't read the saved count (" << error.what() << "); starting from 0." << std::endl;
         }
     }
-    if (!death_tally_dirty || !box_markers)
+    if (death_tally_dirty)
+    {
+        death_tally_dirty = false;
+        Json::Value out(Json::objectValue);
+        for (const auto &[name, count] : death_tally)
+            out[name] = count;
+        try
+        {
+            std::error_code error;
+            std::filesystem::create_directories(file.parent_path(), error);
+            write_state_json(file, out);
+        }
+        catch (const std::exception &error)
+        {
+            std::cerr << "Death tally: " << error.what() << std::endl;
+        }
+    }
+    if (!box_markers)
         return;
-    death_tally_dirty = false;
-    Json::Value out(Json::objectValue);
-    unsigned total = 0;
-    std::vector<std::pair<std::string, unsigned>> players(death_tally.begin(), death_tally.end());
-    for (const auto &[name, count] : players)
-        out[name] = count, total += count;
-    try
+    // always on screen with DeathLink on: the total, then every player in the room (0 until they die), most first
+    std::vector<std::string> lines;
+    if (session.slot_data()["death_link"].asBool())
     {
-        std::error_code error;
-        std::filesystem::create_directories(file.parent_path(), error);
-        write_state_json(file, out);
+        std::map<std::string, unsigned> shown = death_tally;
+        shown.emplace(slot, 0);
+        for (const auto &[number, name] : player_aliases)
+            if (!name.empty())
+                shown.emplace(name, 0);
+        unsigned total = 0;
+        for (const auto &[name, count] : death_tally)
+            total += count;
+        std::vector<std::pair<std::string, unsigned>> players(shown.begin(), shown.end());
+        std::stable_sort(players.begin(), players.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+        lines.push_back("Deaths: " + std::to_string(total));
+        for (const auto &[name, count] : players)
+            if (lines.size() < 9)
+                lines.push_back(name.substr(0, 40) + ": " + std::to_string(count));
     }
-    catch (const std::exception &error)
+    // sent again every few seconds too, so a reattached HUD gets it
+    const auto now = std::chrono::steady_clock::now();
+    if (lines != death_tally_shown || now >= death_tally_refresh)
     {
-        std::cerr << "Death tally: " << error.what() << std::endl;
+        death_tally_shown = lines;
+        death_tally_refresh = now + std::chrono::seconds(5);
+        box_markers->death_tally(lines);
     }
-    std::stable_sort(players.begin(), players.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
-    std::vector<std::string> lines{"Deaths: " + std::to_string(total)};
-    for (const auto &[name, count] : players)
-        if (lines.size() < 9)
-            lines.push_back(name.substr(0, 40) + ": " + std::to_string(count));
-    box_markers->death_tally(lines);
 }
