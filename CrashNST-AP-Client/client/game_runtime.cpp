@@ -3587,6 +3587,7 @@ namespace ingame
             enum Stage { Idle, Waiting, Countdown, Ahead, Spawning, Settling, Falling } stage = Idle;
             bool ahead = false; // the coin flip: a Nitro appears ahead of Crash instead of falling onto him
             bool chosen_ahead = false; // the coin flip as it came, for a start over
+            bool sound_held = false;   // the countdown stands still, and so does its sound
             bool told_waiting = false;
             std::uint64_t retry_at = 0;
             bool any = false;   // /nitro_drop any: an ordinary crate's spawner makes it (research)
@@ -3739,6 +3740,8 @@ namespace ingame
         {
             auto &d = nitro_drop;
             std::cout << "Nitro Trap: " << why << "; it waits and starts over once Crash can move in a level where it works\n" << std::flush;
+            if (d.stage == NitroDropTrap::Countdown)
+                stop_countdown_sound();
             const bool ahead = d.chosen_ahead, any = d.any;
             d = {};
             d.stage = NitroDropTrap::Waiting, d.ahead = d.chosen_ahead = ahead, d.any = any, d.told_waiting = true;
@@ -4025,7 +4028,18 @@ namespace ingame
                 d.start += dt, d.spawned += dt, d.fall_start += dt;
                 if (state.nitro_countdown_end)
                     state.nitro_countdown_end += dt;
+                // the countdown's sound stops with it (V1.3.1's clip: through a death it played on, and the numbers
+                // after the respawn had none)
+                if (d.stage == NitroDropTrap::Countdown && !d.sound_held)
+                    stop_countdown_sound(), d.sound_held = true;
                 return;
+            }
+            // ... and plays on from the same point when the countdown does
+            if (d.sound_held)
+            {
+                d.sound_held = false;
+                if (d.stage == NitroDropTrap::Countdown && d.ticks > 0 && now - d.start < drop_countdown_ms)
+                    resume_countdown_sound(static_cast<unsigned>(now - d.start), drop_step_ms);
             }
             if (level != d.level)
             {

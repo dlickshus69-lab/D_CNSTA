@@ -25,6 +25,11 @@ namespace ingame
     // plays it for countdown number `index` (0 for 3, 1 for 2, 2 for 1), every `step_ms`: a sound as long as two
     // numbers or more plays once, at 3; a short one at every number. False when there is none.
     bool play_countdown_sound(int index, unsigned step_ms);
+    // the countdown stood still (a death, the pause menu): its sound stops where it is (V1.3.2; it used to play on)
+    void stop_countdown_sound();
+    // the countdown goes on `offset_ms` after its start: a sound as long as two numbers or more plays on from there, so
+    // it stays in step with the numbers (a short one simply plays at the next number)
+    void resume_countdown_sound(unsigned offset_ms, unsigned step_ms);
     std::string countdown_sound_name();
     // its volume, 0 (silent) to 100 (as loud as the sound file); 50 unless /nitro_volume changed it
     void set_countdown_volume(unsigned percent);

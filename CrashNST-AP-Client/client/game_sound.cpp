@@ -493,6 +493,52 @@ namespace ingame
         PlaySoundA(reinterpret_cast<LPCSTR>(countdown_playing->data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
         return true;
     }
+    void stop_countdown_sound()
+    {
+        std::lock_guard<std::mutex> guard(countdown_mutex);
+        if (!countdown_playing)
+            return;
+        PlaySoundA(nullptr, nullptr, 0);
+        countdown_playing = nullptr;
+    }
+    void resume_countdown_sound(unsigned offset_ms, unsigned step_ms)
+    {
+        std::lock_guard<std::mutex> guard(countdown_mutex);
+        if (!countdown_wav || countdown_ms < 2 * step_ms || !countdown_percent)
+            return;
+        if (!countdown_scaled || scaled_percent != countdown_percent)
+            countdown_scaled = polished(*countdown_wav, countdown_percent), scaled_percent = countdown_percent;
+        const auto &whole = *countdown_scaled;
+        if (whole.size() <= 44)
+            return;
+        std::uint32_t rate = 0;
+        std::uint16_t align = 0, bits = 0;
+        std::memcpy(&rate, &whole[24], 4), std::memcpy(&align, &whole[32], 2), std::memcpy(&bits, &whole[34], 2);
+        if (!rate || !align || bits != 16)
+            return;
+        const std::size_t data = whole.size() - 44, skip = static_cast<std::size_t>(offset_ms) * rate / 1000 * align;
+        if (skip + align >= data)
+            return; // it would have ended by now
+        // the rest of it, from that point, with a few milliseconds of fade-in so it doesn't click
+        std::vector<unsigned char> rest(44 + data - skip);
+        std::memcpy(rest.data(), whole.data(), 44);
+        std::memcpy(rest.data() + 44, whole.data() + 44 + skip, data - skip);
+        const auto put32 = [&](std::size_t at, std::uint32_t v) { std::memcpy(&rest[at], &v, 4); };
+        put32(4, static_cast<std::uint32_t>(36 + data - skip)), put32(40, static_cast<std::uint32_t>(data - skip));
+        const std::size_t fade = std::min<std::size_t>((data - skip) / align / 2, static_cast<std::size_t>(rate) * 6 / 1000);
+        const unsigned channels = align / 2;
+        for (std::size_t frame = 0; frame * align < data - skip && frame < fade; ++frame)
+            for (unsigned c = 0; c < channels; ++c)
+            {
+                std::int16_t sample;
+                const auto at = 44 + frame * align + c * 2;
+                std::memcpy(&sample, &rest[at], 2);
+                sample = static_cast<std::int16_t>(sample * static_cast<float>(frame) / fade);
+                std::memcpy(&rest[at], &sample, 2);
+            }
+        countdown_playing = std::make_shared<const std::vector<unsigned char>>(std::move(rest));
+        PlaySoundA(reinterpret_cast<LPCSTR>(countdown_playing->data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+    }
     std::string countdown_sound_name()
     {
         std::lock_guard<std::mutex> guard(countdown_mutex);
