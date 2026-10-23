@@ -8,6 +8,10 @@
 #include <algorithm>
 #include <cwctype>
 #include <fstream>
+#include <iterator>
+#include <map>
+#include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 #ifdef _MSC_VER
@@ -247,9 +251,10 @@ namespace
         }
         return {};
     }
-    void apply_skin(const std::filesystem::path &proxy_folder, const std::filesystem::path &game_folder)
+    // returns the skin the archives folder holds afterwards ("default", a skin's name, or empty when unknown)
+    std::wstring apply_skin(const std::filesystem::path &proxy_folder, const std::filesystem::path &game_folder)
     {
-        std::wstring report;
+        std::wstring report, worn_now;
         std::string outcome;
         try
         {
@@ -305,6 +310,7 @@ namespace
                     if (stamp(game_pak, now))
                         out << narrow(name) << '\n' << now.size << '\n' << now.written << '\n';
                 };
+                worn_now = installed;
                 if (want == installed)
                 {
                     outcome = narrow(want) + "|wearing|" + (want == L"default" ? std::string() : narrow(game_pak.wstring()));
@@ -343,6 +349,7 @@ namespace
                     return;
                 }
                 record(want);
+                worn_now = want;
                 outcome = narrow(want) + "|wearing|" + narrow(source.wstring());
                 report = L"put on " + want + L" from " + source.wstring();
             }();
@@ -355,6 +362,264 @@ namespace
             SetEnvironmentVariableW(L"CRASHNSTAP_SKIN", widen(outcome).c_str());
         if (!report.empty())
             OutputDebugStringW((L"Crash NST AP skins: " + report + L"\n").c_str());
+        return worn_now;
+    }
+    // Crash colors in the archives with their own copies of Crash's textures (V1.2.52): the client lists them in
+    // %LOCALAPPDATA%\CrashNSTAP\state\color_patches.txt ("plan <colors skin>", then "archive|original size|record
+    // offset|original record|colored file|length"), and they apply while that colors skin is worn. Each colored file
+    // goes at the end of its archive (on a 2 KiB sector, like the archive's own files) and its record points there;
+    // the original records and the archive's original size are kept in skins\patched.txt ("archive|original size|
+    // patched size|plan|record offset|original record"), so the archive is put back exactly when the colors change
+    // or come off. An archive that isn't as expected (a Steam update or verify) is left alone. The result is left in
+    // CRASHNSTAP_COLORS for the client.
+    struct PatchLine
+    {
+        std::wstring archive;
+        std::string plan, original;
+        unsigned long long original_size = 0, patched_size = 0, at = 0, length = 0;
+        std::wstring file;
+    };
+    std::vector<std::string> split_line(const std::string &line)
+    {
+        std::vector<std::string> parts;
+        std::string part;
+        std::istringstream in(line);
+        while (std::getline(in, part, '|'))
+            parts.push_back(part);
+        return parts;
+    }
+    bool from_hex(const std::string &text, unsigned char (&out)[16])
+    {
+        if (text.size() != 32)
+            return false;
+        for (int i = 0; i < 16; ++i)
+        {
+            const auto digit = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
+            const int hi = digit(text[i * 2]), lo = digit(text[i * 2 + 1]);
+            if (hi < 0 || lo < 0)
+                return false;
+            out[i] = static_cast<unsigned char>(hi * 16 + lo);
+        }
+        return true;
+    }
+    bool file_at(HANDLE file, unsigned long long at, void *data, DWORD size, bool write)
+    {
+        LARGE_INTEGER position{};
+        position.QuadPart = static_cast<LONGLONG>(at);
+        DWORD done = 0;
+        if (!SetFilePointerEx(file, position, nullptr, FILE_BEGIN))
+            return false;
+        return (write ? WriteFile(file, data, size, &done, nullptr) : ReadFile(file, data, size, &done, nullptr)) && done == size;
+    }
+    unsigned long long file_size(HANDLE file)
+    {
+        LARGE_INTEGER size{};
+        return GetFileSizeEx(file, &size) ? static_cast<unsigned long long>(size.QuadPart) : 0;
+    }
+    void write_patched(const std::filesystem::path &path, const std::vector<PatchLine> &done)
+    {
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+        auto temporary = path;
+        temporary += L".tmp";
+        {
+            std::ofstream out(temporary, std::ios::trunc | std::ios::binary);
+            for (const auto &d : done)
+                out << narrow(d.archive) << '|' << d.original_size << '|' << d.patched_size << '|' << d.plan << '|' << d.at << '|' << d.original << '\n';
+        }
+        MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+    }
+    void apply_color_patches(const std::filesystem::path &proxy_folder, const std::filesystem::path &game_folder, const std::wstring &worn)
+    {
+        unsigned patched = 0, restored = 0, kept = 0, skipped = 0;
+        std::string why;
+        try
+        {
+            const auto skins = proxy_folder / L"CrashNSTAP" / L"skins";
+            const auto state = skins / L"patched.txt";
+            const auto archives = game_folder / L"archives";
+            // the plan, only while its colors skin is the one worn
+            std::string plan_id;
+            std::map<std::wstring, std::vector<PatchLine>> plan;
+            {
+                static wchar_t local[32768]{};
+                const auto count = GetEnvironmentVariableW(L"LOCALAPPDATA", local, std::size(local));
+                if (count && count < std::size(local))
+                {
+                    std::ifstream in(std::filesystem::path(local) / L"CrashNSTAP" / L"state" / L"color_patches.txt");
+                    std::string line;
+                    if (in && std::getline(in, line) && line.rfind("plan ", 0) == 0)
+                    {
+                        plan_id = narrow(trim(widen(line.substr(5))));
+                        while (std::getline(in, line))
+                        {
+                            const auto f = split_line(narrow(trim(widen(line))));
+                            if (f.size() != 6)
+                                continue;
+                            PatchLine p;
+                            p.archive = widen(f[0]), p.plan = plan_id, p.original_size = std::strtoull(f[1].c_str(), nullptr, 10);
+                            p.at = std::strtoull(f[2].c_str(), nullptr, 10), p.original = f[3], p.file = widen(f[4]);
+                            p.length = std::strtoull(f[5].c_str(), nullptr, 10);
+                            plan[lower(p.archive)].push_back(p);
+                        }
+                    }
+                }
+            }
+            if (plan_id.empty() || lower(widen(plan_id)) != worn)
+                plan.clear(), plan_id.clear();
+            // what is patched now
+            std::map<std::wstring, std::vector<PatchLine>> current;
+            {
+                std::ifstream in(state);
+                std::string line;
+                while (std::getline(in, line))
+                {
+                    const auto f = split_line(narrow(trim(widen(line))));
+                    if (f.size() != 6)
+                        continue;
+                    PatchLine p;
+                    p.archive = widen(f[0]), p.original_size = std::strtoull(f[1].c_str(), nullptr, 10);
+                    p.patched_size = std::strtoull(f[2].c_str(), nullptr, 10), p.plan = f[3];
+                    p.at = std::strtoull(f[4].c_str(), nullptr, 10), p.original = f[5];
+                    current[lower(p.archive)].push_back(p);
+                }
+            }
+            std::vector<PatchLine> done;
+            // 1) archives patched now: kept when the plan wants exactly that, otherwise put back
+            for (auto &[key, lines] : current)
+            {
+                const auto path = archives / lines.front().archive;
+                const auto wanted = plan.find(key);
+                bool same = wanted != plan.end() && wanted->second.size() == lines.size() && lines.front().plan == plan_id;
+                if (same)
+                    for (const auto &l : lines)
+                        same = same && std::any_of(wanted->second.begin(), wanted->second.end(), [&](const PatchLine &w) { return w.at == l.at && w.original == l.original; });
+                const auto file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (file == INVALID_HANDLE_VALUE)
+                {
+                    // can't open it now: keep the record, try again next time (a missing archive is forgotten)
+                    if (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND)
+                        done.insert(done.end(), lines.begin(), lines.end()), ++skipped, why = "an archive was in use";
+                    if (same)
+                        plan.erase(wanted);
+                    continue;
+                }
+                const auto size = file_size(file);
+                if (size != lines.front().patched_size)
+                {
+                    // replaced since (a Steam update or verify): nothing of ours in it any more
+                    CloseHandle(file);
+                    continue;
+                }
+                if (same)
+                {
+                    CloseHandle(file);
+                    done.insert(done.end(), lines.begin(), lines.end());
+                    plan.erase(wanted);
+                    ++kept;
+                    continue;
+                }
+                bool ok = true;
+                for (const auto &l : lines)
+                {
+                    unsigned char record[16];
+                    ok = ok && from_hex(l.original, record) && file_at(file, l.at, record, 16, true);
+                }
+                LARGE_INTEGER end{};
+                end.QuadPart = static_cast<LONGLONG>(lines.front().original_size);
+                ok = ok && SetFilePointerEx(file, end, nullptr, FILE_BEGIN) && SetEndOfFile(file);
+                FlushFileBuffers(file);
+                CloseHandle(file);
+                if (ok)
+                    ++restored;
+                else
+                    done.insert(done.end(), lines.begin(), lines.end()), ++skipped, why = "an archive couldn't be put back";
+            }
+            write_patched(state, done);
+            // 2) archives the plan wants patched that aren't yet
+            for (auto &[key, lines] : plan)
+            {
+                const auto path = archives / lines.front().archive;
+                const auto file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (file == INVALID_HANDLE_VALUE)
+                {
+                    ++skipped, why = "an archive couldn't be opened";
+                    continue;
+                }
+                // as the client saw it: its size, and every record still the original
+                bool ok = file_size(file) == lines.front().original_size;
+                std::vector<std::vector<char>> data;
+                for (const auto &l : lines)
+                {
+                    unsigned char want[16], now[16];
+                    ok = ok && from_hex(l.original, want) && file_at(file, l.at, now, 16, false) && !std::memcmp(want, now, 16);
+                    std::ifstream in(std::filesystem::path(l.file), std::ios::binary);
+                    std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                    ok = ok && bytes.size() == l.length && l.length > 0;
+                    data.push_back(std::move(bytes));
+                }
+                if (!ok)
+                {
+                    CloseHandle(file);
+                    ++skipped, why = "an archive changed since the client looked (connect again to update)";
+                    continue;
+                }
+                // the colored copies at the end, each on a 2 KiB sector
+                unsigned long long end = lines.front().original_size;
+                std::vector<unsigned long long> where;
+                const std::vector<char> zeros(0x800);
+                for (std::size_t i = 0; ok && i < lines.size(); ++i)
+                {
+                    const auto at = (end + 0x7ff) & ~0x7ffull;
+                    ok = (at == end || file_at(file, end, const_cast<char *>(zeros.data()), static_cast<DWORD>(at - end), true)) &&
+                         file_at(file, at, data[i].data(), static_cast<DWORD>(data[i].size()), true);
+                    where.push_back(at);
+                    end = at + data[i].size();
+                }
+                const auto padded = (end + 0x7ff) & ~0x7ffull;
+                ok = ok && (padded == end || file_at(file, end, const_cast<char *>(zeros.data()), static_cast<DWORD>(padded - end), true));
+                FlushFileBuffers(file);
+                if (!ok)
+                {
+                    // nothing points at the new end yet: cut it off again
+                    LARGE_INTEGER cut{};
+                    cut.QuadPart = static_cast<LONGLONG>(lines.front().original_size);
+                    SetFilePointerEx(file, cut, nullptr, FILE_BEGIN), SetEndOfFile(file);
+                    CloseHandle(file);
+                    ++skipped, why = "an archive couldn't be written";
+                    continue;
+                }
+                // recorded before the records change, so a crash in between is put back next time
+                for (auto &l : lines)
+                    l.patched_size = padded;
+                done.insert(done.end(), lines.begin(), lines.end());
+                write_patched(state, done);
+                // each record: where it starts (low 32 bits, bit 32 in the second word's lowest bit), stored whole
+                for (std::size_t i = 0; ok && i < lines.size(); ++i)
+                {
+                    unsigned char record[16];
+                    from_hex(lines[i].original, record);
+                    const auto low = static_cast<std::uint32_t>(where[i]);
+                    std::uint32_t second = 0, length = static_cast<std::uint32_t>(lines[i].length), whole = 0xffffffff;
+                    std::memcpy(&second, record + 4, 4);
+                    second = (second & ~1u) | static_cast<std::uint32_t>((where[i] >> 32) & 1);
+                    std::memcpy(record, &low, 4), std::memcpy(record + 4, &second, 4), std::memcpy(record + 8, &length, 4), std::memcpy(record + 12, &whole, 4);
+                    ok = file_at(file, lines[i].at, record, 16, true);
+                }
+                FlushFileBuffers(file);
+                CloseHandle(file);
+                if (ok)
+                    ++patched;
+                else
+                    ++skipped, why = "an archive's records couldn't be written (it is put back next time)";
+            }
+        }
+        catch (...)
+        {
+            why = "unexpected error";
+        }
+        const auto outcome = std::to_string(patched + kept) + "|" + std::to_string(restored) + "|" + std::to_string(skipped) + "|" + why;
+        SetEnvironmentVariableW(L"CRASHNSTAP_COLORS", widen(outcome).c_str());
     }
     const char *names[]{"DirectInput8Create", "DllCanUnloadNow", "DllGetClassObject",
                         "DllRegisterServer", "DllUnregisterServer", "GetdfDIJoystick"};
@@ -522,7 +787,10 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, void *)
             static wchar_t proxy[32768]{};
             const auto proxy_count = GetModuleFileNameW(module, proxy, std::size(proxy));
             if (proxy_count && proxy_count < std::size(proxy))
-                apply_skin(std::filesystem::path(proxy).parent_path(), std::filesystem::path(host).parent_path());
+            {
+                const auto worn = apply_skin(std::filesystem::path(proxy).parent_path(), std::filesystem::path(host).parent_path());
+                apply_color_patches(std::filesystem::path(proxy).parent_path(), std::filesystem::path(host).parent_path(), worn);
+            }
         }
         // the worker runs after DLL notifications release loader lock
         const auto thread = CreateThread(nullptr, 0, preload, nullptr, 0, nullptr);

@@ -3,6 +3,7 @@
 #include "movement_rules.h"
 #include "game_archive.h"
 #include "skins.h"
+#include "crash_colors.h"
 #include <fstream>
 #include "game_sound.h"
 #include <algorithm>
@@ -588,6 +589,8 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                 ingame::set_countdown_volume(percent);
         if (const auto skin = skins::status(); !skin.empty())
             print_console(skin, false);
+        if (const auto colors = crash_colors::patch_status(); !colors.empty())
+            print_console(colors, false);
         start_sound_job([] { return ingame::startup_sound_search(standalone::state_directory() / "tnt_sound.txt"); });
     }
     if (sound_job.valid() && sound_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
@@ -658,7 +661,7 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                 if (kind == ingame::TrapNitro)
                 {
                     if (session.defer_nitro(index) && !box_markers->nitro_ready())
-                        print_console("Nitro Trap incoming! It strikes in the next level with Nitro crates.", true);
+                        print_console("Nitro Trap incoming! It strikes as soon as Crash is in a level where it can.", true);
                     continue;
                 }
                 if (kind == ingame::TrapMoveLock && !lockable_move())
@@ -720,6 +723,8 @@ void ClientRuntime::update_ownership(ClientTick &tick)
             std::cerr << "Move Lock Trap: " << e.what() << std::endl;
         }
     // waiting Nitro Traps fire one at a time, in the trap rhythm, once the game reports a Nitro can spawn here
+    if (box_markers)
+        box_markers->nitro_wanted(session.ready() && session.nitro_pending());
     if (tick.room_ready && box_markers && session.ready() && session.nitro_pending() && std::chrono::steady_clock::now() >= next_trap)
         try
         {

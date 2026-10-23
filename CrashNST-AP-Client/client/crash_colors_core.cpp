@@ -15,7 +15,9 @@ namespace crash_colors
         // V1.2.43 research (the game's own textures): each .igz here is a 0x9c8-byte header, then the image and its
         // smaller copies (mipmaps) from 1024x1024 down to 4x4: BC1 (8 bytes a block) for the fur and clothes, BC3 (16
         // bytes, the color half after 8 bytes of transparency) for the hair
-        constexpr std::size_t header_size = 0x9c8;
+        // the .igz header before the image: 0x9c8 bytes for CrashFur_C and the like, a few more for the variants with
+        // longer names (CrashCloth_Fruit_C: 0x9d0). The image (all its mipmaps) ends the file; its size is at header - 0x78
+        constexpr std::size_t header_size = 0x9c8, header_most = 0xa40;
         constexpr std::size_t bc1_bytes = 699048, bc3_bytes = 1398096;
 
         struct Hsv
@@ -157,12 +159,20 @@ namespace crash_colors
             }
             return out;
         }
-        std::vector<unsigned char> checked(const std::vector<unsigned char> &igz, std::size_t data_bytes, const char *what)
+        // a 1024x1024 texture holding `data_bytes` of image: where its image starts, or 0
+        std::size_t image_start(const std::vector<unsigned char> &igz, std::size_t data_bytes)
         {
+            if (igz.size() < header_size + data_bytes || igz.size() > header_most + data_bytes || std::memcmp(igz.data(), "\x01ZGI", 4) != 0)
+                return 0;
+            const auto header = igz.size() - data_bytes;
             std::uint16_t w = 0, h = 0;
-            if (igz.size() == header_size + data_bytes)
-                std::memcpy(&w, igz.data() + 0x950, 2), std::memcpy(&h, igz.data() + 0x952, 2);
-            if (igz.size() != header_size + data_bytes || std::memcmp(igz.data(), "\x01ZGI", 4) != 0 || w != 1024 || h != 1024)
+            std::memcpy(&w, igz.data() + header - 0x78, 2), std::memcpy(&h, igz.data() + header - 0x76, 2);
+            return w == 1024 && h == 1024 ? header : 0;
+        }
+        std::vector<unsigned char> checked(const std::vector<unsigned char> &igz, std::size_t data_bytes, const char *what, std::size_t &header)
+        {
+            header = image_start(igz, data_bytes);
+            if (!header)
                 throw std::runtime_error(std::string(what) + " isn't the game's own texture (another game version, or a skin mod's)");
             return igz;
         }
@@ -269,7 +279,8 @@ namespace crash_colors
 
     std::vector<unsigned char> recolor_fur(const std::vector<unsigned char> &igz, const std::optional<Rgb> &fur, const std::optional<Rgb> &chest)
     {
-        auto out = checked(igz, bc1_bytes, "CrashFur_C");
+        std::size_t header = 0;
+        auto out = checked(igz, bc1_bytes, "CrashFur_C", header);
         const auto fur_t = fur ? std::optional<Target>(target(fur_reference, *fur)) : std::nullopt;
         const auto chest_t = chest ? std::optional<Target>(target(chest_reference, *chest)) : std::nullopt;
         for (const auto &[at, per_row] : levels(8))
@@ -279,7 +290,7 @@ namespace crash_colors
             // the jaw's edge and the lips around it (V1.2.45: the blue mod left the lips and the jaw's pinkish rim as
             // they were, so they stayed reddish by Crash's mouth): their colors are paler than the fur's strong orange
             const auto near_chest = block_map(chest_block_runs, std::size(chest_block_runs), per_row, 3);
-            recolor_blocks(out.data() + header_size + at, per_row * per_row, 8, 0, [&](std::size_t k, const double *, const Hsv &c) -> const Target * {
+            recolor_blocks(out.data() + header + at, per_row * per_row, 8, 0, [&](std::size_t k, const double *, const Hsv &c) -> const Target * {
                 const bool warm = (c.h >= 0.9 || c.h <= 0.16) && c.s >= 0.2;
                 if (!warm)
                     return nullptr;
@@ -304,12 +315,13 @@ namespace crash_colors
     }
     std::vector<unsigned char> recolor_cloth(const std::vector<unsigned char> &igz, const std::optional<Rgb> &pants, const std::optional<Rgb> &shoes)
     {
-        auto out = checked(igz, bc1_bytes, "CrashCloth_C");
+        std::size_t header = 0;
+        auto out = checked(igz, bc1_bytes, "CrashCloth_C", header);
         const auto pants_t = pants ? std::optional<Target>(target(pants_reference, *pants)) : std::nullopt;
         const auto shoes_t = shoes ? std::optional<Target>(target(shoes_reference, *shoes)) : std::nullopt;
         for (const auto &[at, per_row] : levels(8))
         {
-            auto *data = out.data() + header_size + at;
+            auto *data = out.data() + header + at;
             const auto blocks = per_row * per_row;
             // the gloves' dark brown leather: its blocks keep their reds out of the shoes' color
             std::vector<bool> leather(blocks);
@@ -327,7 +339,9 @@ namespace crash_colors
             recolor_blocks(data, blocks, 8, 0, [&](std::size_t k, const double *, const Hsv &c) -> const Target * {
                 if (pants_t && c.h >= 0.5 && c.h <= 0.75 && c.s >= 0.3)
                     return &*pants_t;
-                if (shoes_t && !leather[k] && (c.h >= 0.75 || c.h <= 0.03) && c.s >= 0.15)
+                // the shoes' dark purplish red, not the bright purple juice splashed on CrashCloth_Fruit_C
+                const bool juice = c.h >= 0.75 && c.h < 0.88 && c.v > 0.45 && c.s > 0.3;
+                if (shoes_t && !leather[k] && !juice && (c.h >= 0.75 || c.h <= 0.03) && c.s >= 0.15)
                     return &*shoes_t;
                 return nullptr;
             });
@@ -336,15 +350,19 @@ namespace crash_colors
     }
     std::vector<unsigned char> recolor_hair(const std::vector<unsigned char> &igz, const std::optional<Rgb> &hair)
     {
-        auto out = checked(igz, bc3_bytes, "CrashHair_C");
+        // CrashHair_C is BC3 (16-byte blocks, their colors at +8); CrashHair_Fruit_C is BC1 (8-byte blocks)
+        const bool bc1 = image_start(igz, bc1_bytes) != 0;
+        std::size_t header = 0;
+        auto out = checked(igz, bc1 ? bc1_bytes : bc3_bytes, "CrashHair_C", header);
         if (!hair)
             return out;
         const auto hair_t = target(hair_reference, *hair);
-        for (const auto &[at, per_row] : levels(16))
+        const std::size_t block_bytes = bc1 ? 8 : 16, color_at = bc1 ? 0 : 8;
+        for (const auto &[at, per_row] : levels(block_bytes))
         {
             // the dark strip along the top (the eyebrows) stays
             const auto row = per_row, top = static_cast<std::size_t>(per_row * 0.19);
-            recolor_blocks(out.data() + header_size + at, row * row, 16, 8, [&](std::size_t k, const double *, const Hsv &c) -> const Target * {
+            recolor_blocks(out.data() + header + at, row * row, block_bytes, color_at, [&](std::size_t k, const double *, const Hsv &c) -> const Target * {
                 if (k / row < top)
                     return nullptr;
                 return (c.h >= 0.9 || c.h <= 0.12) && c.s >= 0.2 ? &hair_t : nullptr;

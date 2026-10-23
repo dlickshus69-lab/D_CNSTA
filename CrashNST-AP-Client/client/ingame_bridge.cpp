@@ -546,6 +546,12 @@ bool BoxMarkers::nitro_drop_ready()
     unlock();
     return ready;
 }
+void BoxMarkers::nitro_wanted(bool wanted)
+{
+    lock();
+    shared_->nitro_wanted = wanted ? 1u : 0u;
+    unlock();
+}
 bool BoxMarkers::player_ready()
 {
     lock();

@@ -2436,6 +2436,19 @@ namespace ingame
             nitro_find = pick;
             return out.str();
         }
+        // the Nitro's template only, in the background (about 2 seconds of reading memory), once per level
+        void nitro_template_search(const std::string &level)
+        {
+            if (nitro_memory_scan_running.exchange(true))
+                return;
+            std::thread([level]
+                        {
+                const auto start = GetTickCount64();
+                const auto report = find_nitro_template(level);
+                std::cout << report << "Nitro find: done in " << (GetTickCount64() - start) << " ms\n" << std::flush;
+                nitro_memory_scan_running = false; })
+                .detach();
+        }
         void nitro_memory_scan(const std::string &level)
         {
             if (nitro_memory_scan_running.exchange(true))
@@ -3138,6 +3151,9 @@ namespace ingame
             else if (!ahead_spot(spot))
                 return why = "no spot ahead yet: Crash needs to be running on the ground", false;
             const auto level = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
+            // a level without Nitro spawners: an ordinary crate's spawner makes it from the Nitro's template (V1.2.52)
+            if (!any && !nitro_spawner_near(spot, away).component)
+                any = true;
             Address nitro_template = 0;
             if (any)
             {
@@ -4030,8 +4046,14 @@ namespace ingame
                 std::array<float, 3> crash{}, spot{};
                 const bool can = !level.empty() && !nitro_trap_exempt() && state.player_ready && !nitro_spawn_state.component &&
                                  nitro_drop.stage == NitroDropTrap::Idle && trap_actor_position(crash);
-                state.nitro_ready = can && ahead_spot(spot) && nitro_spawner_near(spot).component;
-                state.nitro_drop_ready = can && nitro_spawner_near(crash).component;
+                // without Nitro crates: the Nitro's template (looked for in memory once per level while a Nitro Trap
+                // waits) and an ordinary crate's spawner to make it with
+                const bool own = can && nitro_spawner_near(crash).component;
+                if (can && !own && state.nitro_wanted && !nitro_template_searched(level))
+                    nitro_template_search(level);
+                const bool borrowed = can && !own && level_nitro_template(level) && crate_spawner_near(crash).component;
+                state.nitro_ready = can && ahead_spot(spot) && (nitro_spawner_near(spot).component || borrowed);
+                state.nitro_drop_ready = own || borrowed;
             }
             if (state.nitro_spawn_request == state.nitro_spawn_ack)
             {

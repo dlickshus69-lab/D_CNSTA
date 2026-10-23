@@ -52,6 +52,8 @@ public:
     void request_nitro_spawn();
     bool nitro_ready();
     bool nitro_drop_ready();
+    // a Nitro Trap is waiting (lets the game thread get a Nitro ready in levels without Nitro crates)
+    void nitro_wanted(bool wanted);
     bool player_ready();
     void pause_traps(bool paused, std::uint64_t elapsed_ms);
     void c3_buttons(bool ready, const std::set<std::string> &allowed = {});

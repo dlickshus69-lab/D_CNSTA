@@ -150,6 +150,9 @@ namespace ingame
         // what the Nitro Trap does after its countdown: 0 a coin flip, 1 falls onto Crash, 2 appears ahead of him, 3 falls,
         // made by an ordinary crate's spawner (/nitro_drop any, research)
         unsigned nitro_drop_kind = 0;
+        // set by the client: a Nitro Trap is waiting (V1.2.52: in a level without Nitro crates the game thread then
+        // looks for the Nitro's template in memory, so an ordinary crate's spawner can make one)
+        unsigned nitro_wanted = 0;
         // set by the game thread: a falling Nitro can start now (a level with a Nitro spawner, not a gimmick level,
         // Crash can move, none running)
         unsigned nitro_drop_ready = 0;

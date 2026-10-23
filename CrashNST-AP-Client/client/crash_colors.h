@@ -21,4 +21,7 @@ namespace crash_colors
     // the YAML's colors, once per seed (a later /colors stays until another seed). When the YAML also picks a skin mod,
     // the skin stays and the colors wait. Console lines
     std::vector<std::string> apply_seed_choice(const std::string &seed, const Choice &yaml, const std::string &yaml_skin);
+    // what dinput8.dll did this game start with the levels holding their own copy of Crash's textures; a console
+    // line, or empty when there's nothing to say
+    std::string patch_status();
 }

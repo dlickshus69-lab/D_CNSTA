@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -61,4 +62,20 @@ namespace ingame
     // with a reason when it can't.
     void rewrite_archive(const std::filesystem::path &source, const std::filesystem::path &target,
                          const std::vector<std::pair<std::string, std::vector<unsigned char>>> &replacements);
+    // one member's record in an archive's table: where the 16 bytes sit in the file and what they hold now
+    struct MemberRecord
+    {
+        std::string name;
+        std::uint64_t at = 0;
+        std::array<unsigned char, 16> record{};
+    };
+    struct ArchiveCopies
+    {
+        std::filesystem::path pak;
+        std::uint64_t size = 0;
+        std::vector<MemberRecord> members;
+    };
+    // every archive in the game's archives folder holding a member named one of `names` (exactly, any case), with
+    // those members' records (V1.2.52: some levels carry their own copies of Crash's textures)
+    std::vector<ArchiveCopies> find_archive_copies(const std::vector<std::string> &names);
 }

@@ -876,6 +876,36 @@ namespace ingame
             throw std::runtime_error(name + " isn't in " + pak.filename().string());
         }
     }
+    std::vector<ArchiveCopies> find_archive_copies(const std::vector<std::string> &names)
+    {
+        std::vector<std::string> wanted;
+        for (const auto &n : names)
+            wanted.push_back(lower(n));
+        std::vector<ArchiveCopies> result;
+        for (const auto &path : archives())
+            try
+            {
+                Archive a(path);
+                ArchiveCopies copies{path, a.size, {}};
+                for (unsigned i = 0; i < a.count; ++i)
+                {
+                    const auto name = lower(a.name(i));
+                    if (std::find(wanted.begin(), wanted.end(), name) == wanted.end())
+                        continue;
+                    MemberRecord m;
+                    m.name = name, m.at = 56ull + a.count * 4ull + i * 16ull;
+                    const auto bytes = a.read(m.at, 16);
+                    std::copy(bytes.begin(), bytes.end(), m.record.begin());
+                    copies.members.push_back(std::move(m));
+                }
+                if (!copies.members.empty())
+                    result.push_back(std::move(copies));
+            }
+            catch (const std::exception &)
+            {
+            }
+        return result;
+    }
     std::vector<unsigned char> read_archive_member(const std::filesystem::path &pak, const std::string &name)
     {
         Archive archive(pak);

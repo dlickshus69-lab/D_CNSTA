@@ -40,17 +40,23 @@ namespace crash_colors
     using Colors = std::array<std::optional<Rgb>, PartCount>;
 
     // the game's textures as stored in Crash.pak (whole .igz files, 1024x1024): CrashFur_C (BC1), CrashCloth_C (BC1),
-    // CrashHair_C (BC3). Each returns the recolored file, the same size, or throws when the file isn't laid out as
+    // CrashHair_C (BC3), and their splashed variants (CrashFur_Fruit_C ..., CrashHair_Fruit_C is BC1). Each returns the recolored file, the same size, or throws when the file isn't laid out as
     // expected (another game version or a skin mod's texture)
     std::vector<unsigned char> recolor_fur(const std::vector<unsigned char> &igz, const std::optional<Rgb> &fur, const std::optional<Rgb> &chest);
     std::vector<unsigned char> recolor_cloth(const std::vector<unsigned char> &igz, const std::optional<Rgb> &pants, const std::optional<Rgb> &shoes);
     std::vector<unsigned char> recolor_hair(const std::vector<unsigned char> &igz, const std::optional<Rgb> &hair);
 
-    // changes whenever the recolor or a color changes (V1.2.44: highlights ease off; V1.2.45: softer white; V1.2.48: the jaw's rim; V1.2.49: the lips), so the
+    // changes whenever the recolor or a color changes (V1.2.44: highlights ease off; V1.2.45: softer white; V1.2.48: the jaw's rim; V1.2.49: the lips; V1.2.52: the splashed variants too), so the
     // client makes each colored Crash again with the new one
-    inline constexpr const char *recolor_version = "5";
+    inline constexpr const char *recolor_version = "6";
     // the archive members holding those textures
     inline constexpr const char *fur_texture = "textures/ColorMap,textures@!actors!Playable!Crash!CrashFur_C`tga,111.igz";
     inline constexpr const char *cloth_texture = "textures/ColorMap,textures@!actors!Playable!Crash!CrashCloth_C`tga,111.igz";
     inline constexpr const char *hair_texture = "textures/ColorMap,textures@!actors!Playable!Crash!CrashHair_C`tga,111.igz";
+    // the same textures with fruit juice or ash splashed on them (CrashFur_Fruit_C ...), used by a few levels and moments;
+    // same layout, so they take the same colors
+    inline constexpr const char *fur_fruit_texture = "textures/ColorMap,textures@!actors!Playable!Crash!CrashFur_Fruit_C`tga,111.igz";
+    inline constexpr const char *fur_monkey_texture = "textures/ColorMap,textures@!actors!Playable!Crash!CrashFur_Monkey_C`tga,111.igz";
+    inline constexpr const char *cloth_fruit_texture = "textures/ColorMap,textures@!actors!Playable!Crash!CrashCloth_Fruit_C`tga,111.igz";
+    inline constexpr const char *hair_fruit_texture = "textures/ColorMap,textures@!actors!Playable!Crash!CrashHair_Fruit_C`tga,111.igz";
 }
