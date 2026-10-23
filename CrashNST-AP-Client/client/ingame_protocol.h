@@ -147,7 +147,8 @@ namespace ingame
         unsigned nitro_spawn_request = 0, nitro_spawn_ack = 0;
         // Nitro Trap, falling: "NITRO INCOMING 3, 2, 1", then a Nitro falls onto where Crash stands
         unsigned nitro_drop_request = 0, nitro_drop_ack = 0;
-        // what the Nitro Trap does after its countdown: 0 a coin flip, 1 falls onto Crash, 2 appears ahead of him
+        // what the Nitro Trap does after its countdown: 0 a coin flip, 1 falls onto Crash, 2 appears ahead of him, 3 falls,
+        // made by an ordinary crate's spawner (/nitro_drop any, research)
         unsigned nitro_drop_kind = 0;
         // set by the game thread: a falling Nitro can start now (a level with a Nitro spawner, not a gimmick level,
         // Crash can move, none running)

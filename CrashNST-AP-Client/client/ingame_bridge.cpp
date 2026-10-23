@@ -583,7 +583,7 @@ void BoxMarkers::ice_test(unsigned mode)
 void BoxMarkers::request_nitro_drop(unsigned kind)
 {
     lock();
-    shared_->nitro_drop_kind = kind <= 2 ? kind : 0;
+    shared_->nitro_drop_kind = kind <= 3 ? kind : 0;
     ++shared_->nitro_drop_request;
     unlock();
 }

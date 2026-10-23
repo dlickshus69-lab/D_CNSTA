@@ -2294,9 +2294,148 @@ namespace ingame
             return name.substr(0, end);
         }
         std::atomic_bool nitro_memory_scan_running{false};
-        // every distinct name holding "Nitro" or "nitro" in the game's data memory (not the .exe or the mod's own
-        // code), with how often it is there. Reads go through ReadProcessMemory a block at a time, so memory freed
-        // meanwhile only ends that block's read.
+        // every block of the game's data memory (not the .exe or the mod's own code), read through ReadProcessMemory a
+        // block at a time (so memory freed meanwhile only ends that block's read). Blocks overlap by 256 bytes.
+        template <class F> std::uint64_t for_each_memory_block(F &&f)
+        {
+            std::uint64_t scanned = 0;
+            std::vector<char> block(4 << 20);
+            for (Address at = 0x10000; at < 0x7ffffffe0000ULL;)
+            {
+                MEMORY_BASIC_INFORMATION info{};
+                if (!VirtualQuery(reinterpret_cast<void *>(at), &info, sizeof(info)))
+                    break;
+                const auto region = reinterpret_cast<Address>(info.BaseAddress), end = region + info.RegionSize;
+                if (info.State == MEM_COMMIT && info.Type != MEM_IMAGE && !(info.Protect & (PAGE_GUARD | PAGE_NOACCESS | PAGE_NOCACHE | PAGE_WRITECOMBINE)) &&
+                    (info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
+                    for (Address chunk = region; chunk < end; chunk += block.size() - 256)
+                    {
+                        const auto want = static_cast<std::size_t>(std::min<Address>(block.size(), end - chunk));
+                        SIZE_T got = 0;
+                        if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(chunk), block.data(), want, &got) || !got)
+                            break;
+                        scanned += got;
+                        f(chunk, std::string_view(block.data(), got));
+                        if (want < block.size())
+                            break;
+                    }
+                at = end > at ? end : at + 0x1000;
+            }
+            return scanned;
+        }
+        // every distinct name holding one of `needles`, with how often it is there. The client's own lists (its
+        // location tables hold every crate's name in quotes) are left out.
+        std::map<std::string, unsigned> memory_names(const std::vector<std::string> &needles, std::uint64_t &scanned)
+        {
+            std::map<std::string, unsigned> found;
+            scanned = for_each_memory_block([&](Address, std::string_view view)
+                                            {
+                for (const auto &needle : needles)
+                    for (auto hit = view.find(needle); hit != view.npos; hit = view.find(needle, hit + needle.size()))
+                    {
+                        auto from = hit, to = hit + needle.size();
+                        const auto plain = [](char c) { return c > 32 && c < 127; };
+                        while (from > 0 && hit - from < 160 && plain(view[from - 1]))
+                            --from;
+                        while (to < view.size() && to - hit < 160 && plain(view[to]))
+                            ++to;
+                        const auto text = view.substr(from, to - from);
+                        if (text.find_first_of("\"{}") != text.npos)
+                            continue;
+                        if (found.size() < 4000 || found.count(std::string(text)))
+                            ++found[std::string(text)];
+                    } });
+            return found;
+        }
+        // where `text` sits in memory as a whole string (a zero before and after it)
+        std::vector<Address> memory_strings(const std::string &text, unsigned most = 64)
+        {
+            std::vector<Address> result;
+            for_each_memory_block([&](Address base_at, std::string_view view)
+                                  {
+                for (auto hit = view.find(text); hit != view.npos && result.size() < most; hit = view.find(text, hit + 1))
+                    if (hit > 0 && view[hit - 1] == 0 && hit + text.size() < view.size() && view[hit + text.size()] == 0 &&
+                        std::find(result.begin(), result.end(), base_at + hit) == result.end())
+                        result.push_back(base_at + hit); });
+            return result;
+        }
+        // every 8-byte-aligned place holding one of `values`
+        std::vector<std::pair<Address, Address>> memory_pointers(const std::set<Address> &values, unsigned most = 256)
+        {
+            std::vector<std::pair<Address, Address>> result; // where, which value
+            if (values.empty())
+                return result;
+            const Address lo = *values.begin(), hi = *values.rbegin();
+            for_each_memory_block([&](Address base_at, std::string_view view)
+                                  {
+                const auto first = (8 - base_at % 8) % 8;
+                for (std::size_t k = first; k + 8 <= view.size() && result.size() < most; k += 8)
+                {
+                    Address v;
+                    std::memcpy(&v, view.data() + k, 8);
+                    if (v < lo || v > hi)
+                        continue;
+                    if (values.count(v) && std::find_if(result.begin(), result.end(), [&](const auto &r) { return r.first == base_at + k; }) == result.end())
+                        result.push_back({base_at + k, v});
+                } });
+            return result;
+        }
+        // V1.2.50: the Nitro's description and template, found in memory. A Nitro spawner's EntityToSpawn is a handle to
+        // a template entity (+0x141d490) whose description (+0x40, type +0x141d3f0) is named
+        // "Levels\Crash1\crates\Crash_Crate_Nitro" (+0x48). Every level's archive holds the Nitro's files, so the
+        // description (and maybe a template) can be loaded where no Nitro spawner is.
+        struct NitroTemplateFind
+        {
+            std::string level;
+            Address handle = 0, entity = 0, data = 0;
+            bool done = false;
+        };
+        std::mutex nitro_find_mutex;
+        NitroTemplateFind nitro_find;
+        bool nitro_template_valid(Address handle, Address entity)
+        {
+            const auto data = value<Address>(entity + 0x40);
+            return handle && entity && resolve(handle) == entity && typed(entity, 0x141d490) && typed(data, 0x141d3f0) &&
+                   string(value<Address>(data + 0x48)).find("Crash_Crate_Nitro") != std::string::npos;
+        }
+        std::string find_nitro_template(const std::string &level)
+        {
+            std::ostringstream out;
+            const auto names = memory_strings("Levels\\Crash1\\crates\\Crash_Crate_Nitro");
+            std::set<Address> name_at(names.begin(), names.end()), datas;
+            for (const auto &[where, v] : memory_pointers(name_at))
+                if (typed(where - 0x48, 0x141d3f0))
+                    datas.insert(where - 0x48);
+            out << "Nitro find (" << (level.empty() ? "no level" : "level " + level) << "): " << names.size() << " copies of its name, "
+                << datas.size() << " Nitro descriptions\n";
+            std::set<Address> users;
+            for (const auto &[where, v] : memory_pointers(datas))
+            {
+                const auto e = where - 0x40, type = value<Address>(e);
+                if (type >= base() && type < module_end())
+                {
+                    users.insert(e);
+                    out << "Nitro find:   used by 0x" << std::hex << e << std::dec << " type " << hex(static_cast<unsigned>(type - base())) << " \""
+                        << string(value<Address>(e + 0x80), 64) << "\"" << (event_owner(e) ? " (live in the level)" : "") << "\n";
+                }
+            }
+            NitroTemplateFind pick;
+            pick.level = level, pick.done = true;
+            for (const auto &[where, e] : memory_pointers(users))
+            {
+                const auto h = where - 40;
+                if (resolve(h) != e)
+                    continue;
+                out << "Nitro find:   handle 0x" << std::hex << h << " -> 0x" << e << std::dec << "\n";
+                // a template: not a live crate in the level (spawned Nitros are named ..._Spawned_Entity and live)
+                if (!pick.handle && nitro_template_valid(h, e) && !event_owner(e))
+                    pick.handle = h, pick.entity = e, pick.data = value<Address>(e + 0x40);
+            }
+            out << "Nitro find: " << (pick.handle ? "a Nitro template is loaded here; /nitro_drop any can try it" : "no Nitro template loaded here") << "\n";
+            std::lock_guard lock(nitro_find_mutex);
+            nitro_find = pick;
+            return out.str();
+        }
         void nitro_memory_scan(const std::string &level)
         {
             if (nitro_memory_scan_running.exchange(true))
@@ -2304,53 +2443,27 @@ namespace ingame
             std::thread([level]
                         {
                 const auto start = GetTickCount64();
-                std::map<std::string, unsigned> found;
-                std::uint64_t scanned = 0;
-                std::vector<char> block(4 << 20);
-                const std::string needle = "itro";
-                for (Address at = 0x10000; at < 0x7ffffffe0000ULL;)
-                {
-                    MEMORY_BASIC_INFORMATION info{};
-                    if (!VirtualQuery(reinterpret_cast<void *>(at), &info, sizeof(info)))
-                        break;
-                    const auto region = reinterpret_cast<Address>(info.BaseAddress), end = region + info.RegionSize;
-                    if (info.State == MEM_COMMIT && info.Type != MEM_IMAGE && !(info.Protect & (PAGE_GUARD | PAGE_NOACCESS | PAGE_NOCACHE | PAGE_WRITECOMBINE)) &&
-                        (info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
-                        for (Address chunk = region; chunk < end; chunk += block.size() - 256)
-                        {
-                            const auto want = static_cast<std::size_t>(std::min<Address>(block.size(), end - chunk));
-                            SIZE_T got = 0;
-                            if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(chunk), block.data(), want, &got) || !got)
-                                break;
-                            scanned += got;
-                            const std::string_view view(block.data(), got);
-                            for (auto hit = view.find(needle); hit != view.npos; hit = view.find(needle, hit + 4))
-                            {
-                                if (!hit || (view[hit - 1] != 'N' && view[hit - 1] != 'n'))
-                                    continue;
-                                auto from = hit - 1, to = hit + 4;
-                                const auto plain = [](char c) { return c > 32 && c < 127; };
-                                while (from > 0 && hit - from < 120 && plain(view[from - 1]))
-                                    --from;
-                                while (to < view.size() && to - hit < 120 && plain(view[to]))
-                                    ++to;
-                                if (found.size() < 4000 || found.count(std::string(view.substr(from, to - from))))
-                                    ++found[std::string(view.substr(from, to - from))];
-                            }
-                            if (want < block.size())
-                                break;
-                        }
-                    at = end > at ? end : at + 0x1000;
-                }
                 std::ostringstream out;
-                out << "Nitro memory: " << found.size() << " different names with \"Nitro\" in " << scanned / (1024 * 1024) << " MB of game memory ("
-                    << (level.empty() ? "no level" : "level " + level) << ", " << (GetTickCount64() - start) << " ms)\n";
-                unsigned shown = 0;
-                for (const auto &[text, count] : found)
-                    if (shown++ < 150)
-                        out << "Nitro memory:   " << text << (count > 1 ? " x" + std::to_string(count) : std::string()) << "\n";
-                if (found.size() > 150)
-                    out << "Nitro memory:   ... and " << found.size() - 150 << " more\n";
+                const auto report = [&](const char *label, const std::map<std::string, unsigned> &found, std::uint64_t scanned, unsigned most)
+                {
+                    out << label << ": " << found.size() << " different names in " << scanned / (1024 * 1024) << " MB of game memory ("
+                        << (level.empty() ? "no level" : "level " + level) << ")\n";
+                    unsigned shown = 0;
+                    for (const auto &[text, count] : found)
+                        if (shown++ < most)
+                            out << label << ":   " << text << (count > 1 ? " x" + std::to_string(count) : std::string()) << "\n";
+                    if (found.size() > most)
+                        out << label << ":   ... and " << found.size() - most << " more\n";
+                };
+                std::uint64_t scanned = 0;
+                const auto nitro = memory_names({"Nitro", "nitro", "NITRO"}, scanned);
+                report("Nitro memory", nitro, scanned, 200);
+                // Crash's own textures: which copies of his fur, clothes and hair are loaded (Fumbling in the Dark showed
+                // some of his colors and not others)
+                const auto crash = memory_names({"CrashFur", "CrashCloth", "CrashHair", "crashfur", "crashcloth", "crashhair"}, scanned);
+                report("Crash textures in memory", crash, scanned, 120);
+                out << find_nitro_template(level);
+                out << "Nitro memory: done in " << (GetTickCount64() - start) << " ms\n";
                 std::cout << out.str() << std::flush;
                 nitro_memory_scan_running = false; })
                 .detach();
@@ -2406,7 +2519,13 @@ namespace ingame
                 const auto who = "Spawner " + kind;
                 dump_fields(c, value<Address>(c + 56), who);
                 if (const auto data = value<Address>(c + 16); data)
+                {
                     dump_fields(data, value<Address>(data + 32), who + " data");
+                    // the template it makes its entity from
+                    if (field_offset(value<Address>(data + 32), "EntityToSpawn", 8) == 0x48)
+                        if (const auto t = resolve(value<Address>(data + 0x48)))
+                            dump_pointees(t, who + " template", 0x100);
+                }
                 dump_pointees(owner, who + " owner");
                 if (const auto made = resolve(value<Address>(c + 232)))
                 {
@@ -2911,6 +3030,7 @@ namespace ingame
         {
             Address component = 0, owner = 0, old_handle = 0;
             std::vector<std::pair<Address, std::array<float, 3>>> restore; // spawner position copies
+            std::vector<std::pair<Address, Address>> words;                 // what it makes (any spawner), to put back
             std::uint64_t started = 0;
             std::string level, name;
         } nitro_spawn_state;
@@ -2937,6 +3057,8 @@ namespace ingame
         void finish_nitro_spawn(const char *how)
         {
             auto &s = nitro_spawn_state;
+            for (const auto &[at, original] : s.words)
+                write(at, original);
             for (const auto &[at, original] : s.restore)
                 write(at, original);
             write(s.component + 232, s.old_handle); // the spawner keeps its own crate
@@ -2944,8 +3066,65 @@ namespace ingame
             s = {};
         }
         void nitro_spawn_followup();
-        // starts a spawn (ahead of Crash, or at `forced`); false with a reason when it cannot right now
-        bool nitro_spawn(std::string &why, const std::array<float, 3> *forced = nullptr, float away = 0)
+        // V1.2.50 test (/nitro_drop any): the Nitro's template handle in this level, from one of its Nitro spawners or
+        // else from the memory search (/nitro_probe), or 0
+        Address level_nitro_template(const std::string &level)
+        {
+            for (const auto owner : event_owners())
+            {
+                if (kind_of(string(value<Address>(owner + 128))) != "Crate_Nitro")
+                    continue;
+                for (const auto c : list(value<Address>(owner + 24), 64))
+                {
+                    if (!typed(c, 0x13bbbd0) || string(value<Address>(value<Address>(c + 56) + 16)) != "Scripts.Graph.common_Spawner_Template")
+                        continue;
+                    const auto data = value<Address>(c + 16);
+                    if (field_offset(value<Address>(data + 32), "EntityToSpawn", 8) != 0x48)
+                        continue;
+                    const auto h = value<Address>(data + 0x48);
+                    if (nitro_template_valid(h, resolve(h)))
+                        return h;
+                }
+            }
+            std::lock_guard lock(nitro_find_mutex);
+            return nitro_find.level == level && nitro_template_valid(nitro_find.handle, nitro_find.entity) ? nitro_find.handle : 0;
+        }
+        bool nitro_template_searched(const std::string &level)
+        {
+            std::lock_guard lock(nitro_find_mutex);
+            return nitro_find.done && nitro_find.level == level;
+        }
+        // the ready spawner of an ordinary crate (not a Nitro, TNT, checkpoint, switch or time trial outline) closest
+        // to the spot, at least `away` from it when there is one
+        NitroSpawner crate_spawner_near(const std::array<float, 3> &to, float away = 0)
+        {
+            NitroSpawner best, distant;
+            for (const auto owner : event_owners())
+            {
+                const auto name = string(value<Address>(owner + 128));
+                if (name.rfind("Crate_", 0) != 0)
+                    continue;
+                bool skip = false;
+                for (const char *word : {"Nitro", "TNT", "Checkpoint", "Switch", "Outline", "AwarenessHelper", "Bonus"})
+                    skip = skip || name.find(word) != std::string::npos;
+                std::array<float, 3> at{};
+                if (skip || !read(owner + 32, at))
+                    continue;
+                for (const auto c : list(value<Address>(owner + 24), 64))
+                {
+                    const auto m = spawner_method(c, owner, true);
+                    const float d = std::hypot(at[0] - to[0], at[1] - to[1]);
+                    if (m && (!best.component || d < best.distance))
+                        best = {c, owner, m, d, name};
+                    if (m && d >= away && (!distant.component || d < distant.distance))
+                        distant = {c, owner, m, d, name};
+                }
+            }
+            return away > 0 && distant.component ? distant : best;
+        }
+        // starts a spawn (ahead of Crash, or at `forced`); false with a reason when it cannot right now. With `any`, an
+        // ordinary crate's spawner makes the Nitro from the Nitro's template (research: a Nitro in levels without one)
+        bool nitro_spawn(std::string &why, const std::array<float, 3> *forced = nullptr, float away = 0, bool any = false)
         {
             if (nitro_spawn_state.component)
                 return why = "one is still spawning", false;
@@ -2958,12 +3137,33 @@ namespace ingame
                 spot = *forced;
             else if (!ahead_spot(spot))
                 return why = "no spot ahead yet: Crash needs to be running on the ground", false;
-            const auto spawner = nitro_spawner_near(spot, away);
+            const auto level = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
+            Address nitro_template = 0;
+            if (any)
+            {
+                nitro_template = level_nitro_template(level);
+                if (!nitro_template)
+                    return why = nitro_template_searched(level) ? "no Nitro template loaded in this level" : "still looking for the Nitro in memory", false;
+            }
+            const auto spawner = any ? crate_spawner_near(spot, away) : nitro_spawner_near(spot, away);
             if (!spawner.component)
-                return why = "no Nitro crates in this level", false;
+                return why = any ? "no ordinary crate spawner to borrow here" : "no Nitro crates in this level", false;
+            std::vector<std::pair<Address, Address>> words;
+            if (any)
+            {
+                // the borrowed spawner makes the Nitro: its override, its own copy and its data's EntityToSpawn all point
+                // at the Nitro's template until it is made
+                const auto meta = value<Address>(spawner.component + 56), data = value<Address>(spawner.component + 16);
+                if (field_offset(meta, "OverrideEntityToSpawn", 8) != 0x78 || field_offset(meta, "spawnEntity", 8) != 0x50 ||
+                    field_offset(value<Address>(data + 32), "EntityToSpawn", 8) != 0x48)
+                    return why = "the borrowed spawner's settings differ", false;
+                for (const auto at : {spawner.component + 0x78, spawner.component + 0x50, data + 0x48})
+                    words.push_back({at, value<Address>(at)});
+                for (const auto &w : words)
+                    write(w.first, nitro_template);
+            }
             auto &s = nitro_spawn_state;
-            s = {spawner.component, spawner.owner, value<Address>(spawner.component + 232), {}, GetTickCount64(),
-                 level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))), spawner.name};
+            s = {spawner.component, spawner.owner, value<Address>(spawner.component + 232), {}, std::move(words), GetTickCount64(), level, spawner.name};
             std::array<float, 3> home{};
             read(spawner.owner + 32, home);
             for (const auto at : {spawner.owner + 32, value<Address>(spawner.owner + 16) + 0xc0})
@@ -2975,7 +3175,7 @@ namespace ingame
             write(spawner.component + 232, Address{0}); // its own crate is set aside, not destroyed
             reinterpret_cast<void (*)(Address, Address, unsigned, Address)>(base() + 0xc988c0)(spawner.method, spawner.component, 0, 0);
             std::cout << "Nitro spawn: " << spawner.name << "'s spawner (" << static_cast<int>(spawner.distance)
-                      << " from the spot) spawns at " << triple(spot) << ", " << static_cast<int>(std::hypot(spot[0] - crash[0], spot[1] - crash[1]))
+                      << " from the spot" << (any ? ", making a Nitro from its template" : "") << ") spawns at " << triple(spot) << ", " << static_cast<int>(std::hypot(spot[0] - crash[0], spot[1] - crash[1]))
                       << " from Crash\n" << std::flush;
             // the crate usually appears inside that call: put the spawner back at once, before its own crate can hop
             // home to the borrowed spot
@@ -2998,7 +3198,12 @@ namespace ingame
             {
                 std::array<float, 3> at{};
                 read(crate + 32, at);
-                std::cout << "Nitro spawn: a new Nitro appeared at " << triple(at) << " after " << elapsed << " ms\n";
+                std::string scripts;
+                for (const auto m : list(value<Address>(crate + 24), 64))
+                    if (typed(m, 0x13bbbd0) && typed(value<Address>(m + 56), 0x1745d78))
+                        scripts += (scripts.empty() ? "" : ", ") + string(value<Address>(value<Address>(m + 56) + 16), 120);
+                std::cout << "Nitro spawn: a new " << string(value<Address>(crate + 0x80)) << " (" << string(value<Address>(value<Address>(crate + 0x40) + 0x48))
+                          << "; " << (scripts.empty() ? "no scripts" : scripts) << ") appeared at " << triple(at) << " after " << elapsed << " ms\n";
                 trap_nitro = {crate, at, GetTickCount64(), s.level};
                 watch_trap_nitro(crate, at, s.level, s.restore.empty() ? nullptr : &s.restore.front().second);
                 finish_nitro_spawn("done");
@@ -3022,6 +3227,7 @@ namespace ingame
         {
             enum Stage { Idle, Countdown, Ahead, Spawning, Settling, Falling } stage = Idle;
             bool ahead = false; // the coin flip: a Nitro appears ahead of Crash instead of falling onto him
+            bool any = false;   // /nitro_drop any: an ordinary crate's spawner makes it (research)
             std::uint64_t start = 0, spawned = 0, fall_start = 0;
             int ticks = 0, settle_frames = 0;
             float drop = 0; // how far it falls
@@ -3257,8 +3463,13 @@ namespace ingame
                     // one Nitro Trap, two endings, half and half (/nitro_drop fall or ahead picks one)
                     static std::mt19937 coin{std::random_device{}()};
                     d.ahead = state.nitro_drop_kind == 2 || (state.nitro_drop_kind == 0 && std::bernoulli_distribution(0.5)(coin));
+                    d.any = state.nitro_drop_kind == 3;
+                    // a level without Nitro spawners: look for the Nitro's template in memory during the countdown
+                    if (d.any && !level_nitro_template(level) && !nitro_template_searched(level))
+                        nitro_memory_scan(level);
                     state.nitro_countdown_end = now + drop_countdown_ms;
-                    std::cout << "Nitro Trap: countdown, then a Nitro " << (d.ahead ? "appears ahead of Crash" : "falls onto Crash") << "\n" << std::flush;
+                    std::cout << "Nitro Trap: countdown, then a Nitro " << (d.ahead ? "appears ahead of Crash" : "falls onto Crash")
+                              << (d.any ? " (test: made by an ordinary crate's spawner)" : "") << "\n" << std::flush;
                 }
             }
             static std::uint64_t last_tick = 0;
@@ -3326,7 +3537,7 @@ namespace ingame
                 d.spot = drop_spot();
                 const std::array<float, 3> high{d.spot[0], d.spot[1], d.spot[2] + drop_height};
                 std::string why;
-                if (!nitro_spawn(why, &high, drop_spawner_away))
+                if (!nitro_spawn(why, &high, drop_spawner_away, d.any))
                 {
                     stop_nitro_drop(state, ("no Nitro: " + why).c_str());
                     return;

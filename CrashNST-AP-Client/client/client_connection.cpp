@@ -445,7 +445,19 @@ void ClientRuntime::handle_commands()
             else if (command == "/nitro_probe")
             {
                 // V1.2.46 Nitro research: the game's archives are searched for Nitro files in the background too
-                start_sound_job([] { return ingame::archive_member_report("nitro"); });
+                start_sound_job([]
+                                {
+                    // the Nitro's files, and every copy of Crash's fur, clothes and hair textures (V1.2.50: which archives
+                    // besides Crash.pak hold them, for the levels where his colors don't show)
+                    auto lines = ingame::archive_member_report("nitro");
+                    for (const char *part : {"crashfur", "crashcloth", "crashhair"})
+                    {
+                        auto more = ingame::archive_member_report(part);
+                        if (!more.empty())
+                            more.pop_back(); // the list of every archive, already given above
+                        lines.insert(lines.end(), more.begin(), more.end());
+                    }
+                    return lines; });
                 if (box_markers)
                 {
                     box_markers->request_nitro_probe();
@@ -570,10 +582,13 @@ void ClientRuntime::handle_commands()
                 if (box_markers)
                 {
                     // /nitro_drop: the trap as it comes (half and half); /nitro_drop fall or ahead picks the ending
-                    const unsigned kind = argument == "fall" ? 1 : argument == "ahead" ? 2 : 0;
+                    // /nitro_drop any (research): it falls, made by an ordinary crate's spawner from the Nitro's template
+                    const unsigned kind = argument == "fall" ? 1 : argument == "ahead" ? 2 : argument == "any" ? 3 : 0;
                     box_markers->request_nitro_drop(kind);
                     print_console(std::string("Nitro Trap test: NITRO INCOMING 3, 2, 1, then a Nitro ") +
-                                  (kind == 1 ? "falls onto Crash" : kind == 2 ? "appears ahead of Crash (keep running)" : "appears ahead of Crash or falls onto him") +
+                                  (kind == 1 ? "falls onto Crash" : kind == 2 ? "appears ahead of Crash (keep running)"
+                                   : kind == 3 ? "made by an ordinary crate's spawner falls onto Crash (research: a Nitro in levels without one)"
+                                               : "appears ahead of Crash or falls onto him") +
                                   ". Not sent to AP. Close the console (F1) and move! (/nitro_drop fall or /nitro_drop ahead picks one.)");
                 }
                 else
