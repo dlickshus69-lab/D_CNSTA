@@ -194,6 +194,15 @@ void ClientRuntime::update_display(ClientTick &tick)
                     {
                         earned.insert(id);
                     }
+                    // the box gem and the relic are only handed out at the end of the level (or of its time trial), so
+                    // picking one up means the level was beaten. The clear is sent too, in case the game didn't write it
+                    // to the save (Guicho's Hog Wild: gem, relic and time trial, but no clear in any save file)
+                    if (i == 0 || i == 2)
+                    {
+                        const auto clear = tick.checks.find({spec->key, "clear"});
+                        if (clear != tick.checks.end() && !tick.checked.count(clear->second))
+                            earned.insert(clear->second);
+                    }
                     else if (session.slot_data()["local_reward_sources"].isMember(std::to_string(id)))
                         session.observe_collectible(id);
                 }

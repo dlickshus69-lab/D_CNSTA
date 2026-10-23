@@ -1,9 +1,10 @@
 ## What's new
 
-- **Crash 3 secret pad:** back to how it worked before V1.2.24 (asked for once per hub visit). V1.2.24's retry made a second pad after a ride, which could leave the next ride on a black screen and the camera stuck.
+- **Level clears the save missed.** Picking up a level's box gem or its relic means you reached the end, so the level's clear is sent too if the game didn't write it to the save (Guicho's Hog Wild: gem, relic and time trial, but no clear).
 
 ## Recent builds
 
+- **V1.2.26:** the Crash 3 secret pad is asked for once per hub visit again (V1.2.24's retry left the next ride on a black screen).
 - **V1.2.25:** death counter (everyone's DeathLink deaths this seed, each player's in the hubs).
 - **V1.2.24:** boxes that need a move (arrow crates, crates on TNT, tall stacks: Spin; iron-bound crates, Turtle Woods' underground room: Body Slam), gimmick stages need no moves, box tracker re-attaches after reloads, DeathLink skips time trials and pause-menu Restart, rides hold received DeathLinks, no Darkness on Coco's jet ski.
 - **V1.2.23:** trap mercy: each death takes 5 seconds off every timed trap.
