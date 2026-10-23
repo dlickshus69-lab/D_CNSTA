@@ -3158,6 +3158,8 @@ namespace ingame
             if (any)
             {
                 nitro_template = level_nitro_template(level);
+                if (!nitro_template && !nitro_template_searched(level))
+                    nitro_template_search(level);
                 if (!nitro_template)
                     return why = nitro_template_searched(level) ? "no Nitro template loaded in this level" : "still looking for the Nitro in memory", false;
             }
@@ -3481,8 +3483,9 @@ namespace ingame
                     d.ahead = state.nitro_drop_kind == 2 || (state.nitro_drop_kind == 0 && std::bernoulli_distribution(0.5)(coin));
                     d.any = state.nitro_drop_kind == 3;
                     // a level without Nitro spawners: look for the Nitro's template in memory during the countdown
-                    if (d.any && !level_nitro_template(level) && !nitro_template_searched(level))
-                        nitro_memory_scan(level);
+                    // (V1.2.57: for every Nitro Trap, not only /nitro_drop any)
+                    if (!level_nitro_template(level) && !nitro_template_searched(level))
+                        nitro_template_search(level);
                     state.nitro_countdown_end = now + drop_countdown_ms;
                     std::cout << "Nitro Trap: countdown, then a Nitro " << (d.ahead ? "appears ahead of Crash" : "falls onto Crash")
                               << (d.any ? " (test: made by an ordinary crate's spawner)" : "") << "\n" << std::flush;
@@ -3555,6 +3558,12 @@ namespace ingame
                 std::string why;
                 if (!nitro_spawn(why, &high, drop_spawner_away, d.any))
                 {
+                    // the Nitro's template is still being looked for: wait for it a little (the countdown text is gone)
+                    if (why.rfind("still looking", 0) == 0 && elapsed < drop_countdown_ms + 8000)
+                    {
+                        state.nitro_countdown_end = std::min<std::uint64_t>(state.nitro_countdown_end, now);
+                        return;
+                    }
                     stop_nitro_drop(state, ("no Nitro: " + why).c_str());
                     return;
                 }
