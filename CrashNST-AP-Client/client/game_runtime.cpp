@@ -2903,11 +2903,12 @@ namespace ingame
         // while its crate is out, so the crate of the ready spawner closest to the spot is set aside, the spawner is pointed at the
         // spot, the game's own spawn routine runs (the one the Crash 3 secret platform uses), and then the spawner
         // gets its position and its own crate back, so that crate stays normal and dying never doubles it.
-        // The spot is ahead of Crash in the direction he is going, about 230 units (1.5 crates) away: close enough to
-        // be a surprise, far enough to jump it or stop. Floor he stood on earlier in this level (an earlier try, or
-        // ground he came back over) comes first; otherwise it goes straight ahead along the line he is running, at
-        // his ground height and following the slope he is on, and only while he is on the ground. Never on a crate.
-        static constexpr float nitro_ahead = 230, nitro_near = 190, nitro_far = 290;
+        // The spot is ahead of Crash in the direction he is going, about 200 units (1.3 crates) away: close enough to
+        // be a surprise, far enough to jump it or stop (230 until V1.2.69). In the middle of a jump or a fall it appears
+        // straight ahead at his height and floats there (V1.2.69). On the ground, floor he stood on earlier in this
+        // level (an earlier try, or ground he came back over) comes first; otherwise it goes straight ahead along the
+        // line he is running, at his ground height and following the slope he is on. Never on a crate.
+        static constexpr float nitro_ahead = 200, nitro_near = 165, nitro_far = 260;
         // where the player is for the Nitro Trap: Crash or Coco, or the hog, polar bear, jet board or jet ski they ride
         // (crash_position only finds them on foot)
         bool trap_actor_position(std::array<float, 3> &at)
@@ -2972,8 +2973,10 @@ namespace ingame
             }
             return false;
         }
-        bool ahead_spot(std::array<float, 3> &spot)
+        bool ahead_spot(std::array<float, 3> &spot, bool *floating = nullptr)
         {
+            if (floating)
+                *floating = false;
             float hx = 0, hy = 0;
             std::size_t end = 0;
             if (!crash_heading(hx, hy, end))
@@ -2991,6 +2994,56 @@ namespace ingame
                 return std::none_of(crates.begin(), crates.end(), [&](const std::array<float, 3> &c)
                                     { return std::hypot(c[0] - p[0], c[1] - p[1]) < 110 && std::abs(c[2] - p[2]) < 160; });
             };
+            // open space (V1.2.69): straight ahead can be inside a wall where his way bends, and the client can't see
+            // walls. Crates are always somewhere he can get to, so a spot straight ahead must be on the way to a crate
+            // further ahead (within 70 of the line from him to it), or next to floor he stood on before
+            const auto open = [&](const std::array<float, 3> &from, const std::array<float, 3> &p)
+            {
+                const float pd = std::hypot(p[0] - from[0], p[1] - from[1]);
+                for (const auto &c : crates)
+                {
+                    const float dx = c[0] - from[0], dy = c[1] - from[1], cd = std::hypot(dx, dy);
+                    if (cd < pd + 40 || cd > 700 || std::abs(c[2] - p[2]) > 300)
+                        continue;
+                    const float t = ((p[0] - from[0]) * dx + (p[1] - from[1]) * dy) / (cd * cd);
+                    if (std::hypot(from[0] + dx * t - p[0], from[1] + dy * t - p[1]) < 70)
+                        return true;
+                }
+                return std::any_of(level_floor.begin(), level_floor.end(), [&](const std::array<float, 3> &f)
+                                   { return std::hypot(f[0] - p[0], f[1] - p[1]) < 80 && std::abs(f[2] - p[2]) < 200; });
+            };
+            // in the air: his height changed in the last 0.2 s, he is more than 30 above his lowest point of the last
+            // half second, and that half second wasn't a smooth slope. Then it appears straight ahead at his height.
+            {
+                const auto n = crash_path.size();
+                const auto &back = crash_path[n - 6].at;
+                float low = now[2], high = now[2], lowest = now[2];
+                bool line = true;
+                for (std::size_t j = n - 6; j < n; ++j)
+                {
+                    const float z = crash_path[j].at[2];
+                    lowest = std::min(lowest, z);
+                    if (j >= n - 3)
+                        low = std::min(low, z), high = std::max(high, z);
+                    line = line && std::abs(z - (back[2] + (now[2] - back[2]) * (j - (n - 6)) / 5.0f)) < 8;
+                }
+                if (high - low > 8 && now[2] - lowest > 30 && !line)
+                {
+                    std::array<float, 3> at = now;
+                    trap_actor_position(at); // where he is this moment (the path is up to 0.1 s old)
+                    for (const float d : {nitro_ahead, nitro_ahead + 25, nitro_ahead + 50})
+                    {
+                        const std::array<float, 3> p{at[0] + hx * d, at[1] + hy * d, at[2]};
+                        if (clear(p) && open(at, p))
+                        {
+                            if (floating)
+                                *floating = true;
+                            return spot = p, true;
+                        }
+                    }
+                    return false;
+                }
+            }
             // floor he stood on before, within about 35 degrees of straight ahead
             float best = 1e9f;
             for (const auto &f : level_floor)
@@ -3031,10 +3084,10 @@ namespace ingame
                 if (smooth)
                     slope = std::clamp((now[2] - back[2]) / run, -0.35f, 0.35f);
             }
-            for (const float d : {nitro_ahead, nitro_ahead + 30, nitro_ahead - 30, nitro_ahead + 60})
+            for (const float d : {nitro_ahead, nitro_ahead + 25, nitro_ahead - 25, nitro_ahead + 50})
             {
                 const std::array<float, 3> p{now[0] + hx * d, now[1] + hy * d, now[2] + slope * d};
-                if (clear(p))
+                if (clear(p) && open(now, p))
                     return spot = p, true;
             }
             return false;
@@ -3080,6 +3133,7 @@ namespace ingame
             std::vector<std::pair<Address, Address>> words;                 // what it makes (any spawner), to put back
             std::uint64_t started = 0;
             std::string level, name;
+            bool floats = false; // it appears in midair, ahead of Crash mid-jump, and stays up there
         } nitro_spawn_state;
         // the Nitro a trap spawned most recently (the falling Nitro waits for it)
         struct TrapNitro
@@ -3097,10 +3151,12 @@ namespace ingame
             std::string level;
             std::array<float, 3> spot{}, home{};
             bool has_home = false, moved = false;
+            bool floats = false, sank = false; // appeared in midair; the game started to let it drop
             std::uint64_t since = 0;
         };
         std::vector<TrapNitroWatch> trap_nitros;
-        void watch_trap_nitro(Address entity, const std::array<float, 3> &at, const std::string &level, const std::array<float, 3> *home);
+        void watch_trap_nitro(Address entity, const std::array<float, 3> &at, const std::string &level, const std::array<float, 3> *home,
+                              bool floats = false);
         void finish_nitro_spawn(const char *how)
         {
             auto &s = nitro_spawn_state;
@@ -3207,10 +3263,11 @@ namespace ingame
             std::array<float, 3> crash{}, spot{};
             if (!trap_actor_position(crash))
                 return why = "Crash not found", false;
+            bool floats = false;
             if (forced)
                 spot = *forced;
-            else if (!ahead_spot(spot))
-                return why = "no spot ahead yet: Crash needs to be running on the ground", false;
+            else if (!ahead_spot(spot, &floats))
+                return why = "no spot ahead yet: Crash needs to be running or jumping", false;
             const auto level = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
             // always made from the Nitro's template by a spawner that counts nothing (V1.2.65; before, a level's own Nitro
             // spawner was borrowed where there was one, and its box count counted the trap's Nitro)
@@ -3258,7 +3315,7 @@ namespace ingame
                 write(handle + 40, nitro_template);
             }
             auto &s = nitro_spawn_state;
-            s = {spawner.component, spawner.owner, value<Address>(spawner.component + 232), {}, std::move(words), GetTickCount64(), level, spawner.name};
+            s = {spawner.component, spawner.owner, value<Address>(spawner.component + 232), {}, std::move(words), GetTickCount64(), level, spawner.name, floats};
             std::array<float, 3> home{};
             read(spawner.owner + 32, home);
             for (const auto at : {spawner.owner + 32, value<Address>(spawner.owner + 16) + 0xc0})
@@ -3275,7 +3332,7 @@ namespace ingame
             s.words.clear();
             std::cout << "Nitro spawn: " << spawner.name << "'s spawner (" << static_cast<int>(spawner.distance)
                       << " from the spot" << (any ? ", making a Nitro from its template" : "") << ") spawns at " << triple(spot) << ", " << static_cast<int>(std::hypot(spot[0] - crash[0], spot[1] - crash[1]))
-                      << " from Crash\n" << std::flush;
+                      << " from Crash" << (floats ? ", in midair (Crash is jumping)" : "") << "\n" << std::flush;
             // the crate usually appears inside that call: put the spawner back at once, before its own crate can hop
             // home to the borrowed spot
             nitro_spawn_followup();
@@ -3321,7 +3378,7 @@ namespace ingame
                             }
                         }
                 trap_nitro = {crate, at, GetTickCount64(), s.level};
-                watch_trap_nitro(crate, at, s.level, s.restore.empty() ? nullptr : &s.restore.front().second);
+                watch_trap_nitro(crate, at, s.level, s.restore.empty() ? nullptr : &s.restore.front().second, s.floats);
                 finish_nitro_spawn("done");
             }
             else if (elapsed > 2000)
@@ -3518,7 +3575,7 @@ namespace ingame
         {
             return std::isfinite(v) && std::abs(v) < 1e9f ? std::to_string(static_cast<long long>(v)) : std::string("?");
         }
-        void watch_trap_nitro(Address entity, const std::array<float, 3> &at, const std::string &level, const std::array<float, 3> *home)
+        void watch_trap_nitro(Address entity, const std::array<float, 3> &at, const std::string &level, const std::array<float, 3> *home, bool floats)
         {
             if (trap_nitros.size() >= 6)
                 trap_nitros.erase(trap_nitros.begin());
@@ -3532,9 +3589,10 @@ namespace ingame
             trap_event_since[slot] = w.since, trap_event_entity[slot] = entity;
             if (home)
                 w.home = *home, w.has_home = true;
+            w.floats = floats;
             trap_nitros.push_back(std::move(w));
         }
-        // only reads: what became of each trap Nitro goes to the log
+        // what became of each trap Nitro goes to the log; one that appeared in midair is held up if the game lets it drop
         void update_trap_nitros(const std::string &level)
         {
             const auto now = GetTickCount64();
@@ -3552,6 +3610,15 @@ namespace ingame
                         std::cout << "Nitro Trap: its Nitro is gone after " << seconds(now - w.since) << " (set off, broken or unloaded)\n" << std::flush;
                     trap_nitros.erase(trap_nitros.begin() + static_cast<std::ptrdiff_t>(i));
                     continue;
+                }
+                // a floating Nitro stays up: if the game lets it drop (by its weight, or coming down from a hop), it is put
+                // back where it appeared, still (hopping up from there is left alone)
+                if (w.floats && e[2] < w.spot[2] - 3)
+                {
+                    if (!w.sank)
+                        w.sank = true, std::cout << "Nitro Trap: its floating Nitro started to drop after " << seconds(now - w.since) << ": held up\n" << std::flush;
+                    set_entity_position(w.entity, w.spot);
+                    e = w.spot;
                 }
                 if (!w.moved && std::hypot(e[0] - w.spot[0], e[1] - w.spot[1]) > 20 &&
                     !(w.entity == nitro_drop.entity && nitro_drop.stage != NitroDropTrap::Idle))
