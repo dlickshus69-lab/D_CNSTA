@@ -683,9 +683,10 @@ namespace ingame
             // the game saves game variables at checkpoints and puts them back when Crash respawns, so once the client
             // has turned the switch on, a respawn can turn it on again after the lock is lifted: it is turned off then too
             static bool ever = false;
-            aku_messages_blocked = locked;
-            // with a filler mask out, the lock doesn't clear masks or keep them from protecting
+            // with a filler mask out (or being handed over), the lock doesn't clear masks, keep them from protecting or
+            // keep Aku's manager from the messages that bring a mask out (a hand-over can take a few of them)
             const bool hold = locked && !filler_mask_out();
+            aku_messages_blocked = hold;
             watch_aku_manager(hold);
             const auto variable = no_aku_variable.load();
             if (!variable)
@@ -1135,25 +1136,43 @@ namespace ingame
                 out << "(type +0x" << (type - base()) << ")";
             return out.str();
         }
-        void log_event(Address event, Address component, const std::string &who)
+        std::string send_arguments(Address node);
+        void log_event(Address event, Address component, const std::string &who, Address context = 0)
         {
             const auto meta = value<Address>(event + 16);
             const auto name = string(value<Address>(meta + 16), 120);
-            auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
+            const auto script = value<Address>(component + 56);
+            auto graph = string(value<Address>(script + 16), 120);
             if (graph.rfind("Scripts.Graph.", 0) == 0)
                 graph.erase(0, 14);
             const auto sender = event_object(value<Address>(event + 32));
             const bool aku = who.find("Aku") != std::string::npos || sender.find("Aku") != std::string::npos || graph.find("AkuAku") != std::string::npos;
+            // a real send's values come from its argument list (what the log called the sender): what each comes from
+            const auto values = send_arguments(event);
             std::lock_guard lock(event_mutex);
             // Aku: every message to Aku Aku's manager, but a crate's or mask's own repeats only a few times each
             static std::map<std::string, unsigned> aku_repeats;
             if (aku && graph.find("AkuAkuManager") == std::string::npos && ++aku_repeats[who + "|" + name] > 4)
                 return;
-            if (aku ? aku_event_lines >= 400 : (event_lines >= 250 || !events_seen.insert(who + "|" + graph + "|" + name).second))
+            if (aku ? aku_event_lines >= 600 : (event_lines >= 250 || !events_seen.insert(who + "|" + graph + "|" + name).second))
                 return;
             ++(aku ? aku_event_lines : event_lines);
             std::ostringstream out;
-            out << "Event: " << who << " (" << graph << ") gets " << name << " from " << sender << ":";
+            out << "Event: " << who << " (" << graph << ") gets " << name << " from " << sender << " [node 0x" << std::hex << event << ", script "
+                << (event >= script ? "+0x" : "-0x") << (event >= script ? event - script : script - event) << std::dec << "]" << values;
+            // the first few real sends with values: the call's context, to see what else the game passes
+            static unsigned contexts = 0;
+            if (context && !values.empty() && contexts < 8)
+            {
+                ++contexts;
+                std::array<Address, 6> words{};
+                read(context, words);
+                out << " context{" << std::hex;
+                for (const auto w : words)
+                    out << w << " ";
+                out << std::dec << "}";
+            }
+            out << ":";
             const auto count = value<unsigned>(meta + 24);
             const auto fields = value<Address>(meta + 40);
             for (unsigned i = 0; fields && count <= 64 && i < count; ++i)
@@ -1177,8 +1196,61 @@ namespace ingame
                 }
             }
             std::cout << out.str() << "\n" << std::flush;
-            if (aku_event_lines >= 400)
+            if (aku_event_lines >= 600)
                 event_research_done = true;
+        }
+        // what a real send's values come from (its argument list, a list of value sources): each source's type, its
+        // first two words and the name of the script setting it reads, when it reads one
+        std::string send_arguments(Address node)
+        {
+            const auto args = value<Address>(node + 32);
+            if (!args || !typed(args, 0x1745070))
+                return {};
+            const auto sources = list(args, 16);
+            std::ostringstream out;
+            out << " values(" << sources.size() << "):";
+            for (const auto s : sources)
+            {
+                const auto type = value<Address>(s);
+                out << " ";
+                if (type > base() && type < base() + 0x2000000)
+                    out << "+0x" << std::hex << (type - base());
+                else
+                    out << "?";
+                out << "{" << std::hex << value<std::uint64_t>(s + 24) << "," << value<std::uint64_t>(s + 32) << "}" << std::dec;
+                const auto name = string(value<Address>(value<Address>(value<Address>(s + 24) + 24) + 48), 48);
+                if (!name.empty() && std::all_of(name.begin(), name.end(), [](char c) { return c > 32 && c < 127; }))
+                    out << "=" << name;
+            }
+            return out.str();
+        }
+        // when an Aku Aku crate last got or sent a message (one breaking): what Aku's manager does right after is the pickup
+        std::atomic<std::uint64_t> aku_crate_event_at{0};
+        unsigned near_crate_lines = 0;
+        // the send node of the pickup's fcbn65ha (Aku's manager sends it to himself right after an Aku Aku crate breaks)
+        // and its type then, so /aku_give can run the very same node later
+        std::atomic<Address> aku_pickup_node{0}, aku_pickup_type{0};
+        std::set<Address> aku_fcbn_nodes;
+        void note_aku_send(Address event, Address component)
+        {
+            const auto args = value<Address>(event + 32);
+            if (!args || !typed(args, 0x1745070))
+                return;
+            const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+            if (name.find("fcbn65ha") == std::string::npos)
+                return;
+            const bool after_crate = GetTickCount64() - aku_crate_event_at.load() < 3000;
+            if (after_crate)
+                aku_pickup_node = event, aku_pickup_type = value<Address>(event);
+            const auto script = value<Address>(component + 56);
+            const auto values = send_arguments(event);
+            std::lock_guard lock(event_mutex);
+            const bool fresh = aku_fcbn_nodes.insert(event).second;
+            if ((fresh || after_crate) && aku_fcbn_nodes.size() < 16)
+                std::cout << "Aku give: Aku's manager sent fcbn65ha from node 0x" << std::hex << event << " (script " << (event >= script ? "+0x" : "-0x")
+                          << (event >= script ? event - script : script - event) << ", type +0x" << (value<Address>(event) - base()) << std::dec << ")"
+                          << (after_crate ? ", right after an Aku Aku crate: kept for /aku_give" : "") << (fresh ? "" : " (seen before)") << values << "\n"
+                          << std::flush;
         }
         Address event_sent(Address event, Address context)
         {
@@ -1250,21 +1322,36 @@ namespace ingame
                         return 0;
                     }
                 }
+                // the pickup's own message (for /aku_give): what Aku's manager sends himself once a crate's mask is his
+                if (!own_aku_message.load() && target == crash && component && aku_manager(component, target))
+                    note_aku_send(event, component);
                 // V1.1.66 logged the first of each kind; now only what reaches Crash's Aku Aku manager and Aku Aku
-                // crates and masks, in order (for /aku_give)
+                // crates and masks, in order (for /aku_give), and for 3 s after an Aku Aku crate's event, what else
+                // Crash and the things around him send (to find what tells Aku's manager a crate's mask is his)
                 if (!event_research_done.load())
                 {
+                    const auto now = GetTickCount64();
+                    const bool after_crate = now - aku_crate_event_at.load() < 3000;
                     if (target == crash)
                     {
                         if (string(value<Address>(value<Address>(component + 56) + 16), 64) == "Scripts.Graph.Crash_AkuAkuManager")
-                            log_event(event, component, "an Aku Aku");
+                            log_event(event, component, "an Aku Aku", context);
+                        else if (after_crate)
+                            log_event(event, component, "Crash", context);
                     }
                     else if (target && typed(target, 0x141d490))
                     {
                         const auto name = string(value<Address>(target + 128), 48);
                         if (name.find("Aku") != std::string::npos)
-                            log_event(event, component, "an Aku Aku (" + name + ")");
+                        {
+                            aku_crate_event_at = now;
+                            log_event(event, component, "an Aku Aku (" + name + ")", context);
+                        }
+                        else if (after_crate && near_crate_lines < 60)
+                            ++near_crate_lines, log_event(event, component, "near an Aku Aku crate: " + name, context);
                     }
+                    else if (target && after_crate && near_crate_lines < 60)
+                        ++near_crate_lines, log_event(event, component, "near an Aku Aku crate: " + event_object(target), context);
                 }
             }
             return reinterpret_cast<Address (*)(Address, Address)>(event_hook.original)(event, context);
@@ -3018,15 +3105,6 @@ namespace ingame
             d = {};
             state.nitro_countdown_end = 0;
         }
-        // Aku Aku filler research (/aku_give): a live Aku Aku crate's own content spawner (the one that makes its mask
-        // when it breaks) makes a mask right at Crash. The crate's position points at Crash only for the spawn call,
-        // and its spawner is reset afterwards, so the crate still gives its own mask when it is broken.
-        bool spawner_template(Address c)
-        {
-            const auto meta = value<Address>(c + 56);
-            return typed(c, 0x13bbbd0) && typed(meta, 0x1745d78) && string(value<Address>(meta + 16)) == "Scripts.Graph.common_Spawner_Template" &&
-                   field_at(meta, "SpawnedEntity", 232, 8);
-        }
         // research: every setting of a script, one line per six (bytes as numbers, 12/16 byte ones as floats)
         void log_graph_fields(Address c, const std::string &who)
         {
@@ -3067,91 +3145,122 @@ namespace ingame
                     return {value<int>(c + 0x90), resolve(value<Address>(c + 0x60)) != 0};
             return {-1, false};
         }
-        // a message field by name: its offset and size, or {0, 0}
-        std::pair<unsigned, unsigned> message_field(Address message, const std::string &name)
+        // Crash's running Aku Aku manager script, or 0
+        Address aku_manager_component(Address actor)
         {
-            const auto count = value<unsigned>(message + 24);
-            const auto fields = value<Address>(message + 40);
-            for (unsigned i = 0; fields && count <= 64 && i < count; ++i)
+            for (const auto component : actor ? list(value<Address>(actor + 24), 128) : std::vector<Address>{})
             {
-                const auto field = value<Address>(fields + i * 8);
-                if (string(value<Address>(field + 48), 64) == name)
-                    return {value<std::uint16_t>(field + 24), value<std::uint16_t>(field + 22)};
+                const auto meta = value<Address>(component + 56);
+                if (typed(component, 0x13bbbd0) && value<Address>(component + 24) == actor && (value<unsigned>(component + 32) & 1) &&
+                    typed(meta, 0x1745d78) && string(value<Address>(meta + 16)) == "Scripts.Graph.Crash_AkuAkuManager")
+                    return component;
+            }
+            return 0;
+        }
+        // a message Aku's manager takes, by its id (New_Graph_Event_1_id_<id> or GraphEvent_id_<id>_Definition): the
+        // message and where it goes, or {0, 0}
+        std::pair<Address, Address> aku_message(Address component, const std::string &id)
+        {
+            for (const auto delegator : list(value<Address>(value<Address>(component + 56) + 160), 128))
+            {
+                const auto message = value<Address>(delegator + 24), target = value<Address>(delegator + 32);
+                if (!typed(delegator, 0x13bc268) || !typed(message, 0x17b6578) || !typed(target, 0x13bbcb8))
+                    continue;
+                const auto name = string(value<Address>(message + 16), 120);
+                if (name == "Crash_AkuAkuManager_c.New_Graph_Event_1_id_" + id || name == "Crash_AkuAkuManager_c.GraphEvent_id_" + id + "_Definition")
+                    return {message, target};
             }
             return {0, 0};
         }
-        // the Aku Aku filler's way: Crash's Aku Aku manager gets the message an Aku Aku crate's mask sends it when Crash
-        // picks it up (s8h11iit; the logs show it right after an Aku Aku crate breaks, with 232 in its one field), sent
-        // the same way a DeathLink death is. Works in any level, no crate needed. False if the message isn't there as
-        // expected (nothing is sent then)
-        bool aku_give_message_now(Address actor, const std::string &id = "5bnreye5", const char *field_name = nullptr, std::uint64_t field_value = 0)
+        // research: every message Aku's manager takes, once
+        void log_aku_messages(Address component)
         {
-            if (!event_hook.installed && !code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
-                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0}))
+            static bool logged = false;
+            if (logged)
+                return;
+            logged = true;
+            std::ostringstream out;
+            out << "Aku give: Aku's manager takes";
+            for (const auto delegator : list(value<Address>(value<Address>(component + 56) + 160), 128))
             {
-                std::cout << "Aku give: the game's message sender differs from the verified build\n" << std::flush;
-                return false;
+                const auto name = string(value<Address>(value<Address>(delegator + 24) + 16), 120);
+                const auto id = name.find("_id_");
+                out << " " << (id == std::string::npos ? name : name.substr(id + 4));
             }
-            for (const auto component : list(value<Address>(actor + 24), 128))
-            {
-                const auto meta = value<Address>(component + 56);
-                if (!typed(component, 0x13bbbd0) || value<Address>(component + 24) != actor || !(value<unsigned>(component + 32) & 1) ||
-                    !typed(meta, 0x1745d78) || string(value<Address>(meta + 16)) != "Scripts.Graph.Crash_AkuAkuManager")
-                    continue;
-                for (const auto delegator : list(value<Address>(meta + 160), 128))
-                {
-                    const auto message = value<Address>(delegator + 24), target = value<Address>(delegator + 32);
-                    if (!typed(delegator, 0x13bc268) || !typed(message, 0x17b6578) || !typed(target, 0x13bbcb8) ||
-                        string(value<Address>(message + 16), 120) != "Crash_AkuAkuManager_c.New_Graph_Event_1_id_" + id)
-                        continue;
-                    if (!field_at(message, "_sender", 32, 8))
-                    {
-                        std::cout << "Aku give: " << id << "'s layout differs; nothing sent\n" << std::flush;
-                        return false;
-                    }
-                    std::array<Address, 11> sender{base() + 0x13bc390, 0, message, target};
-                    if (field_name)
-                    {
-                        const auto [offset, size] = message_field(message, field_name);
-                        if (offset < 40 || offset + size > 88 || (size != 1 && size != 4 && size != 8))
-                        {
-                            std::cout << "Aku give: " << id << "'s field is at +" << offset << ", " << size << " bytes; nothing sent\n" << std::flush;
-                            return false;
-                        }
-                        std::memcpy(reinterpret_cast<unsigned char *>(sender.data()) + offset, &field_value, size);
-                    }
-                    std::array<Address, 6> context{component};
-                    own_aku_message = true;
-                    reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(reinterpret_cast<Address>(sender.data()),
-                                                                                        reinterpret_cast<Address>(context.data()));
-                    own_aku_message = false;
-                    return true;
-                }
-                std::cout << "Aku give: Crash's Aku Aku manager has no " << id << " message here\n" << std::flush;
-                return false;
-            }
-            std::cout << "Aku give: Crash's Aku Aku manager wasn't found\n" << std::flush;
-            return false;
+            std::cout << out.str() << "\n" << std::flush;
         }
-        void aku_give_crate(Address actor, const std::array<float, 3> &crash);
-        // the next way to try after the message: 1 = set AkuAkuCount, 2 = an Aku Aku crate's spawner
-        std::atomic_uint aku_give_next{0};
-        // AkuAkuCount (Crash_DamageManager's mask count) set with the game's own number setter, the one that tells
-        // whatever listens to it (Aku Aku's manager has a listener). False if it can't be done safely
-        bool aku_give_count(int count)
+        // runs a send node in Aku's manager the way his own script does (the Aku Aku lock lets it through)
+        void aku_send(Address component, Address node)
         {
-            // number "reset": mov edx,[rcx+0x18]; jmp +0x502200 (the same check the lock's clearing uses)
-            const bool verified = code_matches(0x4fb420, std::array<unsigned char, 8>{0x8b, 0x51, 0x18, 0xe9, 0xd8, 0x6d, 0x00, 0x00});
-            const auto variable = aku_variable.load();
-            if (!verified || !variable || !typed(variable, 0x155e9f8))
+            std::array<Address, 6> context{component};
+            own_aku_message = true;
+            reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(node, reinterpret_cast<Address>(context.data()));
+            own_aku_message = false;
+        }
+        // sends Aku's manager a message with no values, the way a DeathLink death is sent. False if he doesn't take it
+        bool aku_send_message(Address component, const std::string &id)
+        {
+            const auto [message, target] = aku_message(component, id);
+            if (!message || !field_at(message, "_sender", 32, 8))
             {
-                std::cout << "Aku give: AkuAkuCount can't be set here (" << (!verified ? "setter differs" : !variable ? "not found" : "wrong type") << ")\n"
-                          << std::flush;
+                std::cout << "Aku give: Aku's manager doesn't take " << id << " here\n" << std::flush;
                 return false;
             }
-            reinterpret_cast<void (*)(Address, int)>(base() + 0x502200)(variable, count);
-            std::cout << "Aku give: set AkuAkuCount to " << count << " with the game's own setter\n" << std::flush;
+            std::array<Address, 11> sender{base() + 0x13bc390, 0, message, target};
+            aku_send(component, reinterpret_cast<Address>(sender.data()));
             return true;
+        }
+        // the game's senders of one message, found around Aku's script description and the message's own (a script's
+        // nodes sit together in memory), lowest address first
+        std::vector<Address> aku_send_nodes(Address meta, Address message)
+        {
+            std::set<Address> pages;
+            for (const auto around : {meta, message})
+            {
+                const auto page = around & ~Address{0xfff};
+                for (Address p = page > 0x100000 ? page - 0x80000 : 0x10000; p <= page + 0x80000; p += 0x1000)
+                    pages.insert(p);
+            }
+            std::vector<Address> found, words(512);
+            for (const auto page : pages)
+            {
+                if (!readable(page, 0x1000) || !read(page, words))
+                    continue;
+                for (unsigned i = 0; i < words.size(); ++i)
+                {
+                    if (words[i] != message)
+                        continue;
+                    const auto node = page + i * 8 - 16, type = value<Address>(node), args = value<Address>(node + 32);
+                    if (type > base() && type < base() + 0x2000000 && value<Address>(node + 24) && (!args || typed(args, 0x1745070)))
+                        found.push_back(node);
+                }
+            }
+            return found;
+        }
+        // /aku_give tries one way at a time and looks a second later whether a mask came out (game thread only)
+        struct AkuGiveStep
+        {
+            std::string label;
+            // a send node of the game's, run as is (still of this type and for this message), or messages with no values
+            Address node = 0, type = 0, message = 0;
+            std::vector<std::string> ids;
+        };
+        std::vector<AkuGiveStep> aku_steps;
+        unsigned aku_step = 0;
+        void aku_run_step(Address actor)
+        {
+            const auto &step = aku_steps[aku_step];
+            const auto component = aku_manager_component(actor);
+            filler_mask_since = GetTickCount64();
+            bool sent = false;
+            if (component && step.node && value<Address>(step.node) == step.type && value<Address>(step.node + 16) == step.message)
+                aku_send(component, step.node), sent = true;
+            for (const auto &id : step.ids)
+                sent = (component && aku_send_message(component, id)) || sent;
+            const auto [state, mask] = aku_manager_state(actor);
+            std::cout << "Aku give: tried " << step.label << (sent ? "" : " (nothing could be sent)") << "; right after, Aku's manager is in state " << state
+                      << (mask ? ", WITH A MASK OUT" : ", no mask out") << "\n" << std::flush;
+            aku_give_check_at = GetTickCount64() + 1000;
         }
         void aku_give_followup()
         {
@@ -3159,41 +3268,46 @@ namespace ingame
             if (!at || GetTickCount64() < at)
                 return;
             aku_give_check_at = 0;
+            if (aku_step >= aku_steps.size())
+                return;
             const auto actor = player();
             const auto [state, mask] = aku_manager_state(actor);
-            std::cout << "Aku give: a second later Aku's manager is in state " << state << (mask ? ", with a mask out" : ", no mask out") << "\n"
-                      << std::flush;
-            if (mask || !actor)
+            const auto label = aku_steps[aku_step].label;
+            std::cout << "Aku give: a second after " << label << ", Aku's manager is in state " << state << (mask ? ", WITH A MASK OUT" : ", no mask out")
+                      << "\n" << std::flush;
+            if (mask)
             {
-                aku_give_next = 0;
+                std::cout << "Aku give: this worked: " << label << "\n" << std::flush;
+                aku_steps.clear();
                 return;
             }
-            filler_mask_since = GetTickCount64();
-            if (aku_give_next.load() == 1)
+            if (!actor || ++aku_step >= aku_steps.size())
             {
-                aku_give_next = 2;
-                std::cout << "Aku give: no mask yet; trying the mask count\n" << std::flush;
-                if (aku_give_count(1))
-                {
-                    aku_give_check_at = GetTickCount64() + 1000;
-                    return;
-                }
+                std::cout << "Aku give: " << (actor ? "no mask from any of them" : "Crash is gone; stopped") << "\n" << std::flush;
+                aku_steps.clear();
+                return;
             }
-            aku_give_next = 0;
-            std::array<float, 3> crash{};
-            if (crash_position(crash))
-            {
-                std::cout << "Aku give: no mask yet; trying an Aku Aku crate's spawner\n" << std::flush;
-                aku_give_crate(actor, crash);
-            }
+            aku_run_step(actor);
         }
         void aku_give()
         {
             std::array<float, 3> crash{};
             const auto actor = player();
-            if (!actor || !crash_position(crash))
+            const auto component = aku_manager_component(actor);
+            if (!actor || !crash_position(crash) || !component)
             {
-                std::cout << "Aku give: Crash not found. Try it inside a level.\n" << std::flush;
+                std::cout << "Aku give: Crash or his Aku Aku manager wasn't found. Try it inside a level.\n" << std::flush;
+                return;
+            }
+            if (!event_hook.installed && !code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0}))
+            {
+                std::cout << "Aku give: the game's message sender differs from the verified build\n" << std::flush;
+                return;
+            }
+            if (!aku_steps.empty())
+            {
+                std::cout << "Aku give: still trying the last one\n" << std::flush;
                 return;
             }
             {
@@ -3213,100 +3327,42 @@ namespace ingame
                     std::cout << "Aku give: turned Aku Aku Sanity's no-masks switch off for this mask\n" << std::flush;
                 }
             }
-            if (aku_give_message_now(actor))
+            log_aku_messages(component);
+            // V1.2.34's log: when a crate's mask became Crash's, the first thing his manager did was send himself
+            // fcbn65ha, with two values, from a node of his own script (at a level's start and a respawn he sends it from
+            // another node). The values come from the node, so the very same node is run first; the earlier tries sent
+            // the message empty.
+            const auto meta = value<Address>(component + 56);
+            const auto [message, target] = aku_message(component, "fcbn65ha");
+            const auto pickup = aku_pickup_node.load();
+            if (pickup && message && value<Address>(pickup) == aku_pickup_type.load() && value<Address>(pickup + 16) == message)
+                aku_steps.push_back({"the crate pickup's own fcbn65ha (caught when a crate's mask was picked up)", pickup, value<Address>(pickup), message, {}});
+            else
+                std::cout << "Aku give: " << (pickup ? "the crate pickup's fcbn65ha isn't there anymore" : "no crate pickup caught yet this game") << "\n"
+                          << std::flush;
+            if (message)
             {
-                const auto [state, mask] = aku_manager_state(actor);
-                std::cout << "Aku give: sent Aku Aku 5bnreye5 (what he gets when Crash picks up a crate's mask); right after, his manager is in state " << state
-                          << (mask ? ", with a mask out" : ", no mask out") << "\n" << std::flush;
-                aku_give_next = 1;
-                aku_give_check_at = GetTickCount64() + 1000;
-                return;
-            }
-            std::cout << "Aku give: trying an Aku Aku crate's spawner instead\n" << std::flush;
-            aku_give_crate(actor, crash);
-        }
-        // the older way: a live Aku Aku crate in the level makes its mask right at Crash
-        void aku_give_crate(Address actor, const std::array<float, 3> &crash)
-        {
-            // research: Crash's Aku Aku manager as it is now (compare with a mask that protects and one that doesn't)
-            for (const auto c : list(value<Address>(actor + 24), 128))
-                if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78) &&
-                    string(value<Address>(value<Address>(c + 56) + 16)) == "Scripts.Graph.Crash_AkuAkuManager")
-                    log_graph_fields(c, "Aku manager");
-            unsigned crates = 0;
-            bool listed = false;
-            std::string refusals;
-            for (const auto owner : event_owners())
-            {
-                const auto name = string(value<Address>(owner + 128));
-                if (name.find("AkuAku") == std::string::npos)
-                    continue;
-                // the owner is either the crate or what places it (whose spawner holds the crate)
-                std::vector<Address> candidates{owner};
-                for (const auto c : list(value<Address>(owner + 24), 64))
-                    if (spawner_template(c))
-                        if (const auto spawned = resolve(value<Address>(c + 232)); spawned && spawned != owner)
-                            candidates.push_back(spawned);
-                for (const auto crate : candidates)
+                const auto nodes = aku_send_nodes(meta, message);
+                std::cout << "Aku give: " << nodes.size() << " senders of fcbn65ha around Aku's script\n" << std::flush;
+                for (const auto node : nodes)
                 {
-                    if (!typed(crate, 0x141d490) || !(value<unsigned>(crate + 56) & 4))
-                        continue;
-                    ++crates;
-                    // research: what an Aku Aku crate (and what placed it) is made of, to find what makes its mask
-                    if (!listed)
-                    {
-                        listed = true;
-                        for (const auto e : {owner, crate})
-                        {
-                            std::ostringstream out;
-                            out << "Aku give: " << string(value<Address>(e + 128)) << " (type +0x" << std::hex << (value<Address>(e) - base()) << ") has";
-                            for (const auto c : list(value<Address>(e + 24), 64))
-                            {
-                                const auto meta = value<Address>(c + 56);
-                                out << " +0x" << (value<Address>(c) - base());
-                                if (typed(meta, 0x1745d78))
-                                    out << "(" << string(value<Address>(meta + 16)) << ")";
-                            }
-                            std::cout << out.str() << std::dec << "\n" << std::flush;
-                            if (e == crate)
-                                for (const auto c : list(value<Address>(e + 24), 64))
-                                    if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78) &&
-                                        string(value<Address>(value<Address>(c + 56) + 16)) == "Scripts.Graph.common_Crate")
-                                        log_graph_fields(c, "Aku crate");
-                        }
-                    }
-                    for (const auto c : list(value<Address>(crate + 24), 64))
-                    {
-                        if (!spawner_template(c))
-                            continue;
-                        const char *why = nullptr;
-                        const auto method = spawner_method(c, crate, false, &why);
-                        if (!method)
-                        {
-                            if (why && refusals.size() < 200)
-                                refusals += std::string(" ") + why + ";";
-                            continue;
-                        }
-                        std::array<float, 3> old{};
-                        read(crate + 32, old);
-                        const auto flags = value<std::array<unsigned char, 4>>(c + 66);
-                        write(crate + 32, std::array<float, 3>{crash[0], crash[1], crash[2] + 60});
-                        reinterpret_cast<void (*)(Address, Address, unsigned, Address)>(base() + 0xc988c0)(method, c, 0, 0);
-                        write(crate + 32, old);
-                        const auto mask = resolve(value<Address>(c + 232));
-                        std::array<float, 3> at{};
-                        read(mask + 32, at);
-                        std::cout << "Aku give: " << string(value<Address>(crate + 128)) << " (" << static_cast<int>(std::hypot(old[0] - crash[0], old[1] - crash[1]))
-                                  << " from Crash) made " << (mask ? string(value<Address>(mask + 128)) + " at " + triple(at) : std::string("nothing"))
-                                  << "\n" << std::flush;
-                        write(c + 232, Address{0});
-                        write(c + 66, flags);
-                        return;
-                    }
+                    const auto type = value<Address>(node);
+                    std::ostringstream where;
+                    where << "script " << (node >= meta ? "+0x" : "-0x") << std::hex << (node >= meta ? node - meta : meta - node) << ", type +0x" << (type - base());
+                    std::cout << "Aku give:  0x" << std::hex << node << std::dec << " (" << where.str() << ")" << (node == pickup ? " = the pickup's" : "")
+                              << send_arguments(node) << "\n" << std::flush;
+                    const auto sender_type = pickup ? aku_pickup_type.load() : base() + 0x1624f10;
+                    if (node != pickup && type == sender_type && value<Address>(node + 32) && aku_steps.size() < 6)
+                        aku_steps.push_back({"fcbn65ha from Aku's script (" + where.str() + ")", node, type, message, {}});
                 }
             }
-            std::cout << "Aku give: no Aku Aku crate with its mask still inside here (" << crates << " Aku Aku crates" << (refusals.empty() ? "" : ":" + refusals)
-                      << ")\n" << std::flush;
+            // what his manager sent himself next in the pickup, in order (all with no values)
+            aku_steps.push_back({"a9nnfx8i and 6ldq5n9r", 0, 0, 0, {"a9nnfx8i", "6ldq5n9r"}});
+            aku_steps.push_back({"9nj5heau and nr69k1wc", 0, 0, 0, {"9nj5heau", "nr69k1wc"}});
+            aku_steps.push_back({"barwfjg5, 5fw2bzv2 and cwmbdu2t", 0, 0, 0, {"barwfjg5", "5fw2bzv2", "cwmbdu2t"}});
+            aku_steps.push_back({"fcbn65ha with no values", 0, 0, 0, {"fcbn65ha"}});
+            aku_step = 0;
+            aku_run_step(actor);
         }
         // requests from /nitro_spawn and the Nitro Trap; a request waits up to 5 seconds for a spot
         void update_nitro_trap(Shared &state, const std::string &level)
