@@ -159,8 +159,11 @@ namespace ingame
         // set by the game thread: when the falling Nitro's countdown reaches 0 (GetTickCount64), 0 when none runs
         std::uint64_t nitro_countdown_end = 0;
         // set by the game thread: Crash is in a level and can move (not the level intro, not dying or respawning).
-        // Traps wait for it and running trap timers pause without it.
+        // Running trap timers pause without it.
         unsigned player_ready = 0;
+        // set by the game thread: Crash has been able to move for 1.5 seconds without a break. Traps start only then
+        // (V1.3: right after a level loads the game can already report him movable while he is still arriving)
+        unsigned player_settled = 0;
         // set by the game thread every frame it runs (GetTickCount64)
         std::uint64_t heartbeat_game = 0;
         // set by the client: trap time is accounted for up to here while the game thread wasn't running

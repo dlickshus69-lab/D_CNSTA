@@ -3,7 +3,7 @@
 # Every build is kept under the run's "Artifacts". Builds of main also refresh the latest release
 # on the Releases page, named "Dlickshus Crash Bandicoot N. Sane Trilogy Archipelago V<major.minor>.<build>"
 # (tag v<major.minor>.<build>): major.minor comes from the VERSION file, the last number counts builds since
-# that version started: the run number minus VERSION_FIRST_RUN, plus 1 (V1.2 started at run 74 as V1.2.1, V1.3 at run 149 as V1.3.1).
+# that version started: the run number minus VERSION_FIRST_RUN, plus 1 (V1.2 started at run 74 as V1.2.1, V1.3 at run 150 as V1.3.1).
 # The five newest builds are kept.
 name: Build client
 

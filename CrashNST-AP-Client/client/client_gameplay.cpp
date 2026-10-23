@@ -654,8 +654,8 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                     continue;
                 const auto scene = read_scene(GetCurrentProcess());
                 const auto level = level_key(scene.zone);
-                // traps start the moment Crash can move: not during the level intro, a death or a respawn
-                if (!scene.camera_active || level.empty() || !box_markers->player_ready())
+                // traps start once Crash can move, and has for 1.5 seconds: not during the level intro, a death or a respawn
+                if (!scene.camera_active || level.empty() || !box_markers->player_settled())
                     break;
                 // a Nitro Trap joins the waiting count and fires when the game has a Nitro to borrow
                 if (kind == ingame::TrapNitro)
@@ -707,7 +707,7 @@ void ClientRuntime::update_ownership(ClientTick &tick)
         try
         {
             const auto scene = read_scene(GetCurrentProcess());
-            if (scene.camera_active && !level_key(scene.zone).empty() && box_markers->player_ready())
+            if (scene.camera_active && !level_key(scene.zone).empty() && box_markers->player_settled())
             {
                 session.take_move_lock();
                 bool already = false;
@@ -733,7 +733,7 @@ void ClientRuntime::update_ownership(ClientTick &tick)
             // ahead, he gets a moment to start, then it falls instead)
             const auto scene = read_scene(GetCurrentProcess());
             const auto now = std::chrono::steady_clock::now();
-            if (scene.camera_active && !level_key(scene.zone).empty() && box_markers->player_ready() && box_markers->nitro_drop_ready())
+            if (scene.camera_active && !level_key(scene.zone).empty() && box_markers->player_settled() && box_markers->nitro_drop_ready())
             {
                 session.take_nitro();
                 box_markers->request_nitro_drop(0);

@@ -559,6 +559,13 @@ bool BoxMarkers::player_ready()
     unlock();
     return ready;
 }
+bool BoxMarkers::player_settled()
+{
+    lock();
+    const bool settled = shared_->player_settled != 0;
+    unlock();
+    return settled;
+}
 bool BoxMarkers::nitro_ready()
 {
     lock();

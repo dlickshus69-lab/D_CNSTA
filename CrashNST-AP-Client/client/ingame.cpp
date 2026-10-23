@@ -832,6 +832,11 @@ namespace
         unsigned width = 0, height = 0, next_glyph = 0;
         bool dirty = false;
         static constexpr unsigned atlas_size = 2048, cell = 32, max_vertices = 200000;
+        // V1.3: large text (the Nitro Trap's countdown) gets glyphs of its own, made at the size it is drawn, in the
+        // bottom quarter of the atlas (64 px cells); until then it was the 20 px HUD glyphs stretched 2x, blocky
+        static constexpr unsigned big_cell = 64, big_top = 1536;
+        std::map<std::pair<wchar_t, unsigned>, Glyph> big_glyphs;
+        unsigned next_big = 0;
         ~Renderer()
         {
             release(vs);
@@ -949,7 +954,7 @@ namespace
         {
             if (const auto it = glyphs.find(c); it != glyphs.end())
                 return it->second;
-            if (next_glyph + 1 >= atlas_size / cell * (atlas_size / cell))
+            if (next_glyph + 1 >= big_top / cell * (atlas_size / cell))
                 return glyphs.at(L'?');
             const auto slot = ++next_glyph, x = (slot % (atlas_size / cell)) * cell, y = (slot / (atlas_size / cell)) * cell;
             if (crash_font)
@@ -1045,6 +1050,98 @@ namespace
                 x += g.width;
             }
             return x;
+        }
+        // a glyph of the game's font made at `px` (its line height in pixels), 1:1 on screen: each pixel is the average of
+        // 16 points of the font's own image, read smoothly. False when the game's font isn't there, lacks the letter, or
+        // it doesn't fit a cell
+        bool big_glyph(wchar_t c, unsigned px, Glyph &out)
+        {
+            if (const auto it = big_glyphs.find({c, px}); it != big_glyphs.end())
+                return out = it->second, it->second.width > 0;
+            Glyph none{0, 0, 0};
+            if (!crash_font || !crash_font->line_height || next_big >= (atlas_size / big_cell) * ((atlas_size - big_top) / big_cell))
+                return big_glyphs[{c, px}] = none, false;
+            const auto found = crash_font->glyphs.find(c);
+            if (found == crash_font->glyphs.end())
+                return big_glyphs[{c, px}] = none, false;
+            const auto &source = found->second;
+            const float scale = px / crash_font->line_height;
+            const float gw = source.width * scale, gh = source.height * scale;
+            if (gw > big_cell - 1 || gh > big_cell - 1)
+                return big_glyphs[{c, px}] = none, false;
+            const auto slot = next_big++;
+            const unsigned x = (slot % (atlas_size / big_cell)) * big_cell, y = big_top + (slot / (atlas_size / big_cell)) * big_cell;
+            const auto W = crash_font->width, H = crash_font->height;
+            // the letter's own rectangle in the font image, in its pixels (samples stay inside it)
+            const float left = source.u * W, top = source.v * H, right = source.uu * W, bottom = source.vv * H;
+            const auto texel = [&](int sx, int sy) {
+                sx = std::clamp(sx, static_cast<int>(left), std::max(static_cast<int>(left), static_cast<int>(std::ceil(right)) - 1));
+                sy = std::clamp(sy, static_cast<int>(top), std::max(static_cast<int>(top), static_cast<int>(std::ceil(bottom)) - 1));
+                sx = std::clamp(sx, 0, static_cast<int>(W) - 1), sy = std::clamp(sy, 0, static_cast<int>(H) - 1);
+                return crash_font->pixels[static_cast<std::size_t>(sy) * W + sx];
+            };
+            for (unsigned yy = 0; yy < big_cell; ++yy)
+                for (unsigned xx = 0; xx < big_cell; ++xx)
+                {
+                    std::uint32_t pixel = 0;
+                    if (xx < std::ceil(gw) && yy < std::ceil(gh))
+                    {
+                        float sums[4]{};
+                        for (unsigned sy = 0; sy < 4; ++sy)
+                            for (unsigned sx = 0; sx < 4; ++sx)
+                            {
+                                const float fx = left + std::min(1.0f, (xx + (sx + 0.5f) / 4) / gw) * (right - left) - 0.5f;
+                                const float fy = top + std::min(1.0f, (yy + (sy + 0.5f) / 4) / gh) * (bottom - top) - 0.5f;
+                                const int x0 = static_cast<int>(std::floor(fx)), y0 = static_cast<int>(std::floor(fy));
+                                const float ax = fx - x0, ay = fy - y0;
+                                const std::uint32_t corners[4]{texel(x0, y0), texel(x0 + 1, y0), texel(x0, y0 + 1), texel(x0 + 1, y0 + 1)};
+                                const float weights[4]{(1 - ax) * (1 - ay), ax * (1 - ay), (1 - ax) * ay, ax * ay};
+                                for (unsigned k = 0; k < 4; ++k)
+                                    for (unsigned i = 0; i < 4; ++i)
+                                        sums[i] += weights[k] * ((corners[k] >> (i * 8)) & 255);
+                            }
+                        for (unsigned i = 0; i < 4; ++i)
+                            pixel |= static_cast<std::uint32_t>(std::min(255.0f, sums[i] / 16 + 0.5f)) << (i * 8);
+                    }
+                    texture[(y + yy) * atlas_size + x + xx] = pixel;
+                }
+            Glyph g{static_cast<float>(x) / atlas_size, static_cast<float>(y) / atlas_size, std::max(1.0f, (source.left + source.step + source.right) * scale),
+                    (source.x + source.left) * scale, source.y * scale};
+            dirty = true;
+            big_glyphs[{c, px}] = g;
+            out = g;
+            return true;
+        }
+        // large text, sharp at any size: the game's font made at `px` (the HUD's glyphs scaled when it isn't there)
+        float crisp_text(float x, float y, const std::string &value, unsigned color, unsigned px)
+        {
+            for (const auto c : wide(value))
+            {
+                Glyph g{0, 0, 0};
+                if (big_glyph(c, px, g))
+                {
+                    quad(std::round(x + g.x), std::round(y + g.y), big_cell, big_cell, color, g.u, g.v, static_cast<float>(big_cell) / atlas_size,
+                         static_cast<float>(big_cell) / atlas_size);
+                    x += g.width;
+                    continue;
+                }
+                const float scale = px / 20.0f;
+                const auto small = glyph(c);
+                quad(x + small.x * scale, y + small.y * scale, cell * scale, cell * scale, color, small.u, small.v, static_cast<float>(cell) / atlas_size,
+                     static_cast<float>(cell) / atlas_size);
+                x += small.width * scale;
+            }
+            return x;
+        }
+        float crisp_width(const std::string &value, unsigned px)
+        {
+            float width = 0;
+            for (const auto c : wide(value))
+            {
+                Glyph g{0, 0, 0};
+                width += big_glyph(c, px, g) ? g.width : glyph(c).width * (px / 20.0f);
+            }
+            return width;
         }
         // text drawn larger (the glyphs are scaled), for warnings in the middle of the screen
         float big_text(float x, float y, const std::string &value, unsigned color, float scale)
@@ -1356,19 +1453,34 @@ namespace
         }
         // the Nitro Trap's countdown, near the top middle of the screen (shown even with the HUD hidden), a number per
         // TNT beat; it goes away when the countdown ends and the Nitro comes
-        if (!startup_mode && scene.camera_active && snapshot->nitro_countdown_end)
+        // (hidden while Crash can't move: the countdown stands still then, V1.3)
+        if (!startup_mode && scene.camera_active && snapshot->nitro_countdown_end && snapshot->player_ready)
             if (const auto now = GetTickCount64(); now < snapshot->nitro_countdown_end)
             {
                 const auto step = nitro_countdown_step_ms;
                 const auto left = static_cast<unsigned>((snapshot->nitro_countdown_end - now + step - 1) / step);
                 const std::string warning = "NITRO INCOMING!  " + std::to_string(left);
-                const float scale = r.height >= 1000 ? 2.0f : 1.6f;
-                const float width = r.text_width(warning) * scale, x = (r.width - width) / 2, y = r.height * 0.16f;
-                r.quad(x - 18 * scale, y - 6 * scale, width + 36 * scale, 34 * scale, 0xbb101010);
+                // V1.3: the game's font made at this size (sharp at any resolution), in a box with a Nitro-green border
+                const unsigned px = static_cast<unsigned>(std::clamp(std::round(r.height * 0.034f), 24.0f, 60.0f));
+                const float width = std::round(r.crisp_width(warning, static_cast<unsigned>(px)));
+                const float pad_x = std::round(px * 0.75f), pad_y = std::round(px * 0.3f), line = std::round(px * 1.15f);
+                const float box_w = width + 2 * pad_x, box_h = line + 2 * pad_y;
+                const float bx = std::round((r.width - box_w) / 2), by = std::round(r.height * 0.14f);
+                const float edge = std::max(2.0f, std::round(px / 16.0f));
                 // Nitro green, blinking brighter as each number appears
                 const bool flash = (snapshot->nitro_countdown_end - now) % step > step - 200;
-                r.big_text(x + 2 * scale, y + 2 * scale, warning, 0xff000000, scale);
-                r.big_text(x, y, warning, flash ? 0xffb0ffb0 : 0xff30ff50, scale);
+                const unsigned green = flash ? 0xffb0ffb0 : 0xff30ff50, border = flash ? 0xffb0ffb0 : 0xe030d850;
+                r.quad(bx + edge * 2, by + edge * 2, box_w, box_h, 0x70000000);                   // its shadow
+                r.quad(bx, by, box_w, box_h, 0xe0121612);                                         // the box
+                r.quad(bx, by, box_w, edge, border);                                              // its border
+                r.quad(bx, by + box_h - edge, box_w, edge, border);
+                r.quad(bx, by, edge, box_h, border);
+                r.quad(bx + box_w - edge, by, edge, box_h, border);
+                r.quad(bx + edge, by + edge, box_w - 2 * edge, 1, 0x30ffffff);                    // a soft top light
+                const float tx = bx + pad_x, ty = by + pad_y;
+                const float shadow = std::max(2.0f, std::round(px / 14.0f));
+                r.crisp_text(tx + shadow, ty + shadow, warning, 0xff000000, px);
+                r.crisp_text(tx, ty, warning, green, px);
             }
         if (snapshot->visible && !startup_mode)
         {

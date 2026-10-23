@@ -3582,8 +3582,13 @@ namespace ingame
         static constexpr float drop_height = 420;
         struct NitroDropTrap
         {
-            enum Stage { Idle, Countdown, Ahead, Spawning, Settling, Falling } stage = Idle;
+            // Waiting (V1.3): it holds on to the trap until Crash has been able to move for a moment in a level where
+            // it works (not a gimmick level it's off in, with the Nitro and a spawner to borrow), then counts down
+            enum Stage { Idle, Waiting, Countdown, Ahead, Spawning, Settling, Falling } stage = Idle;
             bool ahead = false; // the coin flip: a Nitro appears ahead of Crash instead of falling onto him
+            bool chosen_ahead = false; // the coin flip as it came, for a start over
+            bool told_waiting = false;
+            std::uint64_t retry_at = 0;
             bool any = false;   // /nitro_drop any: an ordinary crate's spawner makes it (research)
             bool waited = false; // a scuba level's Nitro is waiting for a spot ahead (said once)
             std::uint64_t start = 0, spawned = 0, fall_start = 0;
@@ -3727,6 +3732,18 @@ namespace ingame
             if (!move_crate_body(entity, at) && !told)
                 told = true, std::cout << "Nitro drop: can't move the crate's physics body (" << (crate_physics(entity) ? "the game's code differs" : "no physics part")
                                        << ")\n" << std::flush;
+        }
+        // not now after all (the level changed before it came, or no Nitro could be made yet): it goes back to waiting and
+        // starts over, countdown and all, once it can (V1.3; before, the trap was lost)
+        void requeue_nitro_drop(Shared &state, const std::string &why, std::uint64_t delay_ms = 0)
+        {
+            auto &d = nitro_drop;
+            std::cout << "Nitro Trap: " << why << "; it waits and starts over once Crash can move in a level where it works\n" << std::flush;
+            const bool ahead = d.chosen_ahead, any = d.any;
+            d = {};
+            d.stage = NitroDropTrap::Waiting, d.ahead = d.chosen_ahead = ahead, d.any = any, d.told_waiting = true;
+            d.retry_at = GetTickCount64() + delay_ms;
+            state.nitro_countdown_end = 0;
         }
         void stop_nitro_drop(Shared &state, const char *why)
         {
@@ -3956,25 +3973,15 @@ namespace ingame
             {
                 state.nitro_drop_ack = state.nitro_drop_request;
                 if (d.stage != NitroDropTrap::Idle)
-                    std::cout << "Nitro drop: one is already falling\n" << std::flush;
-                else if (level.empty() || nitro_trap_exempt())
-                    std::cout << "Nitro drop: not in a level with Nitros\n" << std::flush;
+                    std::cout << "Nitro drop: one is already on its way\n" << std::flush;
                 else
                 {
                     d = {};
-                    d.stage = NitroDropTrap::Countdown, d.start = now, d.level = level;
+                    d.stage = NitroDropTrap::Waiting;
                     // one Nitro Trap, two endings, half and half (/nitro_drop fall or ahead picks one)
                     static std::mt19937 coin{std::random_device{}()};
-                    d.ahead = state.nitro_drop_kind == 2 || (state.nitro_drop_kind == 0 && std::bernoulli_distribution(0.5)(coin));
-                    if (nitro_ahead_only_level(level) && !d.ahead)
-                        d.ahead = true, std::cout << "Nitro Trap: in a scuba level it only appears ahead of Crash\n" << std::flush;
+                    d.ahead = d.chosen_ahead = state.nitro_drop_kind == 2 || (state.nitro_drop_kind == 0 && std::bernoulli_distribution(0.5)(coin));
                     d.any = state.nitro_drop_kind == 3;
-                    // a fresh look at the level during the countdown (and, in a level without Nitro crates, a search
-                    // for the Nitro's template in memory after it)
-                    nitro_level_scan(level);
-                    state.nitro_countdown_end = now + drop_countdown_ms;
-                    std::cout << "Nitro Trap: countdown, then a Nitro " << (d.ahead ? "appears ahead of Crash" : "falls onto Crash")
-                              << (d.any ? " (test: made by an ordinary crate's spawner)" : "") << "\n" << std::flush;
                 }
             }
             static std::uint64_t last_tick = 0;
@@ -3982,8 +3989,38 @@ namespace ingame
             last_tick = now;
             if (d.stage == NitroDropTrap::Idle)
                 return;
-            // the pause menu (or any stretch the game didn't run) stops the countdown and the fall where they are
-            if (state.menu_paused || dt > 250)
+            // waiting: until Crash has been able to move for a moment in a level where it works, with the Nitro and a
+            // spawner that counts nothing found there (the level scan runs meanwhile, see update_nitro_trap)
+            if (d.stage == NitroDropTrap::Waiting)
+            {
+                bool ready = now >= d.retry_at && !level.empty() && !nitro_trap_exempt() && state.player_settled && !state.menu_paused &&
+                             !nitro_spawn_state.component && nitro_scan_ready(level) && level_nitro_template(level);
+                if (ready)
+                {
+                    std::lock_guard lock(nitro_scan_mutex);
+                    ready = nitro_level_info.level == level && !nitro_level_info.spawners.empty();
+                }
+                if (!ready)
+                {
+                    if (!d.told_waiting && (level.empty() || nitro_trap_exempt()))
+                        d.told_waiting = true, std::cout << "Nitro Trap: waits until Crash can move in a level where it works\n" << std::flush;
+                    return;
+                }
+                d.stage = NitroDropTrap::Countdown, d.start = now, d.level = level, d.ticks = 0, d.waited = false;
+                if (nitro_ahead_only_level(level) && !d.ahead)
+                    d.ahead = true, std::cout << "Nitro Trap: in a scuba level it only appears ahead of Crash\n" << std::flush;
+                // a fresh look at the level during the countdown
+                nitro_level_scan(level);
+                state.nitro_countdown_end = now + drop_countdown_ms;
+                std::cout << "Nitro Trap: countdown, then a Nitro " << (d.ahead ? "appears ahead of Crash" : "falls onto Crash")
+                          << (d.any ? " (test: made by an ordinary crate's spawner)" : "") << "\n" << std::flush;
+                return;
+            }
+            // the pause menu (or any stretch the game didn't run) stops the countdown and the fall where they are; so does
+            // a death, a respawn or anything else that takes Crash's control away before the Nitro is out (V1.3: before,
+            // that called the trap off)
+            const bool before_nitro = d.stage == NitroDropTrap::Countdown || d.stage == NitroDropTrap::Ahead;
+            if (state.menu_paused || dt > 250 || (before_nitro && !state.player_ready))
             {
                 d.start += dt, d.spawned += dt, d.fall_start += dt;
                 if (state.nitro_countdown_end)
@@ -3992,19 +4029,17 @@ namespace ingame
             }
             if (level != d.level)
             {
-                d.stage = NitroDropTrap::Idle; // its memory went with the level: nothing to move
-                stop_nitro_drop(state, "the level changed");
+                // before the Nitro is out the trap starts over in the next level where it works; after, the Nitro's memory
+                // went with the level: nothing to move
+                if (before_nitro)
+                    requeue_nitro_drop(state, "the level changed before it came");
+                else
+                    d.stage = NitroDropTrap::Idle, stop_nitro_drop(state, "the level changed");
                 return;
             }
             const auto elapsed = now - d.start;
             if (d.stage == NitroDropTrap::Countdown)
             {
-                // Crash died or lost control (a death, a cutscene): the drop is called off
-                if (!state.player_ready)
-                {
-                    stop_nitro_drop(state, "called off: Crash can't move");
-                    return;
-                }
                 // a tick as each number appears, like a TNT crate
                 if (d.ticks < 3 && elapsed >= static_cast<std::uint64_t>(d.ticks) * drop_step_ms)
                     countdown_tick(d.ticks++);
@@ -4018,11 +4053,6 @@ namespace ingame
             }
             if (d.stage == NitroDropTrap::Ahead)
             {
-                if (!state.player_ready)
-                {
-                    stop_nitro_drop(state, "called off: Crash can't move");
-                    return;
-                }
                 // a Nitro ahead of him, where the ahead kind always puts it: on the ground he is running on
                 std::string why;
                 if (nitro_spawn(why))
@@ -4057,7 +4087,7 @@ namespace ingame
                         state.nitro_countdown_end = std::min<std::uint64_t>(state.nitro_countdown_end, now);
                         return;
                     }
-                    stop_nitro_drop(state, ("no Nitro: " + why).c_str());
+                    requeue_nitro_drop(state, "no Nitro could be made (" + why + ")", 3000);
                     return;
                 }
                 d.stage = NitroDropTrap::Spawning, d.spawned = now;
@@ -4068,7 +4098,7 @@ namespace ingame
                 if (!trap_nitro.entity || trap_nitro.appeared < d.spawned)
                 {
                     if (now - d.spawned > 1500)
-                        stop_nitro_drop(state, "the Nitro did not appear");
+                        requeue_nitro_drop(state, "the Nitro did not appear", 3000);
                     return;
                 }
                 d.entity = trap_nitro.entity, d.high = trap_nitro.at;
@@ -4566,7 +4596,7 @@ namespace ingame
             {
                 next_ready = now + 500;
                 std::array<float, 3> crash{}, spot{};
-                const bool can = !level.empty() && !nitro_trap_exempt() && state.player_ready && !nitro_spawn_state.component &&
+                const bool can = !level.empty() && !nitro_trap_exempt() && state.player_settled && !nitro_spawn_state.component &&
                                  nitro_drop.stage == NitroDropTrap::Idle && trap_actor_position(crash);
                 // the Nitro's template (in a level without Nitro crates, looked for in memory once while a Nitro Trap
                 // waits) and a spawner that counts nothing to make it with, from the level scan (cheap here: no
@@ -7521,6 +7551,14 @@ namespace ingame
             const bool in_level = !level_key(string(value<Address>(marker_world + 184))).empty();
             const bool camera = scene().camera_active;
             state.player_ready = in_level && (actor ? player_can_move(actor, camera) : camera) ? 1u : 0u;
+            // and has been for 1.5 seconds without a break: traps start only then
+            static std::uint64_t ready_since = 0;
+            const auto tick_now = GetTickCount64();
+            if (!state.player_ready)
+                ready_since = 0;
+            else if (!ready_since)
+                ready_since = tick_now;
+            state.player_settled = state.player_ready && tick_now - ready_since >= 1500 ? 1u : 0u;
             // running traps pause every frame Crash can't move (hubs, menus, loading, the pause menu, the level's
             // intro, dying, respawning): their end times move on by that time, so they pick up again at once
             static std::uint64_t last_frame = 0;
