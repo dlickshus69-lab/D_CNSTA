@@ -1145,7 +1145,11 @@ namespace ingame
             const auto sender = event_object(value<Address>(event + 32));
             const bool aku = who.find("Aku") != std::string::npos || sender.find("Aku") != std::string::npos || graph.find("AkuAku") != std::string::npos;
             std::lock_guard lock(event_mutex);
-            if (aku ? aku_event_lines >= 150 : (event_lines >= 250 || !events_seen.insert(who + "|" + graph + "|" + name).second))
+            // Aku: every message to Aku Aku's manager, but a crate's or mask's own repeats only a few times each
+            static std::map<std::string, unsigned> aku_repeats;
+            if (aku && graph.find("AkuAkuManager") == std::string::npos && ++aku_repeats[who + "|" + name] > 4)
+                return;
+            if (aku ? aku_event_lines >= 400 : (event_lines >= 250 || !events_seen.insert(who + "|" + graph + "|" + name).second))
                 return;
             ++(aku ? aku_event_lines : event_lines);
             std::ostringstream out;
@@ -1173,7 +1177,7 @@ namespace ingame
                 }
             }
             std::cout << out.str() << "\n" << std::flush;
-            if (aku_event_lines >= 150)
+            if (aku_event_lines >= 400)
                 event_research_done = true;
         }
         Address event_sent(Address event, Address context)
@@ -3130,6 +3134,25 @@ namespace ingame
             return false;
         }
         void aku_give_crate(Address actor, const std::array<float, 3> &crash);
+        // the next way to try after the message: 1 = set AkuAkuCount, 2 = an Aku Aku crate's spawner
+        std::atomic_uint aku_give_next{0};
+        // AkuAkuCount (Crash_DamageManager's mask count) set with the game's own number setter, the one that tells
+        // whatever listens to it (Aku Aku's manager has a listener). False if it can't be done safely
+        bool aku_give_count(int count)
+        {
+            // number "reset": mov edx,[rcx+0x18]; jmp +0x502200 (the same check the lock's clearing uses)
+            const bool verified = code_matches(0x4fb420, std::array<unsigned char, 8>{0x8b, 0x51, 0x18, 0xe9, 0xd8, 0x6d, 0x00, 0x00});
+            const auto variable = aku_variable.load();
+            if (!verified || !variable || !typed(variable, 0x155e9f8))
+            {
+                std::cout << "Aku give: AkuAkuCount can't be set here (" << (!verified ? "setter differs" : !variable ? "not found" : "wrong type") << ")\n"
+                          << std::flush;
+                return false;
+            }
+            reinterpret_cast<void (*)(Address, int)>(base() + 0x502200)(variable, count);
+            std::cout << "Aku give: set AkuAkuCount to " << count << " with the game's own setter\n" << std::flush;
+            return true;
+        }
         void aku_give_followup()
         {
             const auto at = aku_give_check_at.load();
@@ -3140,12 +3163,27 @@ namespace ingame
             const auto [state, mask] = aku_manager_state(actor);
             std::cout << "Aku give: a second later Aku's manager is in state " << state << (mask ? ", with a mask out" : ", no mask out") << "\n"
                       << std::flush;
-            // the message didn't bring a mask out: an Aku Aku crate in the level makes one at Crash instead
-            std::array<float, 3> crash{};
-            if (!mask && actor && crash_position(crash))
+            if (mask || !actor)
             {
-                std::cout << "Aku give: no mask from the message; trying an Aku Aku crate's spawner\n" << std::flush;
-                filler_mask_since = GetTickCount64();
+                aku_give_next = 0;
+                return;
+            }
+            filler_mask_since = GetTickCount64();
+            if (aku_give_next.load() == 1)
+            {
+                aku_give_next = 2;
+                std::cout << "Aku give: no mask yet; trying the mask count\n" << std::flush;
+                if (aku_give_count(1))
+                {
+                    aku_give_check_at = GetTickCount64() + 1000;
+                    return;
+                }
+            }
+            aku_give_next = 0;
+            std::array<float, 3> crash{};
+            if (crash_position(crash))
+            {
+                std::cout << "Aku give: no mask yet; trying an Aku Aku crate's spawner\n" << std::flush;
                 aku_give_crate(actor, crash);
             }
         }
@@ -3180,6 +3218,7 @@ namespace ingame
                 const auto [state, mask] = aku_manager_state(actor);
                 std::cout << "Aku give: sent Aku Aku 5bnreye5 (what he gets when Crash picks up a crate's mask); right after, his manager is in state " << state
                           << (mask ? ", with a mask out" : ", no mask out") << "\n" << std::flush;
+                aku_give_next = 1;
                 aku_give_check_at = GetTickCount64() + 1000;
                 return;
             }
