@@ -277,7 +277,9 @@ class AbilityLogic(Choice):
     Spin, and gems and relics keep the cautious needs.
     Either way, levels that can't be cleared by jumping alone need their move for everything past the
     obstacle: The Great Gate and Native Fortress need Spin; Crash Crush and Bee-Having need Slide; Sewer or Later needs Spin
-    and Crouch Jump; Un-Bearable needs Body Slam and Slide; The Eel Deal's bonus round needs Spin.
+    and Crouch Jump; The Eel Deal's bonus round needs Spin. Some crates need a move of their own: arrow crates, crates
+    on a TNT or Nitro and crates in stacks four high need Spin; iron-bound crates and Turtle Woods' underground room
+    need Body Slam. Gimmick stages keep vanilla controls, so they need no moves.
     Gimmick stages need no moves either way.
     """
 

@@ -8,6 +8,7 @@ from BaseClasses import Item, ItemClassification, Location, Region
 from worlds.AutoWorld import WebWorld, World
 from .Options import CrashOptions, crash_option_groups
 from .data import (
+    GIMMICK_LEVELS,
     GAME,
     PROTOCOL,
     LEVELS,
@@ -118,7 +119,8 @@ class CrashWorld(World):
         """Extra tools logic expects before a gold or platinum relic. Vehicle stages and Crash 1 have none."""
         if event != "relic" or not self.relic_tier:
             return ()
-        if level.campaign == 2:
+        # on the polar bear, the jetpack and the jet board the Speed Shoes do nothing
+        if level.campaign == 2 and level.key not in GIMMICK_LEVELS and level.key not in ("L203", "L211"):
             return ("Crash 2 - Speed Shoes",)
         if level.campaign == 3 and level.key not in C3_VEHICLE_LEVELS:
             # platinum expects the full Crash 3 moveset, gold only the Speed Shoes

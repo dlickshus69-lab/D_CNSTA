@@ -389,7 +389,6 @@ CLEAR_MOVES = {
     "L108": ("Spin",),                  # Native Fortress: the spinning log wheels
     "L209": ("Slide",),                 # Crash Crush: slide under the electric gates
     "L212": ("Spin", "Crouch Jump"),    # Sewer or Later: break the crate walls, crawl under the low pipes
-    "L215": ("Body Slam", "Slide"),     # Un-Bearable: the on-foot parts
     "L220": ("Slide",),                 # Bee-Having: slide under the electric fence, slide-jump the long gaps
 }
 # boxes in a level's bonus round that need a move the rest of the level doesn't
@@ -513,6 +512,52 @@ def crate_event(crate):
     return "box:" + crate["name"] + ("@gem_route" if crate.get("route_member") else "")
 
 
+def _crate_moves():
+    """Crates logic can't expect to break by jumping alone, from their kind and where they sit (relaxed Ability Logic
+    expects only jumping for boxes; cautious already expects these moves):
+    - arrow crates bounce Crash when he jumps on them: Spin breaks them
+    - iron-bound crates (Crash 2 and 3) only break under a Body Slam
+    - a crate sitting on a TNT or Nitro crate (often with an iron crate on top, as in The High Road and Heavy
+      Machinery) and every crate in a stack four or more high (Cold Hard Crash): Spin from the side
+    - Turtle Woods' underground room, below the floor Crash body slams through: Body Slam"""
+    import struct
+    from collections import defaultdict
+    def spot(crate):
+        return struct.unpack("<3f", bytes.fromhex(crate["position_bits"]))
+    def explosive(crate):
+        return "TNT" in crate["name"] or "Nitro" in crate["name"]
+    moves = defaultdict(set)
+    groups = defaultdict(list)
+    for crate in CRATES:
+        groups[(crate["level"], crate.get("bonus_member") or crate.get("map_member") or "")].append((crate, spot(crate)))
+        name, key = crate["name"], (crate["level"], crate_event(crate))
+        if "Arrow" in name and "Iron" not in name:
+            moves[key].add("Spin")
+        if "IronBound" in name:
+            moves[key].add("Body Slam")
+        if crate["level"] == "L201" and spot(crate)[2] < -1000:
+            moves[key].add("Body Slam")
+    for members in groups.values():
+        for crate, (x, y, z) in members:
+            if explosive(crate):
+                continue
+            column = sorted({round(pz): pz for _, (px, py, pz) in members if abs(px - x) < 30 and abs(py - y) < 30}.values())
+            at = min(range(len(column)), key=lambda i: abs(column[i] - z))
+            low = high = at
+            while low > 0 and 55 < column[low] - column[low - 1] < 105:
+                low -= 1
+            while high + 1 < len(column) and 55 < column[high + 1] - column[high] < 105:
+                high += 1
+            on_explosive = any(explosive(other) and abs(px - x) < 30 and abs(py - y) < 30 and 55 < z - pz < 105
+                               for other, (px, py, pz) in members)
+            if high - low + 1 >= 4 or on_explosive:
+                moves[(crate["level"], crate_event(crate))].add("Spin")
+    return {key: tuple(sorted(value)) for key, value in moves.items()}
+
+
+CRATE_MOVES = _crate_moves()
+
+
 def crate_location(crate):
     name = f"{BY_KEY[crate['level']].name} - Box {crate['name']}"
     if crate.get("map_member"):
@@ -600,14 +645,15 @@ def move_requirements(level, event, spin_shuffled, jump_only_levels, relaxed=Fal
         override = MOVE_OVERRIDES.get((level.key, "box:"))
     if override is not None:
         return tuple(override)
-    # a level that can't be cleared by jumping alone needs its move for everything past the obstacle, and some bonus
-    # rounds need one of their own
-    way = CLEAR_MOVES.get(level.key, ())
-    if event.startswith("box:") and "@bonus:" in event:
-        way = tuple(dict.fromkeys((*way, *BONUS_MOVES.get(level.key, ()))))
-    # hog, polar bear, jetpack and Crash 3 vehicle stages keep vanilla controls (except their on-foot parts above)
+    # hog, polar bear, jetpack and Crash 3 vehicle stages keep vanilla controls (Crashsanity too), so they need no moves
     if level.key in GIMMICK_LEVELS:
-        return way
+        return ()
+    # a level that can't be cleared by jumping alone needs its move for everything past the obstacle; some bonus rounds
+    # and some crates (arrow crates, iron-bound crates, tall stacks, ...) need one of their own
+    way = CLEAR_MOVES.get(level.key, ())
+    if event.startswith("box:"):
+        extra = (*BONUS_MOVES.get(level.key, ()),) if "@bonus:" in event else ()
+        way = tuple(dict.fromkeys((*way, *extra, *CRATE_MOVES.get((level.key, event), ()))))
     if relaxed:
         if event in ("clear", "crystal"):
             return tuple(dict.fromkeys((*(("Spin",) if level.key.startswith("B") else ()), *way)))

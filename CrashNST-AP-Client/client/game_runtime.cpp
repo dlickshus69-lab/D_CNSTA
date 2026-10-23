@@ -410,6 +410,8 @@ namespace ingame
         std::atomic_uint observed_deaths{0};
         // deaths not yet taken off the trap timers (trap_death_mercy_ms each)
         std::atomic_uint mercy_deaths{0};
+        // when PlayerDied last turned on
+        std::atomic<std::uint64_t> died_flag_at{0};
         FunctionHook death_hook;
         // research: every graph event the game sends goes through +0x767da0 (DeathLink sends one through it too)
         FunctionHook event_hook;
@@ -425,6 +427,10 @@ namespace ingame
         }
         // Crash_DamageManager's BonusRoundActive game variable: on from a bonus round's start until it ends
         std::atomic<Address> bonus_round_variable{0};
+        // ... and TimeTrialActive: on during a time trial run (deaths there, and restarts, aren't sent)
+        std::atomic<Address> time_trial_variable{0};
+        // the last time the pause menu was open: a "death" right after it is the menu's Restart
+        std::atomic<std::uint64_t> menu_seen_at{0};
         // Aku watch (research for an Aku Aku filler): the AkuAkuCount and WumpaCount game variables; their first
         // bytes are logged whenever they change, to see where the game keeps the mask count
         std::atomic<Address> aku_variable{0}, wumpa_variable{0};
@@ -488,13 +494,18 @@ namespace ingame
             const auto variable = bonus_round_variable.load();
             return variable && typed(variable, 0x155ebf0) && reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60)(variable);
         }
+        bool time_trial_active()
+        {
+            const auto variable = time_trial_variable.load();
+            return variable && typed(variable, 0x155ebf0) && reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60)(variable);
+        }
         void record_death_change(bool before, bool after)
         {
             if (before == after)
                 return;
             // every death counts for the trap mercy, sent or not (a received DeathLink, a bonus round)
             if (after)
-                ++mercy_deaths;
+                ++mercy_deaths, died_flag_at = GetTickCount64();
             if (!after)
             {
                 remote_death = false;
@@ -506,6 +517,18 @@ namespace ingame
             if (bonus_round_active())
             {
                 std::cout << "DeathLink: died in a bonus round, not sent.\n" << std::flush;
+                return;
+            }
+            // time trials: a death (or a restart) there only costs the run
+            if (time_trial_active())
+            {
+                std::cout << "DeathLink: died in a time trial, not sent.\n" << std::flush;
+                return;
+            }
+            // Restart in the pause menu runs the death script too
+            if (GetTickCount64() - menu_seen_at.load() < 2500)
+            {
+                std::cout << "DeathLink: Restart from the pause menu, not sent.\n" << std::flush;
                 return;
             }
             ++observed_deaths;
@@ -1264,9 +1287,11 @@ namespace ingame
         }
         Address unbound_logged = 0;
         unsigned unbound_rescan = 0;
-        // forms without a PlayerDied (seen by health): the actor and whether it was alive last frame
+        // rides and forms without a PlayerDied (seen by health): the actor, whether it was alive last frame, and when
+        // its health ran out (waiting to see whether PlayerDied follows)
         Address health_actor = 0;
         bool health_alive = false;
+        std::uint64_t health_death_at = 0;
         void bind_player_death(Address actor)
         {
             if (actor == last_actor && bound_player_died())
@@ -1282,6 +1307,7 @@ namespace ingame
             }
             death_handle = 0;
             bonus_round_variable = 0;
+            time_trial_variable = 0;
             no_aku_variable = 0;
             const bool on_foot = actor == player();
             std::string graphs;
@@ -1338,6 +1364,8 @@ namespace ingame
                         const auto name = string(value<Address>(handle + 8), 47);
                         if (name == "BonusRoundActive")
                             bonus_round_variable = variable;
+                        if (name == "TimeTrialActive")
+                            time_trial_variable = variable;
                         if (name == "AkuAkuCount")
                             aku_variable = variable;
                         if (name == "NoAkuAkuMasks")
@@ -5641,7 +5669,10 @@ namespace ingame
         void update_c3_buttons(Shared &state, const std::string &zone)
         {
             static std::uint64_t next = 0, pending_triggers = 0;
-            static std::set<std::pair<Address, Address>> platform_spawn_attempts;
+            // the secret platform's spawn requests this hub visit: how many, and when the last one went out. A request
+            // made while the hub is still settling can come to nothing, so it is asked again (every 3 s, up to 5 times)
+            // until the platform is there
+            static std::map<std::pair<Address, Address>, std::pair<unsigned, std::uint64_t>> platform_spawn_attempts;
             if (!state.c3_buttons_ready || hub_campaign(zone) != 3)
             {
                 pending_triggers = 0;
@@ -5676,11 +5707,14 @@ namespace ingame
                         for (const auto component : components)
                         {
                             const auto method = c3_platform_spawn_method(component, entity);
-                            if (method && platform_spawn_attempts.emplace(entity, component).second)
+                            auto &attempt = platform_spawn_attempts[{entity, component}];
+                            if (method && attempt.first < 5 && (!attempt.first || GetTickCount64() - attempt.second > 3000))
                             {
+                                ++attempt.first;
+                                attempt.second = GetTickCount64();
                                 reinterpret_cast<void (*)(Address, Address, unsigned, Address)>(base() + 0xc988c0)(method, component, 0, 0);
-                                std::cout << "Crash 3 secret platform spawn requested through the game script.\n"
-                                          << std::flush;
+                                std::cout << "Crash 3 secret platform spawn requested through the game script (try "
+                                          << attempt.first << ").\n" << std::flush;
                             }
                         }
                 }
@@ -6054,6 +6088,8 @@ namespace ingame
             static bool was_paused = false;
             const auto now = GetTickCount64();
             const bool paused = !state.player_ready || state.menu_paused;
+            if (state.menu_paused)
+                menu_seen_at = now;
             // a trap that does nothing in this level waits for one where it works: its time stands still meanwhile
             unsigned off_here = 0;
             if (in_level && !paused)
@@ -6226,16 +6262,28 @@ namespace ingame
         const bool alive = health > 0 && !(value<unsigned char>(body + 288) & 4) && !scripted_death;
         if (!alive)
             state.death_ack = state.death_request;
-        // a form with no PlayerDied: a death is its health running out
-        if (!died_variable && body != actor)
+        // on a ride (and for a form with no PlayerDied) a death is also its health running out: the jet ski levels
+        // never set PlayerDied when Coco crashes, only the pause menu's Restart does. If PlayerDied doesn't follow
+        // within 1.5 s, the health counts as the death (with the same bonus round, time trial and Restart rules)
+        if (trap_gimmick_level(key) || (!died_variable && body != actor))
         {
-            if (body == health_actor && health_alive && !alive)
+            const auto now = GetTickCount64();
+            const bool health_dead = health <= 0 || (value<unsigned char>(body + 288) & 4);
+            if (body != health_actor)
+                health_death_at = 0;
+            else if (health_alive && health_dead)
+                health_death_at = now;
+            if (health_death_at && now - health_death_at > 1500)
             {
-                std::cout << "DeathLink: " << string(value<Address>(body + 128), 64) << " ran out of health.\n" << std::flush;
-                record_death_change(false, true);
+                if (now - died_flag_at.load() > 4000)
+                {
+                    std::cout << "DeathLink: " << string(value<Address>(body + 128), 64) << " ran out of health on a ride.\n" << std::flush;
+                    record_death_change(false, true);
+                }
+                health_death_at = 0;
             }
             health_actor = body;
-            health_alive = alive;
+            health_alive = !health_dead;
         }
         if (remote_death && alive && GetTickCount64() > remote_deadline)
         {
@@ -6303,9 +6351,9 @@ namespace ingame
     bool darkness_trap_exempt()
     {
         const auto key = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
-        // Darkness stays on underwater (Under Pressure, Deep Trouble) and on Coco's jet ski (Makin' Waves, Tell No
+        // Darkness stays on underwater (Under Pressure, Deep Trouble); Coco's jet ski levels (Makin' Waves, Tell No
         // Tales, Ski Crazed); the jet-board levels are not gimmick levels here, so it stays on there too
-        static const std::set<std::string> dark{"L302", "L312", "L305", "L318", "L326"};
+        static const std::set<std::string> dark{"L302", "L312"};
         return special_level(key) && !dark.count(key);
     }
     unsigned movement_double_jump(unsigned owned)

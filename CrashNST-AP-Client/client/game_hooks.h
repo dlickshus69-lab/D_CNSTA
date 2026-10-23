@@ -63,6 +63,7 @@ public:
     ~CrateEvents();
     std::vector<CrateBreak> drain();
     void detach();
+    std::uintptr_t meta() const { return before_.meta; }
 
 private:
     HANDLE process_ = nullptr;

@@ -10,8 +10,8 @@
 using save_probe::level_key;
 // stages where Crash (or Coco) rides or flies something: the hog, polar bear, jet ski, jetpack, plane, bike, tiger and
 // scuba levels (the gimmick levels), and the Crash 2 jet-board levels. The on-foot death script a DeathLink runs breaks
-// the ride there (on Coco's jet ski it left her invisible and respawned her in the wrong place), so a DeathLink costs a
-// life there instead
+// the ride there (on Coco's jet ski it left her invisible and respawned her in the wrong place), and taking a life
+// through the lives reward didn't work, so a DeathLink received there waits until the player is on foot again
 static bool ridden_level(const std::string &key)
 {
     static const char *const levels[]{"L107", "L114", "L208", "L213", "L215", "L222", "L224", "L226", "L302", "L303",
@@ -217,35 +217,21 @@ void ClientRuntime::update_zone(ClientTick &tick)
             tick.room_ready && session.slot_data()["death_link"].asBool() && death_link_level(active_zone);
         const bool ride = apply && ridden_level(active_zone.key);
         if (ride)
-            ++deathlink_life_losses;
+            deathlink_held = true;
         else if (apply)
             box_markers->receive_death();
         AP_DeathLinkClear();
-        print_console(ride    ? "DeathLink received. You're on a ride, so you lose a life instead."
+        print_console(ride    ? "DeathLink received while you're on a ride. It gets you once you're on foot again."
                       : apply ? "DeathLink received."
                               : "DeathLink ignored outside an active level.");
     }
-    // a DeathLink on a ride: a life is taken once the game's lives reward is free (the level must still be running)
-    if (deathlink_life_losses && (!death_link_level(active_zone) || !ridden_level(active_zone.key)))
-        deathlink_life_losses = 0;
-    if (deathlink_life_losses && ability_access && !ability_refresh_pending && ability_access->filler_ready() &&
-        !ability_access->filler_pending())
+    // a DeathLink held from a ride: it strikes in the next level played on foot (once, however many came in)
+    if (deathlink_held && box_markers && tick.online && tick.room_ready && session.slot_data()["death_link"].asBool() &&
+        death_link_level(active_zone) && !ridden_level(active_zone.key))
     {
-        const auto scene = read_scene(GetCurrentProcess());
-        if (scene.camera_active && scene.zone_address)
-        {
-            try
-            {
-                ability_access->queue_life_loss(99999 - deathlink_tickets++ % 50000, scene.zone_address);
-                --deathlink_life_losses;
-                std::cout << "DeathLink on a ride: one life taken.\n" << std::flush;
-            }
-            catch (const std::exception &error)
-            {
-                std::cerr << "DeathLink life loss: " << error.what() << std::endl;
-                deathlink_life_losses = 0;
-            }
-        }
+        deathlink_held = false;
+        box_markers->receive_death();
+        print_console("The DeathLink from your ride catches up with you.");
     }
 }
 
@@ -311,6 +297,25 @@ void ClientRuntime::update_ownership(ClientTick &tick)
             ability_error = error.what();
         }
     }
+    // the box observer listens to one level's crate script. If the game has since registered another one (a level
+    // reload, a restart, a bonus round's reset), it is attached again to the current one, about once a second
+    if (crate_events && tick.box_checks && tick.room_ready && std::chrono::steady_clock::now() >= next_crate_recheck)
+    {
+        next_crate_recheck = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        try
+        {
+            const auto meta = find_crate_metadata(pid, crate_pointer);
+            if (meta && meta != crate_events->meta())
+            {
+                std::cout << "Box observer: the level's crate script changed; attaching to the new one.\n" << std::flush;
+                crate_events.reset();
+                next_crate_probe = std::chrono::steady_clock::now();
+            }
+        }
+        catch (const std::exception &)
+        {
+        } // mid-load; the next check or the drain sorts it out
+    }
     // box checks shouldnt wait for full gem/ability handle discovery during level loading
     if (!crate_events && tick.box_checks && tick.room_ready && std::chrono::steady_clock::now() >= next_crate_probe)
     {
@@ -322,6 +327,7 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                 crate_events =
                     std::make_unique<CrateEvents>(pid, meta, box_markers ? box_markers->crate_identity() : 0);
                 crate_error.clear();
+                std::cout << "Box observer attached.\n" << std::flush;
             }
         }
         catch (const std::exception &error)
@@ -350,6 +356,7 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                         crate_events = std::make_unique<CrateEvents>(pid, found.crate_meta,
                                                                      box_markers ? box_markers->crate_identity() : 0);
                         crate_error.clear();
+                        std::cout << "Box observer attached.\n" << std::flush;
                     }
                     catch (const std::exception &error)
                     {

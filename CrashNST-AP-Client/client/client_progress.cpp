@@ -1,6 +1,7 @@
 #include "client_runtime.h"
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <iostream>
 #include "crate_catalogue.h"
 namespace
@@ -306,11 +307,44 @@ void ClientRuntime::drain_crates(ClientTick &tick)
                 const auto level = level_key(zone);
                 if (!tick.seed_matches || !tick.levels.count(level))
                     continue;
-                const auto spec = std::find_if(std::begin(box_specs), std::end(box_specs), [&](const auto &box) {
+                auto spec = std::find_if(std::begin(box_specs), std::end(box_specs), [&](const auto &box) {
                     return level == box.level && event.name == box.name && event.position == box.position;
                 });
+                // a crate the game made again (after a death, or a bonus round that started over) can sit a little
+                // off its catalogued spot: then the one crate of that name in the level, or the nearest of them
                 if (spec == std::end(box_specs))
+                {
+                    const auto at = [](const std::array<unsigned char, 12> &bytes)
+                    {
+                        std::array<float, 3> p{};
+                        std::memcpy(p.data(), bytes.data(), 12);
+                        return p;
+                    };
+                    const auto here = at(event.position);
+                    float best = 400.0f * 400.0f;
+                    for (auto it = std::begin(box_specs); it != std::end(box_specs); ++it)
+                    {
+                        if (level != it->level || event.name != it->name)
+                            continue;
+                        const auto there = at(it->position);
+                        const float dx = here[0] - there[0], dy = here[1] - there[1], dz = here[2] - there[2];
+                        const float distance = dx * dx + dy * dy + dz * dz;
+                        if (distance < best)
+                            best = distance, spec = it;
+                    }
+                }
+                if (spec == std::end(box_specs))
+                {
+                    if (unmatched_crates_logged < 40)
+                    {
+                        ++unmatched_crates_logged;
+                        float p[3]{};
+                        std::memcpy(p, event.position.data(), 12);
+                        std::cout << "Box observer: broken crate " << event.name << " in " << level << " (" << event.zone << ") at "
+                                  << p[0] << ", " << p[1] << ", " << p[2] << " isn't in the client's crate list.\n" << std::flush;
+                    }
                     continue;
+                }
                 const auto check = tick.checks.find({level, spec->event_name()});
                 if (check == tick.checks.end() || check->second != spec->id)
                     continue;
