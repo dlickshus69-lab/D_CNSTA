@@ -3080,7 +3080,7 @@ namespace ingame
         // picks it up (s8h11iit; the logs show it right after an Aku Aku crate breaks, with 232 in its one field), sent
         // the same way a DeathLink death is. Works in any level, no crate needed. False if the message isn't there as
         // expected (nothing is sent then)
-        bool aku_give_message_now(Address actor)
+        bool aku_give_message_now(Address actor, const std::string &id = "5bnreye5", const char *field_name = nullptr, std::uint64_t field_value = 0)
         {
             if (!event_hook.installed && !code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
                                                                                                 0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0}))
@@ -3098,18 +3098,24 @@ namespace ingame
                 {
                     const auto message = value<Address>(delegator + 24), target = value<Address>(delegator + 32);
                     if (!typed(delegator, 0x13bc268) || !typed(message, 0x17b6578) || !typed(target, 0x13bbcb8) ||
-                        string(value<Address>(message + 16), 120) != "Crash_AkuAkuManager_c.New_Graph_Event_1_id_s8h11iit")
+                        string(value<Address>(message + 16), 120) != "Crash_AkuAkuManager_c.New_Graph_Event_1_id_" + id)
                         continue;
-                    const auto [offset, size] = message_field(message, "Field_id_8h9y0rce");
-                    if (!field_at(message, "_sender", 32, 8) || offset < 40 || offset + size > 88 || (size != 1 && size != 4 && size != 8))
+                    if (!field_at(message, "_sender", 32, 8))
                     {
-                        std::cout << "Aku give: the pickup message's layout differs (its field at +" << offset << ", " << size << " bytes); nothing sent\n"
-                                  << std::flush;
+                        std::cout << "Aku give: " << id << "'s layout differs; nothing sent\n" << std::flush;
                         return false;
                     }
                     std::array<Address, 11> sender{base() + 0x13bc390, 0, message, target};
-                    const std::uint64_t value = 232;
-                    std::memcpy(reinterpret_cast<unsigned char *>(sender.data()) + offset, &value, size);
+                    if (field_name)
+                    {
+                        const auto [offset, size] = message_field(message, field_name);
+                        if (offset < 40 || offset + size > 88 || (size != 1 && size != 4 && size != 8))
+                        {
+                            std::cout << "Aku give: " << id << "'s field is at +" << offset << ", " << size << " bytes; nothing sent\n" << std::flush;
+                            return false;
+                        }
+                        std::memcpy(reinterpret_cast<unsigned char *>(sender.data()) + offset, &field_value, size);
+                    }
                     std::array<Address, 6> context{component};
                     own_aku_message = true;
                     reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(reinterpret_cast<Address>(sender.data()),
@@ -3117,7 +3123,7 @@ namespace ingame
                     own_aku_message = false;
                     return true;
                 }
-                std::cout << "Aku give: Crash's Aku Aku manager has no pickup message (s8h11iit) here\n" << std::flush;
+                std::cout << "Aku give: Crash's Aku Aku manager has no " << id << " message here\n" << std::flush;
                 return false;
             }
             std::cout << "Aku give: Crash's Aku Aku manager wasn't found\n" << std::flush;
@@ -3172,7 +3178,7 @@ namespace ingame
             if (aku_give_message_now(actor))
             {
                 const auto [state, mask] = aku_manager_state(actor);
-                std::cout << "Aku give: sent the pickup message to Aku Aku; right after, his manager is in state " << state
+                std::cout << "Aku give: sent Aku Aku 5bnreye5 (what he gets when Crash picks up a crate's mask); right after, his manager is in state " << state
                           << (mask ? ", with a mask out" : ", no mask out") << "\n" << std::flush;
                 aku_give_check_at = GetTickCount64() + 1000;
                 return;

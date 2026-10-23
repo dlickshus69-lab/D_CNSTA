@@ -322,10 +322,14 @@ void ClientRuntime::update_display(ClientTick &tick)
         const auto deaths = box_markers->deaths();
         if (deaths != last_deaths)
         {
-            if (death_link && tick.online)
+            if (deaths > last_deaths)
             {
-                AP_DeathLinkSend();
-                print_console("DeathLink sent.");
+                if (death_link && tick.online)
+                {
+                    AP_DeathLinkSend();
+                    print_console("DeathLink sent.");
+                }
+                // the death counter counts your deaths with or without DeathLink
                 try
                 {
                     count_death(slot);
@@ -406,9 +410,9 @@ void ClientRuntime::update_death_tally()
     }
     if (!box_markers)
         return;
-    // always on screen with DeathLink on: the total, then every player in the room (0 until they die), most first
+    // always on screen: the total; with DeathLink on and others in the room, every player's under it (0 until they
+    // die), most first
     std::vector<std::string> lines;
-    if (session.slot_data()["death_link"].asBool())
     {
         std::map<std::string, unsigned> shown = death_tally;
         shown.emplace(slot, 0);
@@ -421,9 +425,10 @@ void ClientRuntime::update_death_tally()
         std::vector<std::pair<std::string, unsigned>> players(shown.begin(), shown.end());
         std::stable_sort(players.begin(), players.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
         lines.push_back("Deaths: " + std::to_string(total));
-        for (const auto &[name, count] : players)
-            if (lines.size() < 9)
-                lines.push_back(name.substr(0, 40) + ": " + std::to_string(count));
+        if (session.slot_data()["death_link"].asBool() && players.size() > 1)
+            for (const auto &[name, count] : players)
+                if (lines.size() < 9)
+                    lines.push_back(name.substr(0, 40) + ": " + std::to_string(count));
     }
     // sent again every few seconds too, so a reattached HUD gets it
     const auto now = std::chrono::steady_clock::now();

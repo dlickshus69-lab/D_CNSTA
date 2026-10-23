@@ -1,10 +1,11 @@
 ## What's new
 
-- **Aku Aku Mask, second try.** The first test sent Aku Aku the pickup message but no mask came out. Now Aku Aku Sanity's no-masks switch is turned off before the hand-over, and if no mask is out a second later, an Aku Aku crate in the level makes one at Crash instead. The log shows each step (`Aku give: ...`).
-- **Aku Aku Sanity's lock now works with DeathLink off.** The client only hooked Crash's damage scripts (where the lock's switch lives) when DeathLink or traps were on.
+- **Aku Aku Mask, third try.** Your log showed what the game sends Aku Aku when Crash picks up a crate's mask (a message called 5bnreye5, with no settings); the first tries sent a different one. `/aku_give` and the Aku Aku Mask filler now send that, then fall back to an Aku Aku crate if no mask shows.
+- **Death counter without DeathLink.** It always shows now, with your deaths counted whether DeathLink is on or not. Solo (or DeathLink off) it's just "Deaths: N"; with DeathLink and others in the room, each player's count is listed too.
 
 ## Recent builds
 
+- **V1.2.31:** Aku give turns the no-masks switch off first and can fall back to a crate; Aku Aku Sanity's lock works with DeathLink off.
 - **V1.2.30:** Aku Aku Mask filler (experimental, `aku_aku_mask_weight`) and a direct `/aku_give`.
 - **V1.2.29:** the death counter is always on screen (total and every player, hubs and levels).
 - **V1.2.28:** fixed the game not opening on V1.2.25 to V1.2.27 (the death counter read a file that didn't exist yet).

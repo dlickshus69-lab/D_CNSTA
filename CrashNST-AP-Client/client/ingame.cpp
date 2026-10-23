@@ -1259,7 +1259,8 @@ namespace
             shared->menu_paused = menu_open ? 1u : 0u;
             const auto previous_lines = snapshot->line_write, previous_clear = snapshot->line_clear;
             const auto deaths = take_observed_deaths();
-            if (!startup_mode && shared->death_link)
+            // counted with or without DeathLink (the death counter); the client only sends them with it
+            if (!startup_mode)
                 shared->deaths += deaths;
             copy_console_snapshot(*snapshot, *shared);
             ReleaseMutex(bridge_mutex);
