@@ -1,4 +1,4 @@
 ## What's new
 
-- **Aku Aku Mask with the lock on, next try.** V1.2.39's log showed that with the lock on, Aku Aku was set up as if he already had a mask, with none on screen. That was likely left over from the "now 2" in the last test and saved with your game. `/aku_give` now resets him to "no mask" before the hand-over. If the mask still doesn't come out, it tries two more fixes, one second apart, and the log says which one worked.
-- With the lock on, a mask count with no mask on screen is cleared once per level. That way, finding Aku Aku later doesn't hand you leftover masks.
+- **Aku Aku Mask works with Aku Aku Sanity's lock on.** Your V1.2.40 test found the fix. The lock leaves two of Aku Aku's settings in a state that keeps the mask from coming out. Setting them back first lets it work. That is now the only path, so the mask shows up right away instead of after a few seconds of tries.
+- The extra Aku Aku research logging is gone. The log only records Aku Aku's settings if a give brings no mask out.
