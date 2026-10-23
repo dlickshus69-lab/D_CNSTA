@@ -1084,6 +1084,14 @@ class CrashWorld(World):
         result["trap_duration"] = self.options.trap_duration.value
         # the client picks the skin from CrashNSTAP\\skins by this name ("default_crash" is the game's own Crash)
         result["crash_skin"] = str(self.options.crash_skin.current_key)
+        # Crash colors: "default", a color name or "#rrggbb" per part; the client recolors the game's own Crash.pak
+        result["crash_colors"] = {
+            "fur": str(self.options.crash_fur_color.current_key),
+            "chest": str(self.options.crash_chest_color.current_key),
+            "pants": str(self.options.crash_pants_color.current_key),
+            "shoes": str(self.options.crash_shoes_color.current_key),
+            "hair": str(self.options.crash_hair_color.current_key),
+        }
         # 0 = any tier, 1 = gold or platinum, 2 = platinum only
         result["relic_requirement"] = self.options.relic_requirement.value
         return result

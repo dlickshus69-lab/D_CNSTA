@@ -95,6 +95,9 @@ namespace skins
             return "Biker Crash";
         if (key == "jetpack")
             return "Jetpack Crash";
+        // the colored Crash the client makes (crash_colors.cpp)
+        if (key.rfind("colors_", 0) == 0)
+            return "your Crash colors";
         return name;
     }
     std::string chosen() { return normalize(read_line(standalone::state_directory() / "skin.txt")); }

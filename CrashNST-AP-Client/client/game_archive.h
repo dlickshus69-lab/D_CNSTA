@@ -49,4 +49,13 @@ namespace ingame
     // the session's first search (in the background): the remembered sound, or else the archives' census and the
     // TNT sound files
     std::vector<std::string> startup_sound_search(const std::filesystem::path &remember);
+    // the member of the archive `pak` stored under `name` (exactly, any case), read whole; throws with a reason when it
+    // is missing or unreadable
+    std::vector<unsigned char> read_archive_member(const std::filesystem::path &pak, const std::string &name);
+    // a copy of the archive `source` at `target` with some members replaced (by name, exactly, any case): each new copy
+    // goes at the end, stored whole, and its member's record points there; nothing else changes, so the game reads it
+    // like its own. Each replacement keeps its member's size. The copy is read back before it replaces `target`. Throws
+    // with a reason when it can't.
+    void rewrite_archive(const std::filesystem::path &source, const std::filesystem::path &target,
+                         const std::vector<std::pair<std::string, std::vector<unsigned char>>> &replacements);
 }

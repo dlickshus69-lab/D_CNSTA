@@ -1083,7 +1083,8 @@ namespace ingame
         // kind of graph event reaches Crash or a Nitro crate it goes to the log with its sender and its fields, and so does
         // every event an Aku Aku crate sends or gets. Only reads; every event still goes through unchanged.
         std::atomic<Address> event_crash{0};
-        std::atomic_bool event_research_done{false};
+        // (off since V1.2.43: the Aku Aku Mask filler works, and the research lines filled the log)
+        std::atomic_bool event_research_done{true};
         // research: every event a trap Nitro gets, with the time since it appeared, to find what sends it "home"
         std::array<std::atomic<Address>, 4> trap_event_entity{};
         std::array<std::atomic<std::uint64_t>, 4> trap_event_since{};

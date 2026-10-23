@@ -11,6 +11,7 @@
 #include "game_sound.h"
 #include "game_archive.h"
 #include "skins.h"
+#include "crash_colors.h"
 void ClientRuntime::queue_ap_packet(std::string raw)
 {
     std::lock_guard<std::mutex> lock(state_mutex);
@@ -523,6 +524,12 @@ void ClientRuntime::handle_commands()
                                                                 (wanted == "default" || !list.empty() ? std::string() : " (CrashNSTAP\\skins is empty: put the skin there first.)"));
                 }
             }
+            else if (command == "/colors")
+            {
+                // /colors, /colors fur blue, /colors reset: Crash's colors, from the next game start
+                for (const auto &line : crash_colors::command(argument))
+                    print_console(line);
+            }
             else if (command == "/crash_tint")
             {
                 // /crash_tint red green blue amount (each 0..1), a color name (blue, red, green, ...), or off
@@ -851,6 +858,19 @@ void ClientRuntime::process_packets(AP_ConnectionStatus status)
                                                                            slot_data["crash_skin"].asString());
                                 !note.empty())
                                 print_console(note);
+                        // ... and its Crash colors (made from the game's own Crash.pak, also from the next game start)
+                        if (slot_data["crash_colors"].isObject())
+                        {
+                            crash_colors::Choice yaml;
+                            for (int p = 0; p < crash_colors::PartCount; ++p)
+                            {
+                                const auto &value = slot_data["crash_colors"][crash_colors::part_name(static_cast<crash_colors::Part>(p))];
+                                yaml[p] = value.isString() ? value.asString() : "default";
+                            }
+                            for (const auto &line : crash_colors::apply_seed_choice(observed_seed + "/" + std::to_string(message["slot"].asInt()), yaml,
+                                                                                  slot_data["crash_skin"].isString() ? slot_data["crash_skin"].asString() : "default"))
+                                print_console(line);
+                        }
                     }
                     else if (command == "ReceivedItems")
                     {

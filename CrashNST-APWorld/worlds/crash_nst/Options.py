@@ -578,6 +578,89 @@ class CrashSkin(TextChoice):
             raise ValueError(f"crash_skin \"{value}\": a skin's name may only use letters, numbers, spaces, _ . and -")
 
 
+class CrashColor(TextChoice):
+    """default leaves it as the game has it. Otherwise a color name, or any color as "#RRGGBB" (for example "#3366ff"). The
+    client makes the colored Crash from your own game files, keeping his shading, and he wears it from the next time
+    the game starts. The colors are for the normal Crash: when crash_skin picks a skin mod, the skin stays. /colors in
+    the client changes them too."""
+
+    option_default = 0
+    option_red = 1
+    option_dark_red = 2
+    option_orange = 3
+    option_yellow = 4
+    option_gold = 5
+    option_lime = 6
+    option_green = 7
+    option_dark_green = 8
+    option_teal = 9
+    option_cyan = 10
+    option_light_blue = 11
+    option_blue = 12
+    option_navy = 13
+    option_purple = 14
+    option_violet = 15
+    option_pink = 16
+    option_magenta = 17
+    option_brown = 18
+    option_tan = 19
+    option_white = 20
+    option_light_gray = 21
+    option_gray = 22
+    option_black = 23
+    default = 0
+
+    @classmethod
+    def validate_text(cls, value: str) -> None:
+        if not re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
+            raise ValueError(f"{cls.__name__} \"{value}\": use default, a color name or a color as #RRGGBB")
+
+
+class CrashFurColor(CrashColor):
+    """The color of Crash's fur. default leaves it as the game has it. Otherwise a color name, or any color as "#RRGGBB" (for example "#3366ff"). The
+    client makes the colored Crash from your own game files, keeping his shading, and he wears it from the next time
+    the game starts. The colors are for the normal Crash: when crash_skin picks a skin mod, the skin stays. /colors in
+    the client changes them too."""
+
+    display_name = "Crash Fur Color"
+
+
+class CrashChestColor(CrashColor):
+    """The color of Crash's chest and jaw (normally tan). default leaves it as the game has it. Otherwise a color name, or any color as "#RRGGBB" (for example "#3366ff"). The
+    client makes the colored Crash from your own game files, keeping his shading, and he wears it from the next time
+    the game starts. The colors are for the normal Crash: when crash_skin picks a skin mod, the skin stays. /colors in
+    the client changes them too."""
+
+    display_name = "Crash Chest Color"
+
+
+class CrashPantsColor(CrashColor):
+    """The color of Crash's pants. default leaves it as the game has it. Otherwise a color name, or any color as "#RRGGBB" (for example "#3366ff"). The
+    client makes the colored Crash from your own game files, keeping his shading, and he wears it from the next time
+    the game starts. The colors are for the normal Crash: when crash_skin picks a skin mod, the skin stays. /colors in
+    the client changes them too."""
+
+    display_name = "Crash Pants Color"
+
+
+class CrashShoesColor(CrashColor):
+    """The color of Crash's shoes (the soles and laces stay white). default leaves it as the game has it. Otherwise a color name, or any color as "#RRGGBB" (for example "#3366ff"). The
+    client makes the colored Crash from your own game files, keeping his shading, and he wears it from the next time
+    the game starts. The colors are for the normal Crash: when crash_skin picks a skin mod, the skin stays. /colors in
+    the client changes them too."""
+
+    display_name = "Crash Shoes Color"
+
+
+class CrashHairColor(CrashColor):
+    """The color of Crash's mohawk (his eyebrows stay). default leaves it as the game has it. Otherwise a color name, or any color as "#RRGGBB" (for example "#3366ff"). The
+    client makes the colored Crash from your own game files, keeping his shading, and he wears it from the next time
+    the game starts. The colors are for the normal Crash: when crash_skin picks a skin mod, the skin stays. /colors in
+    the client changes them too."""
+
+    display_name = "Crash Mohawk Color"
+
+
 # sections on the options page and in generated YAMLs, in this order. Archipelago puts Progression Balancing and
 # Accessibility in "Game Options" first and adds "Item & Location Options" last.
 crash_option_groups = [
@@ -636,6 +719,11 @@ crash_option_groups = [
     ]),
     OptionGroup("Cosmetic", [
         CrashSkin,
+        CrashFurColor,
+        CrashChestColor,
+        CrashPantsColor,
+        CrashShoesColor,
+        CrashHairColor,
     ]),
 ]
 
@@ -686,3 +774,8 @@ class CrashOptions(PerGameCommonOptions):
     trap_duration: TrapDuration
     death_link: DeathLink
     crash_skin: CrashSkin
+    crash_fur_color: CrashFurColor
+    crash_chest_color: CrashChestColor
+    crash_pants_color: CrashPantsColor
+    crash_shoes_color: CrashShoesColor
+    crash_hair_color: CrashHairColor

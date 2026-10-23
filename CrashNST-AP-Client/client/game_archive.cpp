@@ -803,4 +803,98 @@ namespace ingame
             }
         return lines;
     }
+
+    namespace
+    {
+        unsigned member_index(Archive &archive, const std::string &name, const std::filesystem::path &pak)
+        {
+            const auto want = lower(name);
+            for (unsigned i = 0; i < archive.count; ++i)
+                if (lower(archive.name(i)) == want)
+                    return i;
+            throw std::runtime_error(name + " isn't in " + pak.filename().string());
+        }
+    }
+    std::vector<unsigned char> read_archive_member(const std::filesystem::path &pak, const std::string &name)
+    {
+        Archive archive(pak);
+        return archive.member(member_index(archive, name, pak));
+    }
+    void rewrite_archive(const std::filesystem::path &source, const std::filesystem::path &target,
+                         const std::vector<std::pair<std::string, std::vector<unsigned char>>> &replacements)
+    {
+        std::vector<unsigned> indices;
+        std::uint64_t original_size = 0;
+        unsigned count = 0;
+        {
+            Archive archive(source);
+            count = archive.count, original_size = archive.size;
+            for (const auto &[name, bytes] : replacements)
+            {
+                const auto index = member_index(archive, name, source);
+                if (archive.length(index) != bytes.size())
+                    throw std::runtime_error(name + " would change size (" + std::to_string(archive.length(index)) + " to " + std::to_string(bytes.size()) +
+                                             " bytes)");
+                indices.push_back(index);
+            }
+        }
+        auto temporary = target;
+        temporary += L".tmp";
+        std::error_code error;
+        std::filesystem::create_directories(target.parent_path(), error);
+        if (!CopyFileW(source.c_str(), temporary.c_str(), FALSE))
+            throw std::runtime_error("couldn't copy " + source.filename().string() + " (Windows error " + std::to_string(GetLastError()) + ")");
+        try
+        {
+            {
+                std::fstream file(temporary, std::ios::binary | std::ios::in | std::ios::out);
+                require(static_cast<bool>(file));
+                const std::vector<char> zeros(0x800);
+                std::uint64_t end = original_size;
+                for (std::size_t r = 0; r < replacements.size(); ++r)
+                {
+                    // each copy starts on a 2 KiB sector, like the archive's own members
+                    const auto at = (end + 0x7ff) & ~std::uint64_t{0x7ff};
+                    file.seekp(static_cast<std::streamoff>(end));
+                    file.write(zeros.data(), static_cast<std::streamsize>(at - end));
+                    const auto &bytes = replacements[r].second;
+                    file.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+                    end = at + bytes.size();
+                    // its record: where it starts (the low 32 bits, and bit 32 in the second word's lowest bit), its
+                    // length, and 0xffffffff for "stored whole"
+                    const auto record = 56ull + count * 4ull + indices[r] * 16ull;
+                    std::array<unsigned char, 16> fields{};
+                    file.seekg(static_cast<std::streamoff>(record));
+                    file.read(reinterpret_cast<char *>(fields.data()), 16);
+                    std::uint32_t low = static_cast<std::uint32_t>(at), second = 0, stored_whole = 0xffffffff;
+                    std::memcpy(&second, fields.data() + 4, 4);
+                    second = (second & ~1u) | static_cast<std::uint32_t>((at >> 32) & 1);
+                    std::memcpy(fields.data(), &low, 4), std::memcpy(fields.data() + 4, &second, 4), std::memcpy(fields.data() + 12, &stored_whole, 4);
+                    file.seekp(static_cast<std::streamoff>(record));
+                    file.write(reinterpret_cast<const char *>(fields.data()), 16);
+                }
+                const auto padded = (end + 0x7ff) & ~std::uint64_t{0x7ff};
+                file.seekp(static_cast<std::streamoff>(end));
+                file.write(zeros.data(), static_cast<std::streamsize>(padded - end));
+                file.flush();
+                require(file.good());
+            }
+            // read back the way the game would
+            Archive check(temporary);
+            for (std::size_t r = 0; r < replacements.size(); ++r)
+                if (check.member(indices[r]) != replacements[r].second)
+                    throw std::runtime_error("the new copy of " + replacements[r].first + " doesn't read back the same");
+        }
+        catch (...)
+        {
+            std::filesystem::remove(temporary, error);
+            throw;
+        }
+        if (!MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING))
+        {
+            const auto code = GetLastError();
+            std::filesystem::remove(temporary, error);
+            throw std::runtime_error("couldn't write " + target.string() + " (Windows error " + std::to_string(code) + ")");
+        }
+    }
 }

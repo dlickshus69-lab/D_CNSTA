@@ -210,17 +210,26 @@ namespace
         }
         return {};
     }
-    // the same file? Same size and the same first 256 KB (each skin's Crash.pak differs from the game's early on)
+    // the same file? Same size, and the same first and last 256 KB (each skin's Crash.pak differs from the game's early
+    // on; the client's Crash colors differ from each other only at the end, where their textures are)
     bool same_file(const std::filesystem::path &a, const std::filesystem::path &b)
     {
         FileStamp sa, sb;
         if (!stamp(a, sa) || !stamp(b, sb) || sa.size != sb.size)
             return false;
         std::ifstream fa(a, std::ios::binary), fb(b, std::ios::binary);
-        std::vector<char> ba(256 * 1024), bb(256 * 1024);
-        fa.read(ba.data(), static_cast<std::streamsize>(ba.size()));
-        fb.read(bb.data(), static_cast<std::streamsize>(bb.size()));
-        return fa.gcount() == fb.gcount() && std::equal(ba.begin(), ba.begin() + fa.gcount(), bb.begin());
+        const std::uint64_t span = 256 * 1024;
+        for (const std::uint64_t at : {std::uint64_t{0}, sa.size > span ? sa.size - span : 0})
+        {
+            std::vector<char> ba(span), bb(span);
+            fa.clear(), fb.clear();
+            fa.seekg(static_cast<std::streamoff>(at)), fb.seekg(static_cast<std::streamoff>(at));
+            fa.read(ba.data(), static_cast<std::streamsize>(ba.size()));
+            fb.read(bb.data(), static_cast<std::streamsize>(bb.size()));
+            if (fa.gcount() != fb.gcount() || !std::equal(ba.begin(), ba.begin() + fa.gcount(), bb.begin()))
+                return false;
+        }
+        return true;
     }
     // the name of the skin in the skins folder whose Crash.pak is this file, or empty
     std::wstring skin_of(const std::filesystem::path &skins, const std::filesystem::path &file)
