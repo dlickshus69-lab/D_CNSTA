@@ -1,6 +1,4 @@
 ## What's new
 
-- **Aku Aku Mask: Aku Aku now knows he has the mask.** Your last log showed what was different: with a crate's mask, Aku Aku's own state switches to "1 mask", and with the filler mask it stayed at "no mask". On a hit he then had nothing to take away, so the model stayed. `/aku_give` (and the filler) now set his state to match, so the hit should take the mask the normal way.
-- If Crash already has a mask, the filler gives a second one: two hits to lose them, like a second crate. No extra model appears.
-- The xvpkmc2n cleanup try from V1.2.37 is gone; it didn't help.
-- Release pages no longer have the install line at the bottom.
+- **Aku Aku Mask with Aku Aku Sanity's lock on.** In V1.2.38 with the lock on, `/aku_give` brought no mask out. When the client turned off the game's no-masks switch, Aku Aku answered with a message that unlocks him, and the lock blocked it. The lock had also blocked two of his level-start setup messages. Now the lock lets his answer through, and he gets the setup messages he missed, before the mask is handed over.
+- A give that brings no mask out no longer leaves Aku Aku counting a mask. (Last time the second `/aku_give` then thought you already had one and went to 2.)

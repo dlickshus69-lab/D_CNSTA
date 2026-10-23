@@ -1089,6 +1089,9 @@ namespace ingame
         // a mask (seen in the V1.1.65-V1.1.70 logs: at a level's start, at a respawn, and when a mask is picked up);
         // the ones about a hit or a death still go through, so a mask already there goes away when Crash dies.
         std::set<std::string> aku_blocked_seen;
+        // the first of each message the lock kept from Aku's manager for this Crash: its send node and message
+        Address aku_blocked_actor = 0;
+        std::map<std::string, std::pair<Address, Address>> aku_blocked_nodes;
         // the script type of Crash's Aku Aku manager, found by name the first time a message reaches it (also in the
         // first frames of a level), and the other script types on Crash, so each name is read only once
         std::atomic<Address> aku_manager_meta{0};
@@ -1317,6 +1320,11 @@ namespace ingame
                     else if (aku_give_message(name))
                     {
                         std::lock_guard lock(event_mutex);
+                        // the setup messages Aku gets at a level's start, kept here: a filler mask needs them later
+                        if (aku_blocked_actor != target)
+                            aku_blocked_actor = target, aku_blocked_nodes.clear();
+                        if (const auto id = name.find("_id_"); id != std::string::npos && typed(event, 0x13bc390) && aku_blocked_nodes.size() < 16)
+                            aku_blocked_nodes.emplace(name.substr(id + 4), std::make_pair(event, value<Address>(event + 16)));
                         if (aku_blocked_seen.size() < 40 && aku_blocked_seen.insert(name).second)
                         {
                             const auto id = name.find("_id_");
@@ -3243,6 +3251,7 @@ namespace ingame
             }
             return found;
         }
+        void dump_crash_scripts(Address actor, const std::string &why);
         // /aku_give tries one way at a time and looks a second later whether a mask came out (game thread only)
         struct AkuGiveStep
         {
@@ -3301,9 +3310,11 @@ namespace ingame
                 aku_send(component, step.node), sent = true;
             for (const auto &id : step.ids)
                 sent = (component && aku_send_message(component, id)) || sent;
-            if (step.count && component)
-                aku_set_masks(component, 1);
             const auto [state, mask] = aku_manager_state(actor);
+            // Crash takes the mask only once its model is out (V1.2.38 with the lock on: no model came out, but his
+            // state said 1 mask, and the next /aku_give made it 2)
+            if (step.count && component && mask)
+                aku_set_masks(component, 1);
             std::cout << "Aku give: tried " << step.label << (sent ? "" : " (nothing could be sent)") << "; right after, Aku's manager is in state " << state
                       << (mask ? ", WITH A MASK OUT" : ", no mask out") << "\n" << std::flush;
             aku_give_check_at = GetTickCount64() + 1000;
@@ -3324,6 +3335,10 @@ namespace ingame
             if (mask)
             {
                 std::cout << "Aku give: this worked: " << label << "\n" << std::flush;
+                // the model came out after the step, not right away: Crash takes the mask now
+                if (aku_steps[aku_step].count && state == 0)
+                    if (const auto component = aku_manager_component(actor))
+                        aku_set_masks(component, 1);
                 aku_steps.clear();
                 return;
             }
@@ -3361,23 +3376,50 @@ namespace ingame
                 std::cout << "Aku give: before, Aku's manager is in state " << state << (mask ? ", with a mask out" : ", no mask out") << "\n" << std::flush;
             }
             filler_mask_since = GetTickCount64();
+            dump_crash_scripts(actor, "before /aku_give");
             // Aku Aku Sanity's switch keeps masks from being given: off now, before the hand-over (the lock stays aside
-            // while the mask is out)
+            // while the mask is out). The lock's filter steps aside first: V1.2.38's log, with the lock on, showed Aku's
+            // manager answers the switch with a message (s8h11iit) that the filter kept from him, and then a9nnfx8i
+            // didn't bring the mask out
+            aku_messages_blocked = false;
+            bool unlocked = false;
             if (const auto variable = no_aku_variable.load(); variable && typed(variable, 0x155ebf0))
             {
                 const auto getter = reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60);
                 const auto setter = reinterpret_cast<void (*)(Address, unsigned char)>(death_hook.original ? death_hook.original : base() + 0x502000);
                 if (getter(variable))
                 {
+                    own_aku_message = true;
                     setter(variable, 0);
+                    own_aku_message = false;
+                    unlocked = true;
                     std::cout << "Aku give: turned Aku Aku Sanity's no-masks switch off for this mask\n" << std::flush;
                 }
+            }
+            // ... and the setup messages the lock kept from him at this level's start (sent by his own script then)
+            if (unlocked)
+            {
+                std::vector<std::pair<std::string, Address>> missed;
+                {
+                    std::lock_guard lock(event_mutex);
+                    if (aku_blocked_actor == actor)
+                        for (const auto id : {"ju9pgu97", "tm011evr"})
+                            if (const auto it = aku_blocked_nodes.find(id);
+                                it != aku_blocked_nodes.end() && typed(it->second.first, 0x13bc390) && value<Address>(it->second.first + 16) == it->second.second)
+                                missed.emplace_back(id, it->second.first);
+                }
+                for (const auto &[id, node] : missed)
+                    aku_send(component, node);
+                std::cout << "Aku give: sent Aku the setup the lock kept from him:" << (missed.empty() ? " none caught" : "");
+                for (const auto &m : missed)
+                    std::cout << " " << m.first;
+                std::cout << "\n" << std::flush;
             }
             log_aku_messages(component);
             // (his state is the mask count, 0 to 3; once, during a load, it read 32835)
             const auto [state_before, model_out] = aku_manager_state(actor);
-            const int masks_before = state_before >= 1 && state_before <= 3 ? state_before : 0;
-            const bool had_mask = model_out || masks_before > 0;
+            const int masks_before = model_out ? std::clamp(state_before, 1, 3) : 0;
+            const bool had_mask = model_out;
             filler_alone = !had_mask;
             // a mask already out: one more, as a second crate's would (two masks take two hits). Its model is already
             // there, so nothing new is brought out
