@@ -100,9 +100,16 @@ void ClientRuntime::update_bridge(AP_ConnectionStatus status)
         notices.swap(console_notifications);
         deaths.swap(deaths_seen);
     }
-    for (const auto &player : deaths)
-        count_death(player);
-    update_death_tally();
+    try
+    {
+        for (const auto &player : deaths)
+            count_death(player);
+        update_death_tally();
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Death tally: " << error.what() << std::endl;
+    }
     for (const auto &text : notices)
         print_console(text);
     bool messages_drained = false;
@@ -319,7 +326,14 @@ void ClientRuntime::update_display(ClientTick &tick)
             {
                 AP_DeathLinkSend();
                 print_console("DeathLink sent.");
-                count_death(slot);
+                try
+                {
+                    count_death(slot);
+                }
+                catch (const std::exception &error)
+                {
+                    std::cerr << "Death tally: " << error.what() << std::endl;
+                }
             }
             last_deaths = deaths;
         }
@@ -354,12 +368,24 @@ void ClientRuntime::update_death_tally()
     {
         death_tally_seed = observed_seed;
         death_tally.clear();
-        const auto saved = read_state_json(file);
-        if (saved.isObject())
-            for (const auto &name : saved.getMemberNames())
-                if (saved[name].isUInt())
-                    death_tally[name] = saved[name].asUInt();
         death_tally_dirty = true;
+        // no file yet (the first time) or an unreadable one: start from nothing. This must never stop the client
+        try
+        {
+            std::error_code missing;
+            if (std::filesystem::exists(file, missing))
+            {
+                const auto saved = read_state_json(file);
+                if (saved.isObject())
+                    for (const auto &name : saved.getMemberNames())
+                        if (saved[name].isUInt())
+                            death_tally[name] = saved[name].asUInt();
+            }
+        }
+        catch (const std::exception &error)
+        {
+            std::cerr << "Death tally: couldn't read the saved count (" << error.what() << "); starting from 0." << std::endl;
+        }
     }
     if (!death_tally_dirty || !box_markers)
         return;

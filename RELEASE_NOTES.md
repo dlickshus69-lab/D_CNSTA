@@ -1,5 +1,6 @@
 ## What's new
 
+- **Fixed: the game didn't open on V1.2.25 and V1.2.26.** The new death counter stopped the client when its save file didn't exist yet (the first start of a seed). It now starts from 0 instead.
 - **Level clears the save missed.** Picking up a level's box gem or its relic means you reached the end, so the level's clear is sent too if the game didn't write it to the save (Guicho's Hog Wild: gem, relic and time trial, but no clear).
 
 ## Recent builds
