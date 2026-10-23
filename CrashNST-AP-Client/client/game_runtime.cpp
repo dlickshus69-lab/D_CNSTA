@@ -1101,6 +1101,8 @@ namespace ingame
         // research: every event a trap Nitro gets, with the time since it appeared, to find what sends it "home"
         std::array<std::atomic<Address>, 4> trap_event_entity{};
         std::array<std::atomic<std::uint64_t>, 4> trap_event_since{};
+        // its common_Crate_Explode script sent something: it went off (the crate itself stays, so this is how to tell)
+        std::array<std::atomic_bool, 4> trap_event_exploded{};
         std::atomic_uint trap_event_lines{0}, trap_event_next{0};
         // which events each watched trap Nitro has had logged (each kind once: spinning near one sends it one per spin)
         std::mutex trap_event_mutex;
@@ -1329,6 +1331,8 @@ namespace ingame
                         const bool spawner_note = name == "common_Spawner_Template_c.GraphEvent_id_van6ltro_Definition";
                         blocked = blocked || spawner_note;
                         auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
+                        if (graph == "Scripts.Graph.common_Crate_Explode")
+                            trap_event_exploded[i] = true;
                         {
                             std::lock_guard lock(trap_event_mutex);
                             if (!trap_event_seen[i].insert(graph + "|" + name).second)
@@ -3586,7 +3590,7 @@ namespace ingame
                 std::lock_guard lock(trap_event_mutex);
                 trap_event_seen[slot].clear();
             }
-            trap_event_since[slot] = w.since, trap_event_entity[slot] = entity;
+            trap_event_since[slot] = w.since, trap_event_exploded[slot] = false, trap_event_entity[slot] = entity;
             if (home)
                 w.home = *home, w.has_home = true;
             w.floats = floats;
@@ -3631,6 +3635,79 @@ namespace ingame
                 }
                 ++i;
             }
+        }
+        // whether a watched trap Nitro went off (its explosion script spoke)
+        bool trap_nitro_went_off(Address entity)
+        {
+            for (unsigned i = 0; i < trap_event_entity.size(); ++i)
+                if (trap_event_entity[i].load() == entity)
+                    return trap_event_exploded[i].load();
+            return false;
+        }
+        // sets off a trap Nitro the way Crash running into it does (V1.2.70). V1.2.68's logs, every falling Nitro that hit
+        // Crash: its common_Crate script first sends the crate xyvfghry (no values), and the whole explosion follows from
+        // that in the same frame. The same message is sent here, from the same script, through the game's own sender
+        // (the event hook still keeps the spawner's box note from going out). Game thread only.
+        bool set_off_trap_nitro(Address crate, std::string &why)
+        {
+            if (!event_hook.installed && !code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0}))
+                return why = "the game's message sender differs from the verified build", false;
+            if (!live_crate(crate))
+                return why = "the Nitro is gone", false;
+            Address sender = 0, message = 0, target = 0;
+            std::ostringstream takes;
+            for (const auto c : list(value<Address>(crate + 24), 64))
+            {
+                const auto meta = value<Address>(c + 56);
+                if (!typed(c, 0x13bbbd0) || !typed(meta, 0x1745d78) || value<Address>(c + 24) != crate)
+                    continue;
+                const auto script = string(value<Address>(meta + 16), 120);
+                if (script == "Scripts.Graph.common_Crate")
+                    sender = c;
+                takes << " " << (script.rfind("Scripts.Graph.", 0) == 0 ? script.substr(14) : script) << ":";
+                for (const auto delegator : list(value<Address>(meta + 160), 128))
+                {
+                    const auto m = value<Address>(delegator + 24), t = value<Address>(delegator + 32);
+                    if (!typed(delegator, 0x13bc268) || !typed(m, 0x17b6578) || !typed(t, 0x13bbcb8))
+                        continue;
+                    const auto name = string(value<Address>(m + 16), 120);
+                    const auto id = name.find("_id_");
+                    takes << " " << (id == std::string::npos ? name : name.substr(id + 4));
+                    if (!message && name.find("_id_xyvfghry") != std::string::npos)
+                        message = m, target = t;
+                }
+            }
+            // research, once: every message each of the trap Nitro's scripts takes (another one to try, if this isn't it)
+            static bool listed = false;
+            if (!listed)
+                listed = true, std::cout << "Nitro drop: the trap Nitro's scripts take" << takes.str() << "\n" << std::flush;
+            if (!sender)
+                return why = "its common_Crate script wasn't found", false;
+            if (!message)
+                return why = "none of its scripts takes xyvfghry", false;
+            std::array<Address, 11> node{base() + 0x13bc390, 0, message, target};
+            std::array<Address, 6> context{sender};
+            reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(reinterpret_cast<Address>(node.data()), reinterpret_cast<Address>(context.data()));
+            return true;
+        }
+        // the falling Nitro that landed without hitting Crash: set off at once, then a look whether it went off
+        struct NitroSetOff
+        {
+            Address entity = 0;
+            std::uint64_t at = 0;
+            std::string level;
+        } nitro_set_off;
+        void update_nitro_set_off(const std::string &level)
+        {
+            auto &o = nitro_set_off;
+            if (!o.entity || GetTickCount64() - o.at < 300)
+                return;
+            if (level == o.level)
+                std::cout << (trap_nitro_went_off(o.entity) ? "Nitro drop: it went off where it landed\n"
+                                                             : "Nitro drop: it didn't go off where it landed (xyvfghry wasn't enough)\n")
+                          << std::flush;
+            o = {};
         }
         void update_nitro_drop(Shared &state, const std::string &level)
         {
@@ -3779,6 +3856,18 @@ namespace ingame
             std::cout << "Nitro drop: landed (the game has it at " << whole(e[0]) << ", " << whole(e[1]) << ", " << whole(e[2])
                       << (has_body ? ", its body at " + whole(body[0]) + ", " + whole(body[1]) + ", " + whole(body[2]) : std::string(", its body not found"))
                       << ")\n" << std::flush;
+            // it blows up where it lands, also when Crash got out of the way (it already went off if it hit him)
+            if (!trap_nitro_went_off(d.entity))
+            {
+                std::string why;
+                if (set_off_trap_nitro(d.entity, why))
+                {
+                    std::cout << "Nitro drop: set it off where it landed\n" << std::flush;
+                    nitro_set_off = {d.entity, now, d.level};
+                }
+                else
+                    std::cout << "Nitro drop: couldn't set it off (" << why << ")\n" << std::flush;
+            }
             d = {};
             state.nitro_countdown_end = 0;
         }
@@ -4215,6 +4304,7 @@ namespace ingame
             record_crash_path(level);
             nitro_spawn_followup();
             update_nitro_drop(state, level);
+            update_nitro_set_off(level);
             update_trap_nitros(level);
             const auto now = GetTickCount64();
             static std::uint64_t next_ready = 0, give_up = 0;
