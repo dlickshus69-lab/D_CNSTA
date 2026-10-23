@@ -168,7 +168,7 @@ namespace crash_colors
         }
         // a block map (256x256, from crash_colors_masks.h) shrunk to a mipmap level: a block is in it when any of the
         // full-size blocks it covers is
-        std::vector<bool> block_map(const std::uint16_t *runs, std::size_t run_count, std::size_t per_row)
+        std::vector<bool> block_map(const std::uint16_t *runs, std::size_t run_count, std::size_t per_row, int grow = 0)
         {
             std::vector<bool> full(256 * 256);
             std::size_t at = 0;
@@ -177,6 +177,19 @@ namespace crash_colors
             {
                 for (std::size_t j = 0; j < runs[i] && at < full.size(); ++j)
                     full[at++] = on;
+            }
+            // `grow` blocks around it too
+            if (grow > 0)
+            {
+                auto grown = full;
+                for (int y = 0; y < 256; ++y)
+                    for (int x = 0; x < 256; ++x)
+                        if (full[y * 256 + x])
+                            for (int dy = -grow; dy <= grow; ++dy)
+                                for (int dx = -grow; dx <= grow; ++dx)
+                                    if (y + dy >= 0 && y + dy < 256 && x + dx >= 0 && x + dx < 256)
+                                        grown[(y + dy) * 256 + x + dx] = true;
+                full.swap(grown);
             }
             const auto f = 256 / per_row;
             std::vector<bool> out(per_row * per_row);
@@ -263,12 +276,18 @@ namespace crash_colors
         {
             const auto fur_map = block_map(fur_block_runs, std::size(fur_block_runs), per_row);
             const auto chest_map = block_map(chest_block_runs, std::size(chest_block_runs), per_row);
+            // the jaw's edge and the lips around it (V1.2.45: the blue mod left the lips and the jaw's pinkish rim as
+            // they were, so they stayed reddish by Crash's mouth): their colors are paler than the fur's strong orange
+            const auto near_chest = block_map(chest_block_runs, std::size(chest_block_runs), per_row, 3);
             recolor_blocks(out.data() + header_size + at, per_row * per_row, 8, 0, [&](std::size_t k, const double *, const Hsv &c) -> const Target * {
                 const bool warm = (c.h >= 0.9 || c.h <= 0.16) && c.s >= 0.2;
                 if (!warm)
                     return nullptr;
                 // the chest's and jaw's light, pinkish colors, also on the fur's edge
                 if (chest_map[k] && (!fur_map[k] || c.v > 0.7 || (c.h >= 0.07 && c.h <= 0.16) || c.h >= 0.9))
+                    return chest_t ? &*chest_t : nullptr;
+                // next to them: the lips (dark, pinkish) and the jaw's rim, but not the fur
+                if (near_chest[k] && c.v > 0.5 && (c.s < 0.6 || c.h >= 0.9 || c.h < 0.015))
                     return chest_t ? &*chest_t : nullptr;
                 if (fur_map[k] && c.h >= 0.015 && c.h <= 0.14 && c.s >= 0.35)
                     return fur_t ? &*fur_t : nullptr;
