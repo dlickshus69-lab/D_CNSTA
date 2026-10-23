@@ -2983,12 +2983,12 @@ namespace ingame
             std::vector<std::array<float, 3>> crates;
         };
         std::mutex nitro_scan_mutex;
-        NitroLevelScan nitro_scan;
+        NitroLevelScan nitro_level_info;
         std::atomic_bool nitro_scan_running{false};
         bool nitro_scan_ready(const std::string &level)
         {
             std::lock_guard lock(nitro_scan_mutex);
-            return !level.empty() && nitro_scan.level == level;
+            return !level.empty() && nitro_level_info.level == level;
         }
         bool ahead_spot(std::array<float, 3> &spot, bool *floating = nullptr)
         {
@@ -3025,8 +3025,8 @@ namespace ingame
             std::vector<std::array<float, 3>> crates;
             {
                 std::lock_guard lock(nitro_scan_mutex);
-                if (nitro_scan.level == crash_path_level)
-                    crates = nitro_scan.crates;
+                if (nitro_level_info.level == crash_path_level)
+                    crates = nitro_level_info.crates;
             }
             const auto clear = [&](const std::array<float, 3> &p)
             {
@@ -3200,8 +3200,8 @@ namespace ingame
         {
             {
                 std::lock_guard lock(nitro_scan_mutex);
-                if (nitro_scan.level == level && nitro_scan.nitro_template && nitro_template_valid(nitro_scan.nitro_template))
-                    return nitro_scan.nitro_template;
+                if (nitro_level_info.level == level && nitro_level_info.nitro_template && nitro_template_valid(nitro_level_info.nitro_template))
+                    return nitro_level_info.nitro_template;
             }
             std::lock_guard lock(nitro_find_mutex);
             if (nitro_find.level != level)
@@ -3291,7 +3291,7 @@ namespace ingame
                 return;
             {
                 std::lock_guard lock(nitro_scan_mutex);
-                if (nitro_scan.level == level && GetTickCount64() - nitro_scan.when < 4000)
+                if (nitro_level_info.level == level && GetTickCount64() - nitro_level_info.when < 4000)
                     return;
             }
             if (nitro_scan_running.exchange(true))
@@ -3302,7 +3302,7 @@ namespace ingame
                 const bool none = !scan.nitro_template;
                 {
                     std::lock_guard lock(nitro_scan_mutex);
-                    nitro_scan = std::move(scan);
+                    nitro_level_info = std::move(scan);
                 }
                 nitro_scan_running = false;
                 // a level without Nitro crates: the Nitro's template is looked for in all of the game's memory (once)
@@ -3322,8 +3322,8 @@ namespace ingame
             std::vector<FreeSpawner> spawners;
             {
                 std::lock_guard lock(nitro_scan_mutex);
-                if (nitro_scan.level == crash_path_level)
-                    spawners = nitro_scan.spawners;
+                if (nitro_level_info.level == crash_path_level)
+                    spawners = nitro_level_info.spawners;
             }
             const auto distance = [&](const FreeSpawner &f) { return std::hypot(f.at[0] - to[0], f.at[1] - to[1]); };
             std::sort(spawners.begin(), spawners.end(), [&](const FreeSpawner &a, const FreeSpawner &b) { return distance(a) < distance(b); });
@@ -4474,7 +4474,7 @@ namespace ingame
                 if (known)
                 {
                     std::lock_guard lock(nitro_scan_mutex);
-                    borrowed = nitro_scan.level == level && !nitro_scan.spawners.empty();
+                    borrowed = nitro_level_info.level == level && !nitro_level_info.spawners.empty();
                 }
                 state.nitro_ready = borrowed && ahead_spot(spot);
                 state.nitro_drop_ready = borrowed;
