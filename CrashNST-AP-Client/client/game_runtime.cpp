@@ -2968,6 +2968,92 @@ namespace ingame
             }
             return false;
         }
+        // the way Crash faces (V1.2.74): one axis of his transform, flat. Which axis (and which way along it) is his front
+        // is learned while he runs: the one that keeps pointing where he goes, in more than one direction. Then a jump
+        // on the spot (even right after a respawn, with no running since) still has an ahead. Learned once per kind of
+        // character or ride, for the whole game; until he has run around a bit, there is none.
+        struct FacingLearn
+        {
+            std::array<int, 6> score{};
+            std::array<std::array<float, 2>, 6> first{};
+            std::array<bool, 6> has_first{}, varied{};
+            int axis = -1;
+        };
+        std::map<Address, FacingLearn> facing_learned; // by the actor's type
+        // the six candidates: the transform's x, y and z axes, each either way, flat and of length 1 (or 0 if upright)
+        bool actor_axes(Address &type, std::array<std::array<float, 2>, 6> &axes)
+        {
+            const auto actor = controlled_actor();
+            Matrix m{};
+            if (!actor || !value<Address>(actor + 48) || !entity_matrix(actor, m))
+                return false;
+            type = value<Address>(actor);
+            for (unsigned i = 0; i < 3; ++i)
+            {
+                const float x = m[i * 4], y = m[i * 4 + 1], length = std::hypot(x, y);
+                const bool flat = std::isfinite(length) && length > 0.3f;
+                axes[i * 2] = flat ? std::array<float, 2>{x / length, y / length} : std::array<float, 2>{0, 0};
+                axes[i * 2 + 1] = flat ? std::array<float, 2>{-x / length, -y / length} : std::array<float, 2>{0, 0};
+            }
+            return true;
+        }
+        void learn_facing()
+        {
+            float hx = 0, hy = 0;
+            std::size_t end = 0;
+            // only while he is going somewhere right now
+            if (!crash_heading(hx, hy, end, 600) || end + 1 != crash_path.size())
+                return;
+            static std::uint64_t last = 0;
+            if (crash_path.back().time == last)
+                return;
+            last = crash_path.back().time;
+            Address type = 0;
+            std::array<std::array<float, 2>, 6> axes{};
+            if (!actor_axes(type, axes))
+                return;
+            auto &l = facing_learned[type];
+            for (unsigned i = 0; i < 6; ++i)
+            {
+                const float dot = axes[i][0] * hx + axes[i][1] * hy;
+                if (dot > 0.9f)
+                {
+                    l.score[i] = std::min(l.score[i] + 1, 1000);
+                    if (!l.has_first[i])
+                        l.first[i] = {hx, hy}, l.has_first[i] = true;
+                    // the same axis pointed his way while he went a quite different way: it turns with him
+                    else if (l.first[i][0] * hx + l.first[i][1] * hy < 0.5f)
+                        l.varied[i] = true;
+                }
+                else if (dot < 0.6f)
+                    l.score[i] = std::max(0, l.score[i] - 3);
+            }
+            int best = -1;
+            for (unsigned i = 0; i < 6; ++i)
+                if (l.varied[i] && l.score[i] >= 15 && (best < 0 || l.score[i] > l.score[best]))
+                    best = static_cast<int>(i);
+            if (best != l.axis)
+            {
+                l.axis = best;
+                if (best >= 0)
+                    std::cout << "Nitro Trap: learned which way Crash faces (axis " << best << ")\n" << std::flush;
+            }
+        }
+        bool crash_facing(float &hx, float &hy)
+        {
+            Address type = 0;
+            std::array<std::array<float, 2>, 6> axes{};
+            if (!actor_axes(type, axes))
+                return false;
+            const auto found = facing_learned.find(type);
+            if (found == facing_learned.end() || found->second.axis < 0)
+                return false;
+            const auto &axis = axes[found->second.axis];
+            if (axis[0] == 0 && axis[1] == 0)
+                return false;
+            hx = axis[0], hy = axis[1];
+            return true;
+        }
         // V1.2.71: what the Nitro Trap needs from the level (the Nitro's template, spawners it may borrow, where the crates
         // are) is gathered on a thread of its own, at most every 4 seconds and only while a Nitro Trap waits or runs.
         // Going over every object in the level takes tens of thousands of checked reads; V1.2.66-70 did it on the game's
@@ -3020,11 +3106,12 @@ namespace ingame
                 }
                 in_air = high - low > 8 && now[2] - lowest > 30 && !line;
             }
-            // the way he is going; in the air also the way he last ran, up to 8 seconds back (V1.2.69's clip: a jump on
-            // the spot after standing through the countdown had no way to go, so it fell instead)
+            // the way he is going; in the air also the way he faces (learned while he runs, V1.2.74), or else the way he
+            // last ran, up to 10 seconds back (V1.2.69's clip: a jump on the spot after standing through the countdown
+            // had no way to go, so it fell instead; V1.2.72's log: right after a respawn there was no running at all)
             float hx = 0, hy = 0;
             std::size_t end = 0;
-            if (!crash_heading(hx, hy, end) && !(in_air && crash_heading(hx, hy, end, 10000)))
+            if (!crash_heading(hx, hy, end) && !(in_air && (crash_facing(hx, hy) || crash_heading(hx, hy, end, 10000))))
                 return false;
             // the crates, from the last look at the level (a few seconds old at most; see nitro_level_scan)
             std::vector<std::array<float, 3>> crates;
@@ -3499,6 +3586,7 @@ namespace ingame
             bool ahead = false; // the coin flip: a Nitro appears ahead of Crash instead of falling onto him
             bool any = false;   // /nitro_drop any: an ordinary crate's spawner makes it (research)
             bool waited = false; // a scuba level's Nitro is waiting for a spot ahead (said once)
+            bool boom = false;   // /nitro_drop boom (test): set off where it lands
             std::uint64_t start = 0, spawned = 0, fall_start = 0;
             int ticks = 0, settle_frames = 0;
             float drop = 0; // how far it falls
@@ -3772,9 +3860,11 @@ namespace ingame
         // hit Crash: its common_Crate_Nitro_Spawned script sends the crate tuqrv6vb, 06rjdce1, gy91r6w7 and then
         // bovldql9, which its common_Crate_Explode script takes, and the whole explosion follows from that in the same
         // frame. (V1.2.70 sent xyvfghry, the first message of that frame: the crate took it and nothing followed.)
-        // Each is sent with the game's own send node from that script when it is found in memory next to the script
-        // (as /aku_give finds Aku's), so it carries the same values; one with no values is sent as a message of its own
-        // otherwise. Everything goes through the game's own sender and the event hook. Game thread only.
+        // V1.2.72 ran the game's own send nodes and the game crashed the moment the Nitro landed: a node run that way
+        // most likely goes on into the nodes after it in its script, without the state the script has while it runs.
+        // Now every message goes from a node of our own that ends there (as a DeathLink death is sent to Aku), with the
+        // game's node's values when that node is found next to the script. Each step goes to the log before it is
+        // sent, so if one still takes the game down, the log says which. Game thread only.
         std::map<std::pair<Address, Address>, Address> nitro_send_nodes; // (script description, message) -> its send node
         bool set_off_trap_nitro(Address crate, std::string &how)
         {
@@ -3787,14 +3877,9 @@ namespace ingame
             if (!sender)
                 return how = "its common_Crate_Nitro_Spawned script wasn't found", false;
             const auto meta = value<Address>(sender + 56);
-            const auto send = [&](Address node)
-            {
-                std::array<Address, 6> context{sender};
-                reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(node, reinterpret_cast<Address>(context.data()));
-            };
             std::ostringstream out;
             bool exploded_sent = false;
-            // the message, whether it carries values in the game's send (tuqrv6vb and bovldql9 carry five)
+            // the message, and how many values the game's send of it carries (tuqrv6vb and bovldql9: five)
             for (const auto &step : std::vector<std::pair<std::string, unsigned>>{{"tuqrv6vb", 5}, {"06rjdce1", 0}, {"gy91r6w7", 0}, {"bovldql9", 5}})
             {
                 const std::string &id = step.first;
@@ -3806,41 +3891,41 @@ namespace ingame
                     out << " " << id << ": not taken";
                     continue;
                 }
-                // the game's own node: a send node of this message, with as many values as the game's send had
-                const auto fits = [&](Address node)
+                // the game's node of this message, only for its values
+                Address args = 0;
+                if (values)
                 {
-                    const auto args = value<Address>(node + 32);
-                    return typed(node, 0x13bc390) && value<Address>(node + 16) == message && value<Address>(node + 24) &&
-                           (values ? typed(args, 0x1745070) && list(args, 16).size() == values : !args || typed(args, 0x1745070));
-                };
-                auto &node = nitro_send_nodes[{meta, message}];
-                if (!node || !fits(node))
-                {
-                    node = 0;
-                    for (const auto found : aku_send_nodes(meta, message))
-                        if (fits(found))
-                        {
-                            node = found;
-                            break;
-                        }
+                    const auto fits = [&](Address node)
+                    {
+                        const auto list_at = value<Address>(node + 32);
+                        return typed(node, 0x13bc390) && value<Address>(node + 16) == message && value<Address>(node + 24) && typed(list_at, 0x1745070) &&
+                               list(list_at, 16).size() == values;
+                    };
+                    auto &node = nitro_send_nodes[{meta, message}];
+                    if (!node || !fits(node))
+                    {
+                        node = 0;
+                        for (const auto found : aku_send_nodes(meta, message))
+                            if (fits(found))
+                            {
+                                node = found;
+                                break;
+                            }
+                    }
+                    if (node)
+                        args = value<Address>(node + 32);
+                    else if (id != "bovldql9")
+                    {
+                        out << " " << id << ": its values weren't found, skipped";
+                        continue;
+                    }
                 }
-                if (node)
-                {
-                    send(node);
-                    out << " " << id << ": the game's node";
-                }
-                else if (!values || id == "bovldql9")
-                {
-                    // no node found: the message on its own, with no values (as a DeathLink death is sent to Aku)
-                    std::array<Address, 11> own{base() + 0x13bc390, 0, message, target};
-                    send(reinterpret_cast<Address>(own.data()));
-                    out << " " << id << ": sent without values";
-                }
-                else
-                {
-                    out << " " << id << ": no node found, skipped";
-                    continue;
-                }
+                std::cout << "Nitro boom: sending " << id << (args ? " with the game's values" : " without values") << " ...\n" << std::flush;
+                std::array<Address, 11> own{base() + 0x13bc390, 0, message, target, args};
+                std::array<Address, 6> context{sender};
+                reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(reinterpret_cast<Address>(own.data()), reinterpret_cast<Address>(context.data()));
+                std::cout << "Nitro boom: " << id << " sent\n" << std::flush;
+                out << " " << id << (args ? ": sent with the game's values" : ": sent");
                 exploded_sent = exploded_sent || id == "bovldql9";
             }
             how = out.str();
@@ -3885,6 +3970,7 @@ namespace ingame
                     if (nitro_ahead_only_level(level) && !d.ahead)
                         d.ahead = true, std::cout << "Nitro Trap: in a scuba level it only appears ahead of Crash\n" << std::flush;
                     d.any = state.nitro_drop_kind == 3;
+                    d.boom = state.nitro_drop_kind == 4;
                     // a fresh look at the level during the countdown (and, in a level without Nitro crates, a search
                     // for the Nitro's template in memory after it)
                     nitro_level_scan(level);
@@ -4019,8 +4105,9 @@ namespace ingame
             std::cout << "Nitro drop: landed (the game has it at " << whole(e[0]) << ", " << whole(e[1]) << ", " << whole(e[2])
                       << (has_body ? ", its body at " + whole(body[0]) + ", " + whole(body[1]) + ", " + whole(body[2]) : std::string(", its body not found"))
                       << ")\n" << std::flush;
-            // it blows up where it lands, also when Crash got out of the way (it already went off if it hit him)
-            if (!trap_nitro_went_off(d.entity))
+            // /nitro_drop boom (test): it blows up where it lands, also when Crash got out of the way (it already went off
+            // if it hit him). Only on that test since V1.2.74: V1.2.72's set-off crashed the game the moment it landed
+            if (d.boom && !trap_nitro_went_off(d.entity))
             {
                 std::string how;
                 if (set_off_trap_nitro(d.entity, how))
@@ -4465,6 +4552,7 @@ namespace ingame
             if (level != sound_level)
                 sound_level = level, forget_game_sounds();
             record_crash_path(level);
+            learn_facing();
             // the level scan, every few seconds on its own thread, only while a Nitro Trap waits or runs
             if (!level.empty() && (state.nitro_wanted || nitro_drop.stage != NitroDropTrap::Idle || state.nitro_spawn_request != state.nitro_spawn_ack) &&
                 !nitro_trap_exempt())

@@ -14,6 +14,8 @@
 #include <condition_variable>
 #include <string>
 #include <thread>
+#include <algorithm>
+#include <vector>
 extern "C" bool NST_PrepareRenderer();
 
 namespace
@@ -241,7 +243,27 @@ extern "C" __declspec(dllexport) DWORD WINAPI NST_Bootstrap(void *callback)
         set_appdata = reinterpret_cast<Bind>(callback);
         if (!set_appdata)
             throw std::runtime_error("Missing startup save-path gate");
-        auto output = std::make_unique<DebugLog>(state / L"logs" / ("client-" + std::to_string(GetCurrentProcessId()) + ".log"), debug_console());
+        // V1.2.74: each game's log is named after when the game started (client-2026-10-23_16-01-05.log), so the
+        // newest is easy to find, and only the newest 10 are kept (they only ever get written, never read back)
+        {
+            std::error_code error;
+            std::vector<std::pair<std::filesystem::file_time_type, std::filesystem::path>> old;
+            for (const auto &entry : std::filesystem::directory_iterator(state / L"logs", error))
+            {
+                const auto name = entry.path().filename().wstring();
+                if (entry.is_regular_file(error) && name.rfind(L"client-", 0) == 0 && entry.path().extension() == L".log")
+                    old.emplace_back(entry.last_write_time(error), entry.path());
+            }
+            std::sort(old.begin(), old.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+            for (std::size_t i = 9; i < old.size(); ++i)
+                std::filesystem::remove(old[i].second, error);
+        }
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        char stamp[64]{};
+        std::snprintf(stamp, sizeof(stamp), "client-%04u-%02u-%02u_%02u-%02u-%02u.log", unsigned(now.wYear), unsigned(now.wMonth), unsigned(now.wDay),
+                      unsigned(now.wHour), unsigned(now.wMinute), unsigned(now.wSecond));
+        auto output = std::make_unique<DebugLog>(state / L"logs" / stamp, debug_console());
         log_file = output.release();
         std::cout.rdbuf(log_file);
         std::cerr.rdbuf(log_file);

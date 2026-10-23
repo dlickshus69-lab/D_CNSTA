@@ -583,11 +583,13 @@ void ClientRuntime::handle_commands()
                 {
                     // /nitro_drop: the trap as it comes (half and half); /nitro_drop fall or ahead picks the ending
                     // /nitro_drop any (research): it falls, made by an ordinary crate's spawner from the Nitro's template
-                    const unsigned kind = argument == "fall" ? 1 : argument == "ahead" ? 2 : argument == "any" ? 3 : 0;
+                    // /nitro_drop boom (test, V1.2.74): it falls, and is set off where it lands
+                    const unsigned kind = argument == "fall" ? 1 : argument == "ahead" ? 2 : argument == "any" ? 3 : argument == "boom" ? 4 : 0;
                     box_markers->request_nitro_drop(kind);
                     print_console(std::string("Nitro Trap test: NITRO INCOMING 3, 2, 1, then a Nitro ") +
                                   (kind == 1 ? "falls onto Crash" : kind == 2 ? "appears ahead of Crash (keep running)"
                                    : kind == 3 ? "made by an ordinary crate's spawner falls onto Crash (research: a Nitro in levels without one)"
+                                   : kind == 4 ? "falls and is set off where it lands (test: step out of the way; if the game crashes, send the log)"
                                                : "appears ahead of Crash or falls onto him") +
                                   ". Not sent to AP. Close the console (F1) and move! (/nitro_drop fall or /nitro_drop ahead picks one.)");
                 }
