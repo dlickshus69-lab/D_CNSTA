@@ -243,21 +243,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI NST_Bootstrap(void *callback)
         set_appdata = reinterpret_cast<Bind>(callback);
         if (!set_appdata)
             throw std::runtime_error("Missing startup save-path gate");
-        // V1.2.74: each game's log is named after when the game started (client-2026-10-23_16-01-05.log), so the
-        // newest is easy to find, and only the newest 10 are kept (they only ever get written, never read back)
-        {
-            std::error_code error;
-            std::vector<std::pair<std::filesystem::file_time_type, std::filesystem::path>> old;
-            for (const auto &entry : std::filesystem::directory_iterator(state / L"logs", error))
-            {
-                const auto name = entry.path().filename().wstring();
-                if (entry.is_regular_file(error) && name.rfind(L"client-", 0) == 0 && entry.path().extension() == L".log")
-                    old.emplace_back(entry.last_write_time(error), entry.path());
-            }
-            std::sort(old.begin(), old.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
-            for (std::size_t i = 9; i < old.size(); ++i)
-                std::filesystem::remove(old[i].second, error);
-        }
+        // each game's log is named after when the game started (client-2026-10-23_16-01-05.log), so the newest is easy
+        // to find; old ones are cleared out below, once this one is open
         SYSTEMTIME now{};
         GetLocalTime(&now);
         char stamp[64]{};
@@ -267,6 +254,30 @@ extern "C" __declspec(dllexport) DWORD WINAPI NST_Bootstrap(void *callback)
         log_file = output.release();
         std::cout.rdbuf(log_file);
         std::cerr.rdbuf(log_file);
+        // only the newest 10 logs are kept (they are only ever written, never read back). Plain Windows calls: V1.2.74
+        // went over the folder with std::filesystem before the log was open, and the game no longer started
+        {
+            struct OldLog
+            {
+                FILETIME written;
+                std::wstring name;
+            };
+            std::vector<OldLog> logs;
+            WIN32_FIND_DATAW found{};
+            const auto folder = (state / L"logs").wstring();
+            const auto search = FindFirstFileW((folder + L"\\client-*.log").c_str(), &found);
+            if (search != INVALID_HANDLE_VALUE)
+            {
+                do
+                    if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                        logs.push_back({found.ftLastWriteTime, found.cFileName});
+                while (FindNextFileW(search, &found));
+                FindClose(search);
+            }
+            std::sort(logs.begin(), logs.end(), [](const OldLog &a, const OldLog &b) { return CompareFileTime(&a.written, &b.written) > 0; });
+            for (std::size_t i = 10; i < logs.size(); ++i)
+                DeleteFileW((folder + L"\\" + logs[i].name).c_str());
+        }
         try
         {
             read_connection(standalone::connection_file(), address, slot);
