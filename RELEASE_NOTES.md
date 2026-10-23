@@ -1,4 +1,4 @@
 ## What's new
 
-- **Aku Aku Mask works with Aku Aku Sanity's lock on.** Your V1.2.40 test found the fix. The lock leaves two of Aku Aku's settings in a state that keeps the mask from coming out. Setting them back first lets it work. That is now the only path, so the mask shows up right away instead of after a few seconds of tries.
-- The extra Aku Aku research logging is gone. The log only records Aku Aku's settings if a give brings no mask out.
+- **Aku Aku Mask filler is done.** Your test with real "Aku Aku Mask!" items from box checks worked with Aku Aku Sanity's lock on: the mask showed up, took one hit, and went away. The YAML option `aku_aku_mask_weight` is no longer marked experimental. Set it in your YAML to use it (new seeds only).
+- The player guide describes `/aku_give` and the filler as they work now.
