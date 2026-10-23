@@ -108,14 +108,8 @@ jobs:
           $build = [int]$env:GITHUB_RUN_NUMBER - [int]((Get-Content VERSION_FIRST_RUN -Raw).Trim()) + 1
           if ($build -lt 1) { $build = [int]$env:GITHUB_RUN_NUMBER }
           $version = "$((Get-Content VERSION -Raw).Trim()).$build"
-          # the release text: what's new (RELEASE_NOTES.md, written with each change), then how to install
-          $whatsnew = if (Test-Path RELEASE_NOTES.md) { (Get-Content RELEASE_NOTES.md -Raw).Trim() } else { "" }
-          $notes = @"
-          $whatsnew
-
-          ---
-          **Install:** extract CrashNST-AP-Client-x64.zip next to CrashBandicootNSaneTrilogy.exe (back up your old dinput8.dll and CrashNSTAP folder first), and put crash_nst.apworld in Archipelago's custom_worlds folder. Built from commit $sha.
-          "@
+          # the release text: only what's new in this build (RELEASE_NOTES.md, written with each change)
+          $notes = if (Test-Path RELEASE_NOTES.md) { (Get-Content RELEASE_NOTES.md -Raw).Trim() } else { "" }
           # every build gets its own tag: GitHub may refuse to reuse a deleted release's tag
           $tag = "v$version"
           if ([int]$env:GITHUB_RUN_ATTEMPT -gt 1) { $tag = "$tag-$env:GITHUB_RUN_ATTEMPT" }

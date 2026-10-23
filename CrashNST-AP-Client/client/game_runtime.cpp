@@ -628,7 +628,7 @@ namespace ingame
         // when the client last handed Crash a mask (the filler); 0 when none is out. With Aku Aku Sanity's lock on, the
         // lock steps aside while that mask is out (masks protect, it isn't cleared); crates stay blocked
         std::atomic<std::uint64_t> filler_mask_since{0};
-        // the filler mask was given while Crash had none: after a hit while it is out, its model goes if the hit left it
+        // the filler mask was given while Crash had none (research: the log tells it from a crate's)
         std::atomic_bool filler_alone{false};
         // while the Aku Aku lock is on, logs when Crash's Aku Aku manager shows a mask
         void watch_aku_manager(bool locked)
@@ -3250,7 +3250,8 @@ namespace ingame
             // a send node of the game's, run as is (still of this type and for this message), or messages with no values
             Address node = 0, type = 0, message = 0;
             std::vector<std::string> ids;
-            // and then the game's mask count set to 1 (when Crash had no mask before)
+            // and then Crash takes the mask: the game's mask count and Aku's manager's own state set to 1 (when Crash
+            // had no mask before)
             bool count = false;
         };
         // AkuAkuCount (Crash_DamageManager's mask count, what decides whether a hit costs a mask or a life) set with the
@@ -3270,6 +3271,24 @@ namespace ingame
             std::cout << "Aku give: set AkuAkuCount to " << count << " with the game's own setter\n" << std::flush;
             return true;
         }
+        // Crash has this many masks: the game's count (what a hit checks) and Aku's manager's own state. V1.2.37's log:
+        // with a crate's mask out his currentState is 1 and DoTakeHit off; with no mask, 0 and on. The filler mask left
+        // them at 0 and on, so the hit that took it didn't take its model away
+        bool aku_set_masks(Address component, int masks)
+        {
+            const auto meta = value<Address>(component + 56);
+            if (!field_at(meta, "currentState", 0x90, 4) || !field_at(meta, "DoTakeHit", 0x42, 1))
+            {
+                std::cout << "Aku give: Aku's manager isn't laid out as expected; his state wasn't set\n" << std::flush;
+                return aku_give_count(masks);
+            }
+            const bool counted = aku_give_count(masks);
+            write(component + 0x90, masks);
+            write(component + 0x42, static_cast<unsigned char>(masks ? 0 : 1));
+            std::cout << "Aku give: Aku's manager now has " << masks << (masks == 1 ? " mask" : " masks") << " (currentState " << masks << ", DoTakeHit "
+                      << (masks ? "off" : "on") << ")\n" << std::flush;
+            return counted;
+        }
         std::vector<AkuGiveStep> aku_steps;
         unsigned aku_step = 0;
         void aku_run_step(Address actor)
@@ -3283,7 +3302,7 @@ namespace ingame
             for (const auto &id : step.ids)
                 sent = (component && aku_send_message(component, id)) || sent;
             if (step.count && component)
-                aku_give_count(1);
+                aku_set_masks(component, 1);
             const auto [state, mask] = aku_manager_state(actor);
             std::cout << "Aku give: tried " << step.label << (sent ? "" : " (nothing could be sent)") << "; right after, Aku's manager is in state " << state
                       << (mask ? ", WITH A MASK OUT" : ", no mask out") << "\n" << std::flush;
@@ -3355,8 +3374,20 @@ namespace ingame
                 }
             }
             log_aku_messages(component);
-            const bool had_mask = aku_manager_state(actor).second;
+            // (his state is the mask count, 0 to 3; once, during a load, it read 32835)
+            const auto [state_before, model_out] = aku_manager_state(actor);
+            const int masks_before = state_before >= 1 && state_before <= 3 ? state_before : 0;
+            const bool had_mask = model_out || masks_before > 0;
             filler_alone = !had_mask;
+            // a mask already out: one more, as a second crate's would (two masks take two hits). Its model is already
+            // there, so nothing new is brought out
+            if (had_mask)
+            {
+                const int masks = std::min(masks_before, 1) + 1;
+                std::cout << "Aku give: Crash already has a mask; now " << masks << "\n" << std::flush;
+                aku_set_masks(component, masks);
+                return;
+            }
             // A real pickup (V1.2.35's log) is a chain of messages Aku's manager sends himself: fcbn65ha with "yes"
             // (from one node of his script), a9nnfx8i (his handling of it sends 6ldq5n9r, which brings the mask out),
             // then 9becl2sc, tjpwzf3m, sppqmskb, 202aweq4, 9nj5heau and nr69k1wc, and the game's mask count changes.
@@ -3426,8 +3457,8 @@ namespace ingame
         void aku_research_tick()
         {
             static Address actor_seen = 0;
-            static bool last_mask = false, last_hurt = false, hit_with_filler = false;
-            static std::uint64_t next_look = 0, dump_at = 0, cleanup_at = 0, check_at = 0;
+            static bool last_mask = false, last_hurt = false;
+            static std::uint64_t next_look = 0, dump_at = 0;
             static std::string dump_why;
             const auto actor = player();
             const auto now = GetTickCount64();
@@ -3439,7 +3470,7 @@ namespace ingame
             const bool hurt = hurt_at && typed(hurt_at, 0x155ebf0) && reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60)(hurt_at);
             if (actor != actor_seen)
             {
-                actor_seen = actor, last_mask = mask, last_hurt = hurt, hit_with_filler = false, dump_at = cleanup_at = check_at = 0;
+                actor_seen = actor, last_mask = mask, last_hurt = hurt, dump_at = 0;
                 return;
             }
             const bool filler = filler_alone.load() && filler_mask_since.load();
@@ -3448,40 +3479,16 @@ namespace ingame
             if (!mask && last_mask)
             {
                 dump_crash_scripts(actor, "the mask went away");
-                hit_with_filler = false, filler_alone = false, cleanup_at = 0;
+                filler_alone = false;
             }
             if (hurt && !last_hurt && last_mask)
             {
                 dump_crash_scripts(actor, std::string("a hit while a mask was out") + (filler ? " (a filler mask)" : ""));
                 dump_at = now + 1500, dump_why = "1.5 s after the hit";
-                if (filler)
-                    hit_with_filler = true, cleanup_at = now + 2500;
             }
             last_mask = mask, last_hurt = hurt;
             if (dump_at && now >= dump_at)
                 dump_at = 0, dump_crash_scripts(actor, dump_why);
-            // the hit took the filler mask's protection (the game's count went down) but its model is still by Crash:
-            // Aku's manager gets what he gets when Crash dies (xvpkmc2n, his first message then), which takes it away
-            if (cleanup_at && now >= cleanup_at)
-            {
-                cleanup_at = 0;
-                if (mask && hit_with_filler)
-                {
-                    const auto component = aku_manager_component(actor);
-                    const bool sent = component && aku_send_message(component, "xvpkmc2n");
-                    std::cout << "Aku Aku Mask: the hit took the filler mask but it still shows; " << (sent ? "sent Aku xvpkmc2n" : "couldn't send xvpkmc2n")
-                              << "\n" << std::flush;
-                    check_at = now + 600;
-                }
-                hit_with_filler = false;
-            }
-            if (check_at && now >= check_at)
-            {
-                check_at = 0;
-                std::cout << "Aku Aku Mask: after xvpkmc2n the mask " << (mask ? "STILL shows" : "is gone") << "\n" << std::flush;
-                if (mask)
-                    dump_crash_scripts(actor, "the filler mask still shows after xvpkmc2n");
-            }
         }
         // requests from /nitro_spawn and the Nitro Trap; a request waits up to 5 seconds for a spot
         void update_nitro_trap(Shared &state, const std::string &level)
