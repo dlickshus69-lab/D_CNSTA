@@ -1,9 +1,11 @@
 ## What's new
 
-- **Aku Aku Mask filler (experimental).** New YAML option `aku_aku_mask_weight` (0–100, default 0). Each Aku Aku Mask gives Crash a mask in the next level once he can move, even with Aku Aku Sanity before you've found Aku Aku. Try `/aku_give` in a level first: it uses the same hand-over and logs whether a mask came out.
+- **Aku Aku Mask, second try.** The first test sent Aku Aku the pickup message but no mask came out. Now Aku Aku Sanity's no-masks switch is turned off before the hand-over, and if no mask is out a second later, an Aku Aku crate in the level makes one at Crash instead. The log shows each step (`Aku give: ...`).
+- **Aku Aku Sanity's lock now works with DeathLink off.** The client only hooked Crash's damage scripts (where the lock's switch lives) when DeathLink or traps were on.
 
 ## Recent builds
 
+- **V1.2.30:** Aku Aku Mask filler (experimental, `aku_aku_mask_weight`) and a direct `/aku_give`.
 - **V1.2.29:** the death counter is always on screen (total and every player, hubs and levels).
 - **V1.2.28:** fixed the game not opening on V1.2.25 to V1.2.27 (the death counter read a file that didn't exist yet).
 - **V1.2.27:** a level's clear is sent when you pick up its box gem or relic, if the save missed it.

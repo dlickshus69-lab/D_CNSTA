@@ -3123,15 +3123,25 @@ namespace ingame
             std::cout << "Aku give: Crash's Aku Aku manager wasn't found\n" << std::flush;
             return false;
         }
+        void aku_give_crate(Address actor, const std::array<float, 3> &crash);
         void aku_give_followup()
         {
             const auto at = aku_give_check_at.load();
             if (!at || GetTickCount64() < at)
                 return;
             aku_give_check_at = 0;
-            const auto [state, mask] = aku_manager_state(player());
+            const auto actor = player();
+            const auto [state, mask] = aku_manager_state(actor);
             std::cout << "Aku give: a second later Aku's manager is in state " << state << (mask ? ", with a mask out" : ", no mask out") << "\n"
                       << std::flush;
+            // the message didn't bring a mask out: an Aku Aku crate in the level makes one at Crash instead
+            std::array<float, 3> crash{};
+            if (!mask && actor && crash_position(crash))
+            {
+                std::cout << "Aku give: no mask from the message; trying an Aku Aku crate's spawner\n" << std::flush;
+                filler_mask_since = GetTickCount64();
+                aku_give_crate(actor, crash);
+            }
         }
         void aku_give()
         {
@@ -3147,6 +3157,18 @@ namespace ingame
                 std::cout << "Aku give: before, Aku's manager is in state " << state << (mask ? ", with a mask out" : ", no mask out") << "\n" << std::flush;
             }
             filler_mask_since = GetTickCount64();
+            // Aku Aku Sanity's switch keeps masks from being given: off now, before the hand-over (the lock stays aside
+            // while the mask is out)
+            if (const auto variable = no_aku_variable.load(); variable && typed(variable, 0x155ebf0))
+            {
+                const auto getter = reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60);
+                const auto setter = reinterpret_cast<void (*)(Address, unsigned char)>(death_hook.original ? death_hook.original : base() + 0x502000);
+                if (getter(variable))
+                {
+                    setter(variable, 0);
+                    std::cout << "Aku give: turned Aku Aku Sanity's no-masks switch off for this mask\n" << std::flush;
+                }
+            }
             if (aku_give_message_now(actor))
             {
                 const auto [state, mask] = aku_manager_state(actor);
@@ -3156,6 +3178,11 @@ namespace ingame
                 return;
             }
             std::cout << "Aku give: trying an Aku Aku crate's spawner instead\n" << std::flush;
+            aku_give_crate(actor, crash);
+        }
+        // the older way: a live Aku Aku crate in the level makes its mask right at Crash
+        void aku_give_crate(Address actor, const std::array<float, 3> &crash)
+        {
             // research: Crash's Aku Aku manager as it is now (compare with a mask that protects and one that doesn't)
             for (const auto c : list(value<Address>(actor + 24), 128))
                 if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78) &&
@@ -6350,8 +6377,9 @@ namespace ingame
                 copy(state.error, "Crashsanity waiting for crouch/slide component. Re-enter the level.");
             }
         }
-        // Death Traps use the same scripted death, so it also runs without DeathLink
-        if (key.empty() || !(state.death_link || state.trap_kills))
+        // Crash's damage scripts are bound in every level, DeathLink or not: Aku Aku Sanity's lock (its NoAkuAkuMasks
+        // switch) and the Aku Aku research need them too. Deaths are only sent when DeathLink is on (the client checks)
+        if (key.empty())
         {
             last_actor = 0;
             death_handle = 0;
