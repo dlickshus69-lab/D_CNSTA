@@ -3,8 +3,8 @@
 # Every build is kept under the run's "Artifacts". Builds of main also refresh the latest release
 # on the Releases page, named "Dlickshus Crash Bandicoot N. Sane Trilogy Archipelago V<major.minor>.<build>"
 # (tag v<major.minor>.<build>): major.minor comes from the VERSION file, the last number counts builds since
-# that version started: the run number minus VERSION_FIRST_RUN, plus 1 (V1.2 started at run 74 as V1.2.1; runs 149 and 151 were cancelled, so from run 152 the first number is 76, making run 152 V1.2.77).
-# The five newest builds are kept.
+# that version started: the run number minus VERSION_FIRST_RUN, plus 1 (V1.2 started at run 74 as V1.2.1; runs 149, 151 and 152 were cancelled, so from run 153 the first number is 77, making run 153 V1.2.77).
+# Only the newest build is kept (V1.2.77: one release on the Releases page instead of five).
 name: Build client
 
 on:
@@ -123,8 +123,8 @@ jobs:
             Start-Sleep -Seconds 20
           }
           if (-not $created) { Write-Host "::error::Could not create release $tag"; exit 1 }
-          # keep the five newest builds; older ones (and the old latest-build) are cleaned up. The skins release stays.
-          $old = gh release list --limit 100 --json tagName,createdAt --jq '[.[] | select(.tagName | startswith("skins") | not)] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName'
+          # keep only the newest build; every older one is cleaned up. The skins release stays.
+          $old = gh release list --limit 100 --json tagName,createdAt --jq '[.[] | select(.tagName | startswith("skins") | not)] | sort_by(.createdAt) | reverse | .[1:] | .[].tagName'
           foreach ($t in $old) {
             gh release delete $t --cleanup-tag --yes
             if ($LASTEXITCODE -ne 0) { Write-Host "::warning::Could not remove old release $t" }
