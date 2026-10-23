@@ -1255,6 +1255,30 @@ namespace ingame
             }
             return out.str();
         }
+        // a send node's target (+24): the kind of value source and what it holds (V1.2.61 research: where a trap Nitro's
+        // messages go when it explodes, to find the one that adds a box to the level's count)
+        std::string send_target(Address node)
+        {
+            const auto source = value<Address>(node + 24);
+            if (!source)
+                return " to (none)";
+            std::ostringstream out;
+            const auto type = value<Address>(source);
+            out << " to ";
+            if (type > base() && type < base() + 0x2000000)
+                out << "+0x" << std::hex << (type - base()) << std::dec;
+            else
+                out << "?";
+            for (const auto at : {source + 24, source + 32})
+            {
+                const auto v = value<Address>(at);
+                out << " " << event_object(v);
+                if (const auto name = string(value<Address>(value<Address>(v + 24) + 48), 48);
+                    !name.empty() && std::all_of(name.begin(), name.end(), [](char c) { return c > 32 && c < 127; }))
+                    out << "=" << name;
+            }
+            return out.str();
+        }
         // when an Aku Aku crate last got or sent a message (one breaking): what Aku's manager does right after is the pickup
         std::atomic<std::uint64_t> aku_crate_event_at{0};
         unsigned near_crate_lines = 0;
@@ -1313,6 +1337,7 @@ namespace ingame
                         read(target + 32, at);
                         std::cout << "Trap Nitro +" << GetTickCount64() - trap_event_since[i].load() << " ms (at " << static_cast<int>(at[0]) << ", "
                                   << static_cast<int>(at[1]) << ", " << static_cast<int>(at[2]) << "): " << graph << " gets " << name
+                                  << (typed(event, 0x13bc390) ? send_target(event) + send_arguments(event) : std::string())
                                   << (blocked ? " (its hop: stopped)" : "") << "\n" << std::flush;
                         break;
                     }
@@ -3237,6 +3262,23 @@ namespace ingame
                         scripts += (scripts.empty() ? "" : ", ") + string(value<Address>(value<Address>(m + 56) + 16), 120);
                 std::cout << "Nitro spawn: a new " << string(value<Address>(crate + 0x80)) << " (" << string(value<Address>(value<Address>(crate + 0x40) + 0x48))
                           << "; " << (scripts.empty() ? "no scripts" : scripts) << ") appeared at " << triple(at) << " after " << elapsed << " ms\n";
+                // V1.2.61 research, once per game start: every setting of the trap Nitro's scripts and their data, to find
+                // what makes it count as a box when it explodes. Data shared with other crates shows the same address
+                // on the next Nitro.
+                static unsigned dumped = 0;
+                if (dumped++ < 2)
+                    for (const auto m : list(value<Address>(crate + 24), 64))
+                        if (typed(m, 0x13bbbd0) && typed(value<Address>(m + 56), 0x1745d78))
+                        {
+                            auto who = "Trap Nitro script " + string(value<Address>(value<Address>(m + 56) + 16), 120);
+                            dump_fields(m, value<Address>(m + 56), who);
+                            if (const auto data = value<Address>(m + 16))
+                            {
+                                std::ostringstream at_text;
+                                at_text << who << " data 0x" << std::hex << data;
+                                dump_fields(data, value<Address>(data + 32), at_text.str());
+                            }
+                        }
                 trap_nitro = {crate, at, GetTickCount64(), s.level};
                 watch_trap_nitro(crate, at, s.level, s.restore.empty() ? nullptr : &s.restore.front().second);
                 finish_nitro_spawn("done");
