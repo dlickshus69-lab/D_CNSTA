@@ -1,10 +1,11 @@
 ## What's new
 
-- **Death counter.** With DeathLink on, the top-right corner shows the seed's DeathLink deaths ("Deaths: N" for everyone together) and, in the hubs, each player's count. It counts your sent deaths and every DeathLink received while you're connected, and is saved per seed.
+- **Crash 3 secret pad:** back to how it worked before V1.2.24 (asked for once per hub visit). V1.2.24's retry made a second pad after a ride, which could leave the next ride on a black screen and the camera stuck.
 
 ## Recent builds
 
-- **V1.2.24:** boxes that need a move (arrow crates, crates on TNT, tall stacks: Spin; iron-bound crates, Turtle Woods' underground room: Body Slam), gimmick stages need no moves, box tracker re-attaches after reloads, DeathLink skips time trials and pause-menu Restart, rides hold received DeathLinks, no Darkness on Coco's jet ski, secret platform retries.
+- **V1.2.25:** death counter (everyone's DeathLink deaths this seed, each player's in the hubs).
+- **V1.2.24:** boxes that need a move (arrow crates, crates on TNT, tall stacks: Spin; iron-bound crates, Turtle Woods' underground room: Body Slam), gimmick stages need no moves, box tracker re-attaches after reloads, DeathLink skips time trials and pause-menu Restart, rides hold received DeathLinks, no Darkness on Coco's jet ski.
 - **V1.2.23:** trap mercy: each death takes 5 seconds off every timed trap.
 - **V1.2.22:** a DeathLink you receive on a ride (hog, polar bear, jet ski, jetpack, vehicles) costs a life instead of breaking the ride. The Great Gate needs Spin (Ability Shuffle, new seeds).
 - **V1.2.21:** F2 keeps the last 300 popups and scrolls (mouse wheel, Page Up/Down, arrows, Home/End). Deaths on rides send DeathLink. The Darkness Trap fades in over 5 seconds.

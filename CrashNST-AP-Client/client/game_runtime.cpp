@@ -5669,10 +5669,9 @@ namespace ingame
         void update_c3_buttons(Shared &state, const std::string &zone)
         {
             static std::uint64_t next = 0, pending_triggers = 0;
-            // the secret platform's spawn requests this hub visit: how many, and when the last one went out. A request
-            // made while the hub is still settling can come to nothing, so it is asked again (every 3 s, up to 5 times)
-            // until the platform is there
-            static std::map<std::pair<Address, Address>, std::pair<unsigned, std::uint64_t>> platform_spawn_attempts;
+            // the secret platform is requested once per hub visit. (V1.2.24 asked again while it wasn't moving, which
+            // made a second pad after a ride and left the next ride on a black screen)
+            static std::set<std::pair<Address, Address>> platform_spawn_attempts;
             if (!state.c3_buttons_ready || hub_campaign(zone) != 3)
             {
                 pending_triggers = 0;
@@ -5707,14 +5706,11 @@ namespace ingame
                         for (const auto component : components)
                         {
                             const auto method = c3_platform_spawn_method(component, entity);
-                            auto &attempt = platform_spawn_attempts[{entity, component}];
-                            if (method && attempt.first < 5 && (!attempt.first || GetTickCount64() - attempt.second > 3000))
+                            if (method && platform_spawn_attempts.emplace(entity, component).second)
                             {
-                                ++attempt.first;
-                                attempt.second = GetTickCount64();
                                 reinterpret_cast<void (*)(Address, Address, unsigned, Address)>(base() + 0xc988c0)(method, component, 0, 0);
-                                std::cout << "Crash 3 secret platform spawn requested through the game script (try "
-                                          << attempt.first << ").\n" << std::flush;
+                                std::cout << "Crash 3 secret platform spawn requested through the game script ("
+                                          << name << ").\n" << std::flush;
                             }
                         }
                 }
