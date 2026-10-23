@@ -39,7 +39,7 @@ namespace ingame
     // gimmick levels for traps: hog, polar bear, jetpack, Crash 3 vehicle/scuba levels and the Crash 2 jet-board levels
     bool gimmick_stage();
     // levels the Nitro Trap doesn't strike in: the gimmick levels except the hog, Crash 2 jet-board and polar bear
-    // levels and Coco's jet ski levels
+    // levels and the scuba levels (where it only appears ahead of Crash)
     bool nitro_trap_exempt();
     // Crash's position (x, y horizontal, z up) when he is loaded
     bool crash_position(std::array<float, 3> &at);

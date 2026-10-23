@@ -282,14 +282,19 @@ namespace ingame
         }
         // gimmick levels the Nitro Trap still strikes in (V1.2.46): the hog levels (Hog Wild, Whole Hog), the Crash 2
         // jet-board levels (Hang Eight, Air Crash, Plant Food) and polar bear levels (Bear It, Bear Down, Un-Bearable,
-        // Totally Bear), and Coco's jet ski levels (Makin' Waves, Tell No Tales, Ski Crazed, Hot Coco). The chase levels
-        // (boulders, bear, dinosaur) were never gimmick levels. Still off: jetpack, motorcycle, plane, scuba, Coco's
-        // tiger and Baby T levels.
+        // Totally Bear), and since V1.2.73 the scuba levels (Under Pressure, Deep Trouble), where it only ever appears
+        // ahead of Crash (see nitro_ahead_only). The chase levels (boulders, bear, dinosaur) were never gimmick levels.
+        // Off: jetpack, motorcycle, plane, Coco's jet ski (off since V1.2.73), Coco's tiger and Baby T levels.
         bool nitro_gimmick_ok(const std::string &key)
         {
-            static const std::set<std::string> ok{"L107", "L114", "L203", "L207", "L211", "L208", "L213", "L215", "L226",
-                                                  "L305", "L318", "L326", "L331"};
+            static const std::set<std::string> ok{"L107", "L114", "L203", "L207", "L211", "L208", "L213", "L215", "L226", "L302", "L312"};
             return ok.count(key) != 0;
+        }
+        // the scuba levels: the Nitro Trap's Nitro only appears ahead of Crash there, floating in the water (a Nitro
+        // dropping onto a diver makes no sense), and it waits for a spot ahead as long as it takes
+        bool nitro_ahead_only_level(const std::string &key)
+        {
+            return key == "L302" || key == "L312";
         }
         std::mutex movement_mutex;
         std::map<std::string, unsigned> movement_styles;
@@ -3368,6 +3373,8 @@ namespace ingame
             else if (!ahead_spot(spot, &floats))
                 return why = "no spot ahead yet: Crash needs to be running or jumping", false;
             const auto level = level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184)));
+            // in the scuba levels it floats in the water wherever it appears
+            floats = floats || (!forced && nitro_ahead_only_level(level));
             // always made from the Nitro's template by a spawner that counts nothing (V1.2.65; before, a level's own Nitro
             // spawner was borrowed where there was one, and its box count counted the trap's Nitro)
             any = true;
@@ -3491,6 +3498,7 @@ namespace ingame
             enum Stage { Idle, Countdown, Ahead, Spawning, Settling, Falling } stage = Idle;
             bool ahead = false; // the coin flip: a Nitro appears ahead of Crash instead of falling onto him
             bool any = false;   // /nitro_drop any: an ordinary crate's spawner makes it (research)
+            bool waited = false; // a scuba level's Nitro is waiting for a spot ahead (said once)
             std::uint64_t start = 0, spawned = 0, fall_start = 0;
             int ticks = 0, settle_frames = 0;
             float drop = 0; // how far it falls
@@ -3874,6 +3882,8 @@ namespace ingame
                     // one Nitro Trap, two endings, half and half (/nitro_drop fall or ahead picks one)
                     static std::mt19937 coin{std::random_device{}()};
                     d.ahead = state.nitro_drop_kind == 2 || (state.nitro_drop_kind == 0 && std::bernoulli_distribution(0.5)(coin));
+                    if (nitro_ahead_only_level(level) && !d.ahead)
+                        d.ahead = true, std::cout << "Nitro Trap: in a scuba level it only appears ahead of Crash\n" << std::flush;
                     d.any = state.nitro_drop_kind == 3;
                     // a fresh look at the level during the countdown (and, in a level without Nitro crates, a search
                     // for the Nitro's template in memory after it)
@@ -3939,6 +3949,13 @@ namespace ingame
                 }
                 if (now - d.spawned < ahead_wait_ms)
                     return;
+                // in a scuba level it never falls: it waits for a spot ahead (swimming along) as long as it takes
+                if (nitro_ahead_only_level(level))
+                {
+                    if (!d.waited)
+                        d.waited = true, std::cout << "Nitro Trap: nothing ahead yet (" << why << "); in a scuba level it waits for a spot ahead\n" << std::flush;
+                    return;
+                }
                 std::cout << "Nitro Trap: nothing ahead after " << ahead_wait_ms / 1000.0 << " s (" << why << "): it falls onto him instead\n" << std::flush;
                 d.ahead = false, d.stage = NitroDropTrap::Countdown;
             }
