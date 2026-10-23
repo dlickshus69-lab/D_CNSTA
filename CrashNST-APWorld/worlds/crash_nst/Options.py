@@ -582,7 +582,7 @@ class CrashColor(TextChoice):
     """default leaves it as the game has it. Otherwise a color name, or any color as "#RRGGBB" (for example "#3366ff"). The
     client makes the colored Crash from your own game files, keeping his shading, and he wears it from the next time
     the game starts. The colors are for the normal Crash: when crash_skin picks a skin mod, the skin stays. /colors in
-    the client changes them too."""
+    the client changes them too. bright_white is a brighter white that can glow under strong lights."""
 
     option_default = 0
     option_red = 1
@@ -608,6 +608,7 @@ class CrashColor(TextChoice):
     option_light_gray = 21
     option_gray = 22
     option_black = 23
+    option_bright_white = 24
     default = 0
 
     @classmethod
@@ -620,7 +621,7 @@ class CrashFurColor(CrashColor):
     """The color of Crash's fur. default leaves it as the game has it. Otherwise a color name, or any color as "#RRGGBB" (for example "#3366ff"). The
     client makes the colored Crash from your own game files, keeping his shading, and he wears it from the next time
     the game starts. The colors are for the normal Crash: when crash_skin picks a skin mod, the skin stays. /colors in
-    the client changes them too."""
+    the client changes them too. bright_white is a brighter white that can glow under strong lights."""
 
     display_name = "Crash Fur Color"
 
@@ -629,7 +630,7 @@ class CrashChestColor(CrashColor):
     """The color of Crash's chest and jaw (normally tan). default leaves it as the game has it. Otherwise a color name, or any color as "#RRGGBB" (for example "#3366ff"). The
     client makes the colored Crash from your own game files, keeping his shading, and he wears it from the next time
     the game starts. The colors are for the normal Crash: when crash_skin picks a skin mod, the skin stays. /colors in
-    the client changes them too."""
+    the client changes them too. bright_white is a brighter white that can glow under strong lights."""
 
     display_name = "Crash Chest Color"
 
@@ -638,7 +639,7 @@ class CrashPantsColor(CrashColor):
     """The color of Crash's pants. default leaves it as the game has it. Otherwise a color name, or any color as "#RRGGBB" (for example "#3366ff"). The
     client makes the colored Crash from your own game files, keeping his shading, and he wears it from the next time
     the game starts. The colors are for the normal Crash: when crash_skin picks a skin mod, the skin stays. /colors in
-    the client changes them too."""
+    the client changes them too. bright_white is a brighter white that can glow under strong lights."""
 
     display_name = "Crash Pants Color"
 
@@ -647,7 +648,7 @@ class CrashShoesColor(CrashColor):
     """The color of Crash's shoes (the soles and laces stay white). default leaves it as the game has it. Otherwise a color name, or any color as "#RRGGBB" (for example "#3366ff"). The
     client makes the colored Crash from your own game files, keeping his shading, and he wears it from the next time
     the game starts. The colors are for the normal Crash: when crash_skin picks a skin mod, the skin stays. /colors in
-    the client changes them too."""
+    the client changes them too. bright_white is a brighter white that can glow under strong lights."""
 
     display_name = "Crash Shoes Color"
 
@@ -656,7 +657,7 @@ class CrashHairColor(CrashColor):
     """The color of Crash's mohawk (his eyebrows stay). default leaves it as the game has it. Otherwise a color name, or any color as "#RRGGBB" (for example "#3366ff"). The
     client makes the colored Crash from your own game files, keeping his shading, and he wears it from the next time
     the game starts. The colors are for the normal Crash: when crash_skin picks a skin mod, the skin stays. /colors in
-    the client changes them too."""
+    the client changes them too. bright_white is a brighter white that can glow under strong lights."""
 
     display_name = "Crash Mohawk Color"
 

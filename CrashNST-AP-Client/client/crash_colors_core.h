@@ -46,9 +46,9 @@ namespace crash_colors
     std::vector<unsigned char> recolor_cloth(const std::vector<unsigned char> &igz, const std::optional<Rgb> &pants, const std::optional<Rgb> &shoes);
     std::vector<unsigned char> recolor_hair(const std::vector<unsigned char> &igz, const std::optional<Rgb> &hair);
 
-    // changes whenever the recolor itself changes (V1.2.44: highlights ease off instead of clipping to white), so the
+    // changes whenever the recolor or a color changes (V1.2.44: highlights ease off; V1.2.45: softer white), so the
     // client makes each colored Crash again with the new one
-    inline constexpr const char *recolor_version = "2";
+    inline constexpr const char *recolor_version = "3";
     // the archive members holding those textures
     inline constexpr const char *fur_texture = "textures/ColorMap,textures@!actors!Playable!Crash!CrashFur_C`tga,111.igz";
     inline constexpr const char *cloth_texture = "textures/ColorMap,textures@!actors!Playable!Crash!CrashCloth_C`tga,111.igz";

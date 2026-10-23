@@ -217,8 +217,11 @@ namespace crash_colors
             {"gold", {199, 154, 34}},    {"lime", {120, 200, 30}},     {"green", {33, 154, 56}},    {"dark_green", {20, 80, 36}},
             {"teal", {18, 130, 130}},    {"cyan", {28, 180, 204}},     {"light_blue", {90, 162, 230}}, {"blue", {29, 88, 200}},
             {"navy", {26, 39, 102}},     {"purple", {106, 45, 182}},   {"violet", {150, 86, 208}},  {"pink", {224, 106, 162}},
-            {"magenta", {192, 34, 138}}, {"brown", {98, 56, 28}},      {"tan", {196, 154, 100}},    {"white", {214, 214, 214}},
-            {"light_gray", {168, 168, 168}}, {"gray", {118, 118, 118}}, {"black", {30, 30, 30}}};
+            {"magenta", {192, 34, 138}}, {"brown", {98, 56, 28}},      {"tan", {196, 154, 100}},    {"white", {158, 158, 158}},
+            {"light_gray", {130, 130, 130}}, {"gray", {98, 98, 98}}, {"black", {30, 30, 30}},
+            // V1.2.45: "white" is close to Crash's own chest in brightness (which doesn't glow); this is V1.2.44's brighter
+            // white, which can glow under strong lights (the Crash 3 hub's bridge)
+            {"bright_white", {214, 214, 214}}};
         return colors;
     }
     std::string color_text(const std::string &text)
