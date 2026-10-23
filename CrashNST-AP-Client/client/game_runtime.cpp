@@ -630,6 +630,7 @@ namespace ingame
         std::atomic<std::uint64_t> filler_mask_since{0};
         // the filler mask was given while Crash had none (research: the log tells it from a crate's)
         std::atomic_bool filler_alone{false};
+        bool aku_set_masks(Address component, int masks);
         // while the Aku Aku lock is on, logs when Crash's Aku Aku manager shows a mask
         void watch_aku_manager(bool locked)
         {
@@ -656,6 +657,16 @@ namespace ingame
             const int state = value<int>(component + 0x90);
             const bool mask = resolve(value<Address>(component + 0x60)) != 0;
             clear_aku_count(actor, state != 0 || mask);
+            // a mask count with no mask on screen (V1.2.38's "now 2" was saved with the game, and V1.2.39's log showed
+            // Aku's manager set as if he had one): cleared once per Crash, so finding Aku Aku later gives no free masks
+            static Address cleaned_for = 0;
+            if (actor != cleaned_for && !mask && ((state >= 1 && state <= 3) || value<unsigned char>(component + 0x42) == 0))
+            {
+                cleaned_for = actor;
+                std::cout << "Aku Aku lock: Aku's manager counts a mask that isn't there (state " << state << ", DoTakeHit "
+                          << unsigned(value<unsigned char>(component + 0x42)) << "); clearing it\n" << std::flush;
+                aku_set_masks(component, 0);
+            }
             if ((state != last_state || mask != last_mask) && lines < 30)
             {
                 ++lines;
@@ -3262,7 +3273,40 @@ namespace ingame
             // and then Crash takes the mask: the game's mask count and Aku's manager's own state set to 1 (when Crash
             // had no mask before)
             bool count = false;
+            // first: 1 = s8h11iit (what Aku's manager sends himself when the no-masks switch goes on), 2 = his settings
+            // as they are with the lock off and no mask
+            int prepare = 0;
         };
+        // V1.2.39's log, lock on, before /aku_give: these of Aku's manager's settings differ from the lock off with no
+        // mask (V1.2.34's log). Set back to the lock-off values
+        void aku_lock_off_settings(Address component)
+        {
+            struct Setting
+            {
+                const char *name;
+                unsigned offset, size;
+                int value;
+            };
+            static const Setting settings[]{{"tempIsIdle", 0x45, 1, 0}, {"Bool_id_yvav8yod", 0x120, 1, 1}, {"Bool_id_4m5sd4dd", 0x138, 1, 0}, {"Int_id_fbrl3zgn", 0x1b8, 4, 3}};
+            const auto meta = value<Address>(component + 56);
+            std::ostringstream out;
+            out << "Aku give: Aku's manager's lock-off settings:";
+            for (const auto &setting : settings)
+            {
+                if (!field_at(meta, setting.name, setting.offset, setting.size))
+                {
+                    out << " " << setting.name << " (not there)";
+                    continue;
+                }
+                const int before = setting.size == 1 ? value<unsigned char>(component + setting.offset) : value<int>(component + setting.offset);
+                if (setting.size == 1)
+                    write(component + setting.offset, static_cast<unsigned char>(setting.value));
+                else
+                    write(component + setting.offset, setting.value);
+                out << " " << setting.name << " " << before << "->" << setting.value;
+            }
+            std::cout << out.str() << "\n" << std::flush;
+        }
         // AkuAkuCount (Crash_DamageManager's mask count, what decides whether a hit costs a mask or a life) set with the
         // game's own number setter (+0x502200, where the number variables' "reset" entry +0x4fb420 jumps). False if it
         // can't be done safely
@@ -3306,6 +3350,10 @@ namespace ingame
             const auto component = aku_manager_component(actor);
             filler_mask_since = GetTickCount64();
             bool sent = false;
+            if (component && step.prepare == 1)
+                aku_send_message(component, "s8h11iit");
+            if (component && step.prepare == 2)
+                aku_lock_off_settings(component);
             if (component && step.node && value<Address>(step.node) == step.type && value<Address>(step.node + 16) == step.message)
                 aku_send(component, step.node), sent = true;
             for (const auto &id : step.ids)
@@ -3430,6 +3478,10 @@ namespace ingame
                 aku_set_masks(component, masks);
                 return;
             }
+            // no mask on screen: Aku's manager and the game's count start from no mask. V1.2.39's log: with the lock on he
+            // was set as if he had one (DoTakeHit off), maybe left from V1.2.38's "now 2", saved with the game
+            aku_set_masks(component, 0);
+            dump_crash_scripts(actor, "ready for the hand-over (switch off, no mask)");
             // A real pickup (V1.2.35's log) is a chain of messages Aku's manager sends himself: fcbn65ha with "yes"
             // (from one node of his script), a9nnfx8i (his handling of it sends 6ldq5n9r, which brings the mask out),
             // then 9becl2sc, tjpwzf3m, sppqmskb, 202aweq4, 9nj5heau and nr69k1wc, and the game's mask count changes.
@@ -3470,6 +3522,13 @@ namespace ingame
             else
                 std::cout << "Aku give: fcbn65ha's yes node wasn't found; the rest of the chain goes anyway\n" << std::flush;
             aku_steps.push_back(chain);
+            // with the lock on the chain alone brought nothing out (V1.2.38, V1.2.39): again after s8h11iit, then again
+            // after his settings are set back to how they are with the lock off
+            auto again = chain;
+            again.label = "s8h11iit, then the chain", again.prepare = 1;
+            aku_steps.push_back(again);
+            again.label = "his lock-off settings, then the chain", again.prepare = 2;
+            aku_steps.push_back(again);
             // if a9nnfx8i didn't bring the mask out, 6ldq5n9r on its own (V1.2.35: what brought it out)
             aku_steps.push_back({"6ldq5n9r on its own", 0, 0, 0, {"6ldq5n9r"}, !had_mask});
             aku_step = 0;
@@ -3481,7 +3540,7 @@ namespace ingame
         void dump_crash_scripts(Address actor, const std::string &why)
         {
             static unsigned dumps = 0, damage_dumps = 0;
-            if (dumps >= 14)
+            if (dumps >= 24)
                 return;
             ++dumps;
             std::cout << "Aku research: " << why << "\n" << std::flush;
