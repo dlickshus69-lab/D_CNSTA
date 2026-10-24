@@ -1,5 +1,7 @@
 ## What's new
 
-- **Glove and eyebrow colors** (new seeds). Two new YAML options in the Cosmetic section: `crash_gloves_color` and `crash_eyebrows_color`. They take the same colors as the others: a color name or `"#RRGGBB"`.
-- **Crash's colors stay for the whole seed.** They come only from the YAML. `/colors` shows them but can't change them; only a new seed does. `/skin default` puts Crash back in the seed's colors. Connecting to a seed puts on that seed's colors, so a seed where you changed colors with `/colors` goes back to its YAML colors.
-- **Boss test, round 2.** The log now also shows the bosses' shared scripts: the one that counts hits, and the one that bounces Crash off a boss. Things a boss throws or spawns (mine carts, TNT, rocks) are logged once instead of every time. `/boss name` works as before (use a test seed).
+- **Harder bosses, first try (test commands only; your seeds play as before).**
+  - **`/boss_health 100` to `200`**: the bosses' hits in percent, from the next boss fight (`200` is double). It doesn't change either N. Gin, Cortex in Crash 2, or Brio's first phase; Brio's last form does get it. `/boss_health off` goes back.
+  - **`/boss_speed 100` to `200`**: the bosses' pace in percent (`125` is a quarter faster). So far it affects Papu Papu (his spin and the waits before it), N. Gin in Crash 3 (the waits between his attacks) and Brio (the waits before his potions).
+  - **`/boss_rules on`**: Papu Papu glows red while he can't be hit (his slam and his spin). Landing on him while he's red costs Crash a life, and the hit doesn't count. When he stops spinning and is dizzy, the red goes away and he can be hit. `/boss_rules off` turns it off.
+  - The log notes what each one did, to tune them before they become YAML settings.

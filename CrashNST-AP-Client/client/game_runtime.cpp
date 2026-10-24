@@ -4793,10 +4793,365 @@ namespace ingame
             }
             std::cout << std::flush;
         }
+        // Harder bosses (V1.3.4, test: /boss_health, /boss_speed, /boss_rules). Every boss's hits are a setting of his
+        // common_BossHealthHandler (HitCount; the game makes it his health at 100 a hit, maxHealth), and the pace of a
+        // few bosses is in their own settings. Both are set as the fight starts. Papu Papu's rule: he glows red while he
+        // can't be hit (his slam and his spin); landing on him then costs Crash a life and the hit doesn't count.
+        struct BossTuning
+        {
+            std::string level;
+            std::uint64_t next = 0, entered = 0;
+            // what the game had in the settings changed here (they stay loaded while Crash retries, so a setting is
+            // always worked out from the game's own value, never from an already changed one)
+            std::map<Address, int> hits;
+            std::map<Address, float> timings;
+            std::set<Address> handlers, timed;
+            std::set<std::string> told;
+            // Papu Papu
+            Address papu = 0, papu_ai = 0;
+            unsigned state_at = 0, laps_at = 0;
+            int state = -1;
+            bool spun = false, red = false, was_red = false;
+            int red_health = -1; // his health when he turned red
+            std::uint64_t still_since = 0, state_since = 0, sample_at = 0, red_since = 0;
+            std::array<float, 3> sample{};
+            float speed = 0, top_speed = 0;
+            // the red glow: our tint on his model
+            Address tint_model = 0, tint_bundle = 0, tint_handle = 0;
+        } boss_tuning;
+        constexpr std::array<float, 4> boss_red{1.6f, 0.12f, 0.12f, 0.6f};
+        void tell_once(BossTuning &t, const std::string &key, const std::string &line)
+        {
+            if (t.told.insert(key).second)
+                std::cout << line << "\n" << std::flush;
+        }
+        // a type's field by name: its description, or 0
+        Address field_named(Address meta, const char *name)
+        {
+            const auto count = value<unsigned>(meta + 24);
+            const auto fields = value<Address>(meta + 40);
+            for (unsigned i = 0; fields && count <= 512 && i < count; ++i)
+            {
+                const auto field = value<Address>(fields + i * 8);
+                if (string(value<Address>(field + 48)) == name)
+                    return field;
+            }
+            return 0;
+        }
+        // an entity's running scripts: (component, name without "Scripts.Graph.")
+        std::vector<std::pair<Address, std::string>> entity_scripts(Address owner)
+        {
+            std::vector<std::pair<Address, std::string>> result;
+            for (const auto c : list(value<Address>(owner + 24), 64))
+                if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78) && value<Address>(c + 24) == owner)
+                {
+                    auto script = string(value<Address>(value<Address>(c + 56) + 16), 120);
+                    if (script.rfind("Scripts.Graph.", 0) == 0)
+                        script.erase(0, 14);
+                    result.emplace_back(c, script);
+                }
+            return result;
+        }
+        bool health_getter_ok()
+        {
+            return code_matches(0x4df230, std::array<unsigned char, 16>{0x48, 0x89, 0x5c, 0x24, 8, 0x57, 0x48, 0x83, 0xec, 0x20, 0x8b, 0xb9, 0xf8, 0, 0, 0});
+        }
+        int actor_health(Address actor) { return reinterpret_cast<int (*)(Address)>(base() + 0x4df230)(actor); }
+        // health: the boss himself (his health bar has his name), not the lions or blobs he sends; not N. Gin's mechs (both
+        // only get faster), not Cortex's chase in Crash 2 (more health there can't be beaten in time), and of Brio only
+        // his last form (his first phase stays)
+        void tune_boss_health(BossTuning &t, const std::string &boss, Address owner, const std::string &name, Address c, unsigned percent)
+        {
+            const auto data = value<Address>(c + 16);
+            if (!typed(data, 0x13bbb10))
+                return;
+            const auto dmeta = value<Address>(data + 32), meta = value<Address>(c + 56);
+            const unsigned hit_at = field_offset(dmeta, "HitCount", 4), name_at = field_offset(dmeta, "GuiBossName", 8), max_at = field_offset(meta, "maxHealth", 4);
+            if (!hit_at || !max_at)
+            {
+                tell_once(t, "layout" + name, "Boss health: " + name + "'s health script isn't laid out as expected (HitCount " + std::to_string(hit_at) +
+                                                  ", maxHealth " + std::to_string(max_at) + ")");
+                return;
+            }
+            auto it = t.hits.find(data + hit_at);
+            if (it == t.hits.end())
+                it = t.hits.emplace(data + hit_at, value<int>(data + hit_at)).first;
+            const int original = it->second;
+            if (original < 1 || original > 50)
+                return;
+            const bool eligible = value<Address>(data + name_at) && boss != "B204" && boss != "B304" && boss != "B205" &&
+                                  (boss != "B105" || name.find("Hulk") != std::string::npos);
+            const int hits = eligible ? std::max(original, static_cast<int>(std::lround(original * percent / 100.0))) : original;
+            if (value<int>(data + hit_at) != hits)
+                write(data + hit_at, hits);
+            if (t.handlers.count(c))
+                return;
+            const int max_health = value<int>(c + max_at);
+            if (max_health <= 0)
+                return; // not started yet: it takes the new HitCount when it does
+            t.handlers.insert(c);
+            if (!eligible)
+            {
+                tell_once(t, "same" + name, "Boss health: " + name + " keeps his " + std::to_string(original) + " hits");
+                return;
+            }
+            std::ostringstream line;
+            line << "Boss health: " << name << " " << original << " hits -> " << hits << " (" << percent << "%); maxHealth " << max_health;
+            if (max_health % 100 == 0 && max_health / 100 >= original && max_health / 100 <= original * 2 + 1 && max_health != hits * 100)
+                write(c + max_at, hits * 100), line << " -> " << value<int>(c + max_at);
+            // the boss's own health (the actor's, as for Crash: the getter reads it at +0xf8)
+            const bool actor = typed(owner, 0x1592220) && health_getter_ok();
+            const int health = actor ? actor_health(owner) : -1, raw = value<int>(owner + 0xf8);
+            line << "; " << (actor ? std::string("actor") : "not an actor (" + object_brief(owner) + ")") << " health " << health << ", +0xf8 " << raw;
+            if (actor && health == raw && health == max_health && health != hits * 100)
+            {
+                write(owner + 0xf8, hits * 100);
+                line << " -> " << actor_health(owner);
+            }
+            else if (actor && health != raw)
+            {
+                // where else it could be: ints in the actor that hold the same number
+                line << "; same number at";
+                for (unsigned off = 0x40; off < 0x400; off += 4)
+                    if (value<int>(owner + off) == health)
+                        line << " " << hex(off);
+            }
+            if (actor)
+            {
+                std::array<unsigned char, 64> code{};
+                read(base() + 0x4df230, code);
+                std::ostringstream bytes;
+                for (const auto b : code)
+                    bytes << std::hex << std::setw(2) << std::setfill('0') << unsigned(b);
+                tell_once(t, "getter", "Boss health: the health getter's code " + bytes.str());
+            }
+            std::cout << line.str() << "\n" << std::flush;
+        }
+        // speed: the settings known to set a boss's pace. A speed or speed multiplier goes up by the percent, a wait goes
+        // down by it
+        struct BossPace
+        {
+            const char *script, *field;
+            bool bigger_is_faster;
+        };
+        void tune_boss_speed(BossTuning &t, Address c, const std::string &name, const std::string &script, unsigned percent)
+        {
+            static const BossPace paces[]{
+                {"BossPapuPapu_AiHandler", "AttackSpinSpeedMultiplier", true},
+                {"BossPapuPapu_AiHandler", "IntroMoveSpeedMultiplier", true},
+                {"BossPapuPapu_AiHandler", "AttackSpinStartDelay", false},
+                {"BossPapuPapu_AiHandler", "ResumeBossFightDelay", false},
+                // N. Gin (Crash 3), his second mech: each step of his attack list and its wait
+                {"BossNGin_C3Mech02_AttackPatternAction", "Float_id_lyh5r6by", false},
+                // Brio: the wait before each potion of a stage, and his idle pauses
+                {"BossNBrio_BossStageAction", "DelayStart", false},
+                {"BossNBrio_IdleTimeOut", "TimeOutRangeMin", false},
+                {"BossNBrio_IdleTimeOut", "TimeOutRangeMax", false},
+            };
+            const auto data = value<Address>(c + 16);
+            if (!typed(data, 0x13bbb10) || t.timed.count(c))
+                return;
+            const auto dmeta = value<Address>(data + 32);
+            bool any = false;
+            for (const auto &p : paces)
+            {
+                if (script != p.script)
+                    continue;
+                const auto field = field_named(dmeta, p.field);
+                if (!field || value<Address>(field) != base() + 0x17afe98 || value<std::uint16_t>(field + 22) != 4)
+                {
+                    tell_once(t, std::string("pace") + p.field, std::string("Boss speed: ") + script + " has no decimal " + p.field);
+                    continue;
+                }
+                const auto at = data + value<std::uint16_t>(field + 24);
+                auto it = t.timings.find(at);
+                if (it == t.timings.end())
+                    it = t.timings.emplace(at, value<float>(at)).first;
+                const float original = it->second, factor = percent / 100.0f;
+                const float now = p.bigger_is_faster ? original * factor : original / factor;
+                if (!std::isfinite(original) || original < 0 || original > 1000)
+                    continue;
+                write(at, now);
+                any = true;
+                tell_once(t, std::string("pace") + script + p.field + std::to_string(original),
+                          "Boss speed: " + name + " " + script + " " + p.field + " " + std::to_string(original) + " -> " + std::to_string(now));
+            }
+            if (any)
+                t.timed.insert(c);
+        }
+        // the red glow on Papu Papu: our own tint on his model (like the box tint), red while it's on
+        void boss_tint_off(BossTuning &t, bool remove)
+        {
+            if (!t.tint_bundle)
+                return;
+            if (remove && tint_api())
+            {
+                const bool alive = t.tint_model && resolve(t.tint_handle) == t.tint_model && typed(t.tint_model, 0x1676cb8);
+                const auto bundles = alive ? list(value<Address>(t.tint_model + 224), 64) : std::vector<Address>{};
+                if (std::find(bundles.begin(), bundles.end(), t.tint_bundle) != bundles.end())
+                    reinterpret_cast<void (*)(Address, Address)>(base() + 0xaf7370)(t.tint_model, t.tint_bundle);
+                release(t.tint_bundle);
+                model_handle(t.tint_handle, 0);
+                t.tint_bundle = t.tint_model = 0;
+            }
+            else
+                write(t.tint_bundle + 48, default_blend);
+        }
+        void boss_tint(BossTuning &t, Address entity, bool red)
+        {
+            if (!tint_api())
+                return;
+            const auto model = crate_model(entity);
+            if (!model)
+            {
+                tell_once(t, "tintmodel", "Boss rule: no model found to tint on Papu Papu (" + object_brief(value<Address>(entity + 176)) + ")");
+                return;
+            }
+            if (t.tint_bundle && (t.tint_model != model || resolve(t.tint_handle) != model))
+                boss_tint_off(t, true);
+            if (!t.tint_bundle)
+            {
+                const auto bundle = reinterpret_cast<Address (*)(Address)>(base() + 0x882b0)(0);
+                if (!typed(bundle, 0x138da80))
+                    return;
+                retain(bundle);
+                Address handle = 0;
+                model_handle(handle, model);
+                if (resolve(handle) != model || !write(bundle + 32, default_tint))
+                {
+                    model_handle(handle, 0);
+                    release(bundle);
+                    return;
+                }
+                reinterpret_cast<void (*)(Address, Address)>(base() + 0xacd1c0)(model, bundle);
+                t.tint_model = model, t.tint_bundle = bundle, t.tint_handle = handle;
+                std::cout << "Boss rule: Papu Papu's glow is ready\n" << std::flush;
+            }
+            write(t.tint_bundle + 48, red ? boss_red : default_blend);
+        }
+        // Papu Papu's health is the actor's, kept at +0xf8 (what the getter returns)
+        bool papu_health_here(const BossTuning &t)
+        {
+            return typed(t.papu, 0x1592220) && health_getter_ok() && actor_health(t.papu) == value<int>(t.papu + 0xf8);
+        }
+        void papu_rule(BossTuning &t, const Shared &state, std::uint64_t now)
+        {
+            if (!t.papu || !t.papu_ai || !event_owner(t.papu))
+                return;
+            const int s = value<int>(t.papu_ai + t.state_at);
+            std::array<float, 3> at{};
+            read(t.papu + 32, at);
+            if (now - t.sample_at >= 100)
+            {
+                if (t.sample_at)
+                {
+                    const float seconds = (now - t.sample_at) / 1000.0f;
+                    t.speed = std::hypot(at[0] - t.sample[0], at[1] - t.sample[1]) / seconds;
+                    t.top_speed = std::max(t.top_speed, t.speed);
+                }
+                t.sample = at, t.sample_at = now;
+            }
+            if (s != t.state)
+            {
+                if (t.state >= 0)
+                    std::cout << "Boss rule: Papu Papu state " << t.state << " -> " << s << " after " << seconds(now - t.state_since) << " (top speed "
+                              << static_cast<int>(t.top_speed) << "/s, laps " << value<int>(t.papu_ai + t.laps_at) << ")\n" << std::flush;
+                // a hit (3) or the last one (4) while he was red: Crash loses a life, and the hit is taken back
+                if (state.boss_rules && t.was_red && (s == 3 || s == 4))
+                {
+                    std::cout << "Boss rule: Crash landed on Papu Papu while he was red (" << seconds(now - t.red_since) << " into it)";
+                    if (s == 3 && t.red_health > 0 && papu_health_here(t))
+                    {
+                        const int now_health = actor_health(t.papu);
+                        std::cout << "; his health " << t.red_health << " -> " << now_health;
+                        if (now_health < t.red_health)
+                            write(t.papu + 0xf8, t.red_health), std::cout << ", put back to " << actor_health(t.papu);
+                    }
+                    const auto crash = controlled_actor();
+                    bool died = false;
+                    try
+                    {
+                        died = crash && request_scripted_death(crash);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        std::cout << " (" << e.what() << ")";
+                    }
+                    std::cout << (died ? "; Crash loses a life" : "; couldn't take Crash's life") << "\n" << std::flush;
+                }
+                t.state = s, t.state_since = now, t.spun = false, t.still_since = 0, t.top_speed = 0;
+            }
+            // in his spin: once he has moved and then stood still for a quarter second, he's dizzy and can be hit
+            if (s == 2)
+            {
+                if (t.speed > 150)
+                    t.spun = true, t.still_since = 0;
+                else if (t.spun && t.speed < 40 && !t.still_since)
+                    t.still_since = now;
+            }
+            const bool dizzy = s == 2 && t.spun && t.still_since && now - t.still_since >= 250;
+            const bool red = state.boss_rules && (s == 1 || (s == 2 && !dizzy));
+            if (red != t.red)
+            {
+                if (red)
+                    t.red_since = now, t.red_health = papu_health_here(t) ? actor_health(t.papu) : -1;
+                else if (s == 2)
+                    std::cout << "Boss rule: Papu Papu is dizzy " << seconds(now - t.state_since) << " into his spin (speed " << static_cast<int>(t.speed)
+                              << "/s): he can be hit\n" << std::flush;
+                t.red = red;
+            }
+            t.was_red = red;
+            if (state.boss_rules || t.tint_bundle)
+                boss_tint(t, t.papu, red);
+        }
+        void update_boss_tuning(const Shared &state, const std::string &boss)
+        {
+            auto &t = boss_tuning;
+            const auto now = GetTickCount64();
+            if (boss != t.level)
+            {
+                boss_tint_off(t, true);
+                t = {};
+                t.level = boss, t.entered = now;
+            }
+            if (boss.empty())
+                return;
+            if (boss == "B101")
+                papu_rule(t, state, now);
+            if (now < t.next)
+                return;
+            // every half second: the boss as he starts, Brio's last form as it appears, a retry
+            t.next = now + 500;
+            const unsigned health = std::clamp(state.boss_health, 100u, 200u), speed = std::clamp(state.boss_speed, 100u, 200u);
+            if (health == 100 && speed == 100 && !state.boss_rules)
+                return;
+            for (const auto owner : event_owners())
+            {
+                const auto name = string(value<Address>(owner + 128));
+                for (const auto &[c, script] : entity_scripts(owner))
+                {
+                    if (script == "common_BossHealthHandler" && health != 100)
+                        tune_boss_health(t, boss, owner, name, c, health);
+                    else if (speed != 100)
+                        tune_boss_speed(t, c, name, script, speed);
+                    if (boss == "B101" && script == "BossPapuPapu_AiHandler" && t.papu_ai != c)
+                    {
+                        const auto meta = value<Address>(c + 56);
+                        t.state_at = field_offset(meta, "currState", 4), t.laps_at = field_offset(meta, "currSpinPlayerLapCount", 4);
+                        if (t.state_at)
+                            t.papu = owner, t.papu_ai = c, t.state = -1;
+                    }
+                }
+            }
+        }
         // requests from /nitro_spawn and the Nitro Trap; a request waits up to 5 seconds for a spot
         void update_nitro_trap(Shared &state, const std::string &level)
         {
-            update_boss_research(boss_zone_key());
+            {
+                const auto boss = boss_zone_key();
+                update_boss_research(boss);
+                update_boss_tuning(state, boss);
+            }
             // the game's sounds from the last level may be gone with it
             static std::string sound_level;
             if (level != sound_level)
@@ -8010,6 +8365,11 @@ namespace ingame
     {
         std::lock_guard lock(crate_mutex);
         restore_tints(game_thread);
+        // Papu Papu's red glow (Harder bosses test)
+        if (game_thread)
+            boss_tint_off(boss_tuning, true);
+        else if (boss_tuning.tint_bundle)
+            write(boss_tuning.tint_bundle + 48, default_blend);
         active_style = 0;
         move_lock_until = 0;
         // these guards remain active because an existing actor could retain its crouch component

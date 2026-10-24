@@ -681,6 +681,14 @@ void BoxMarkers::aku_lock(bool on)
     shared_->aku_lock = on ? 1u : 0u;
     unlock();
 }
+void BoxMarkers::boss_settings(unsigned health, unsigned speed, bool rules)
+{
+    lock();
+    shared_->boss_health = std::clamp(health, 100u, 200u);
+    shared_->boss_speed = std::clamp(speed, 100u, 200u);
+    shared_->boss_rules = rules ? 1u : 0u;
+    unlock();
+}
 void BoxMarkers::slow_tilt(float tilt)
 {
     if (!ingame::valid_slow_tilt(tilt))

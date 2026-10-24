@@ -75,6 +75,8 @@ public:
     void tint_opacity(float opacity);
     void slow_tilt(float tilt);
     void aku_lock(bool on);
+    // Harder bosses: health and speed in percent (100 the game's own), and the rules on bosses that can be hit any time
+    void boss_settings(unsigned health, unsigned speed, bool rules);
     void request_aku_give();
     // Crash's colors (research): log his model's parts; blend a color over him (amount 0 turns it off)
     void request_crash_probe();

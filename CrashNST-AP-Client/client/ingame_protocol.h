@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 23, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 24, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -164,6 +164,10 @@ namespace ingame
         // set by the game thread: Crash has been able to move for 1.5 seconds without a break. Traps start only then
         // (V1.3: right after a level loads the game can already report him movable while he is still arriving)
         unsigned player_settled = 0;
+        // set by the client (Harder bosses, V1.3.4 test commands; later the YAML): the bosses' health and speed in
+        // percent (100 is the game's own), and the rules on bosses that can be hit any time (Papu Papu glows red while
+        // he can't be; landing on him then costs a life)
+        unsigned boss_health = 100, boss_speed = 100, boss_rules = 0;
         // set by the game thread every frame it runs (GetTickCount64)
         std::uint64_t heartbeat_game = 0;
         // set by the client: trap time is accounted for up to here while the game thread wasn't running

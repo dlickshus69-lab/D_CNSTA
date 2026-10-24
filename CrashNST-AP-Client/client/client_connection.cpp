@@ -202,7 +202,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /boss name (test) | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /boss name, /boss_health, /boss_speed, /boss_rules (tests) | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -496,6 +496,44 @@ void ClientRuntime::handle_commands()
                     boss_wanted = key;
                     print_console("Boss test: the next level you enter loads " + key + ". Beating it counts in this seed (use a test seed).");
                 }
+            }
+            else if (command == "/boss_health" || command == "/boss_speed")
+            {
+                // test (Harder bosses): the bosses' health or speed in percent, 100 to 200, from the next fight; "off" leaves it
+                // to the seed
+                const bool health = command == "/boss_health";
+                auto &test = health ? boss_health_test : boss_speed_test;
+                const auto what = std::string(health ? "Boss health" : "Boss speed");
+                int value = -2;
+                try
+                {
+                    if (argument == "off")
+                        value = -1;
+                    else if (!argument.empty())
+                        value = std::stoi(argument);
+                }
+                catch (const std::exception &)
+                {
+                }
+                if (value == -1)
+                    test = -1, print_console(what + " test off: the seed's setting again.");
+                else if (value >= 100 && value <= 200)
+                    test = value, print_console(what + " test: " + std::to_string(value) + "% from the next boss fight" +
+                                                (health ? " (not N. Gin, Cortex in Crash 2, or Brio's first phase)." : " (so far Papu Papu, N. Gin in Crash 3 and Brio)."));
+                else
+                    print_console(what + ": " + (test >= 0 ? std::to_string(test) + "% (test)" : std::string("the seed's")) + ". " + command +
+                                  " 100 to 200 sets it for testing (" + (health ? "200 is double" : "125 is a quarter faster") + "), " + command + " off goes back.");
+            }
+            else if (command == "/boss_rules")
+            {
+                // test (Harder bosses): Papu Papu glows red while he can't be hit; landing on him then costs a life
+                if (argument == "on" || argument == "off")
+                    boss_rules_test = argument == "on" ? 1 : 0;
+                else if (argument == "seed")
+                    boss_rules_test = -1;
+                print_console(std::string("Boss rules: ") + (boss_rules_test == 1 ? "on (test)" : boss_rules_test == 0 ? "off (test)" : "the seed's") +
+                              ". With them on, Papu Papu glows red while he can't be hit (his slam and his spin); landing on him then costs "
+                              "Crash a life and the hit doesn't count. /boss_rules on, off, or seed.");
             }
             else if (command == "/clear")
                 feed_history.clear();

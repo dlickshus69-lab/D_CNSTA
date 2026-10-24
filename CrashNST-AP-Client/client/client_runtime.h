@@ -143,6 +143,8 @@ class ClientRuntime
     std::unique_ptr<LevelRouting> level_routing;
     // /boss (test, Harder bosses): the boss fight the next entrance loads ("B204"), empty when none
     std::string boss_wanted;
+    // Harder bosses test commands (/boss_health, /boss_speed, /boss_rules); -1 leaves it to the seed
+    int boss_health_test = -1, boss_speed_test = -1, boss_rules_test = -1;
     unsigned routing_start_count = 0, routing_secret_return_count = 0;
     std::string routing_error;
     std::string crate_error;
