@@ -1160,13 +1160,26 @@ namespace ingame
         std::atomic_uint boss_blocked{0};
         std::mutex boss_block_mutex;
         std::vector<std::string> boss_blocked_names;
-        // V1.3.16: the death for a landing on red Papu Papu. DeathLink's death message, with the death Crash's damage script
-        // then plays (its 0xblwcwf's parameter, ug0b8lyr) changed to the one Papu Papu's attack gives (the angel), for 2
-        // seconds. V1.3.15's log: his spin's death and DeathLink's both end with Crash's script sending 0xblwcwf, each with
-        // its own death; DeathLink's own message's parameter (V1.3.15 set it) isn't the death played
-        std::atomic<Address> red_death_behavior{0}, red_death_type{0}, red_death_was{0};
-        std::atomic<std::uint64_t> red_death_until{0};
-        std::atomic_uint red_death_changed{0}, red_death_seen{0};
+        // research (V1.3.17) for the angel death: the death Crash's damage script plays (its 0xblwcwf's parameter,
+        // ug0b8lyr) each time he dies in a boss fight, and the parameter of the hit Papu Papu's attack gives him
+        // (ha5y20l3's x9pcuxft). V1.3.16 changed the first to Papu Papu's attack's death (from his settings) for a landing
+        // while red, and the game crashed right then: only read now
+        std::atomic<Address> death_value{0}, hit_value{0};
+        std::atomic_uint death_values{0}, hit_values{0};
+        // a message's field by part of its name: its offset if it's 8 bytes, or 0
+        unsigned event_field(Address meta, const char *part)
+        {
+            const auto count = value<unsigned>(meta + 24);
+            const auto fields = value<Address>(meta + 40);
+            for (unsigned i = 0; fields && count <= 64 && i < count; ++i)
+            {
+                const auto field = value<Address>(fields + i * 8);
+                const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                if (bytes == 8 && offset >= 32 && string(value<Address>(field + 48), 64).find(part) != std::string::npos)
+                    return offset;
+            }
+            return 0;
+        }
         std::atomic<std::uint64_t> boss_event_since{0};
         std::atomic_uint boss_event_lines{0};
         std::map<std::string, unsigned> boss_event_counts;
@@ -1444,29 +1457,16 @@ namespace ingame
                         return 0;
                     }
                 }
-                if (const auto until = red_death_until.load(); until && target && target == crash && GetTickCount64() < until)
+                if (target && boss_event_since.load())
                 {
                     const auto meta = value<Address>(event + 16);
-                    if (string(value<Address>(meta + 16), 120).find("0xblwcwf") != std::string::npos)
-                    {
-                        ++red_death_seen;
-                        const auto count = value<unsigned>(meta + 24);
-                        const auto fields = value<Address>(meta + 40);
-                        for (unsigned i = 0; fields && count <= 64 && i < count; ++i)
-                        {
-                            const auto field = value<Address>(fields + i * 8);
-                            const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
-                            if (string(value<Address>(field + 48), 64).find("ug0b8lyr") == std::string::npos || bytes != 8 || offset < 32 ||
-                                value<Address>(field) != red_death_type.load())
-                                continue;
-                            red_death_was = value<Address>(event + offset);
-                            const Address behavior = red_death_behavior.load();
-                            SIZE_T done = 0;
-                            if (WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(event + offset), &behavior, sizeof(behavior), &done))
-                                ++red_death_changed;
-                        }
-                        red_death_until = 0;
-                    }
+                    const auto name = string(value<Address>(meta + 16), 120);
+                    if (target == crash && name.find("0xblwcwf") != std::string::npos)
+                        if (const auto at = event_field(meta, "ug0b8lyr"))
+                            death_value = value<Address>(event + at), ++death_values;
+                    if (name.find("ha5y20l3") != std::string::npos)
+                        if (const auto at = event_field(meta, "x9pcuxft"))
+                            hit_value = value<Address>(event + at), ++hit_values;
                 }
                 if (aku_messages_blocked.load() && !own_aku_message.load() && component && target && aku_manager(component, target))
                 {
@@ -4985,7 +4985,14 @@ namespace ingame
             Address tint_model = 0, tint_bundle = 0, tint_handle = 0;
             // research: the health bar's numbers
             std::set<Address> bar_handlers;
-            std::vector<std::pair<Address, std::uint32_t>> bar_fields;
+            struct BarField
+            {
+                Address at;
+                std::uint32_t last;
+                std::string label;
+                unsigned changes = 0;
+            };
+            std::vector<BarField> bar_fields;
             std::uint64_t bar_next = 0;
             unsigned bar_lines = 0;
         } boss_tuning;
@@ -5047,25 +5054,43 @@ namespace ingame
             std::cout << "Boss bar: " << name << "'s health bar is " << object_brief(bar, 0x100, 6) << "\n";
             dump_pointees(bar, "Boss bar: " + name, 0x100);
             std::cout << std::flush;
-            for (unsigned off = 8; off < 0x100; off += 4)
-                t.bar_fields.push_back({bar + off, value<std::uint32_t>(bar + off)});
+            // V1.3.17: wider (V1.3.16's log: the fill isn't in the bar's first 0x100 bytes, nor a 5/10/500/1000 in it, his
+            // actor or his health part): the bar's first 0x800 bytes and the first 0x200 of each object it points to in its
+            // first 0x100, and his health script; a number that keeps changing (a timer) stops being shown after 3 changes
+            const auto watch = [&](Address object, unsigned span, const std::string &label) {
+                for (unsigned off = 8; off < span; off += 4)
+                    t.bar_fields.push_back({object + off, value<std::uint32_t>(object + off), label + " +" + hex(off)});
+            };
+            watch(bar, 0x800, "bar");
+            for (unsigned off = 8; off < 0x100; off += 8)
+            {
+                const auto q = value<Address>(bar + off);
+                const auto object = resolve(q) ? resolve(q) : q;
+                if (object && object != bar && (object < base() || object >= module_end()) && readable(object, 0x200))
+                    watch(object, 0x200, "bar's +" + hex(off));
+            }
+            watch(c, 0x168, "health script");
         }
         void update_boss_bar(BossTuning &t, std::uint64_t now)
         {
-            if (t.bar_fields.empty() || now < t.bar_next || t.bar_lines >= 200)
+            if (t.bar_fields.empty() || now < t.bar_next || t.bar_lines >= 400)
                 return;
-            t.bar_next = now + 150;
-            for (auto &[at, last] : t.bar_fields)
+            t.bar_next = now + 100;
+            for (auto &f : t.bar_fields)
             {
-                const auto v = value<std::uint32_t>(at);
-                if (v == last)
+                const auto v = value<std::uint32_t>(f.at);
+                if (v == f.last)
                     continue;
-                float a = 0, b = 0;
-                std::memcpy(&a, &last, 4), std::memcpy(&b, &v, 4);
-                if (t.bar_lines++ < 200)
-                    std::cout << "Boss bar +" << seconds(now - t.entered) << ": +0x" << std::hex << (at & 0xfff) << std::dec << " " << static_cast<int>(last) << " -> "
-                              << static_cast<int>(v) << " (decimal " << a << " -> " << b << ")\n";
-                last = v;
+                if (++f.changes <= 3 && t.bar_lines++ < 400)
+                {
+                    float a = 0, b = 0;
+                    std::memcpy(&a, &f.last, 4), std::memcpy(&b, &v, 4);
+                    std::cout << "Boss bar +" << seconds(now - t.entered) << ": " << f.label << " " << static_cast<int>(f.last) << " -> " << static_cast<int>(v);
+                    if (std::isfinite(b) && std::abs(b) > 1e-6f && std::abs(b) < 1e7f)
+                        std::cout << " (decimal " << a << " -> " << b << ")";
+                    std::cout << (f.changes == 3 ? " (keeps changing: not shown again)" : "") << "\n";
+                }
+                f.last = v;
             }
             std::cout << std::flush;
         }
@@ -5451,24 +5476,13 @@ namespace ingame
                     return;
                 }
             }
-            // V1.3.15 (asked for): the death his spin gives, the angel flying up, not DeathLink's falling death (V1.3.14).
-            // V1.3.16: DeathLink's death with the death Crash's script plays changed (in the message hook, see red_death_*)
+            // (V1.3.15 and V1.3.16 tried for the death his spin gives, the angel, asked for: see death_value. DeathLink's
+            // falling death until it's found)
             bool died = false;
-            std::string how;
+            std::string how = "the falling death";
             try
             {
                 const auto body = controlled_actor();
-                const auto [behavior, type] = boss_death_behavior(t.papu);
-                if (behavior)
-                {
-                    red_death_behavior = behavior, red_death_type = type;
-                    red_death_until = GetTickCount64() + 2000;
-                    t.death_check_at = GetTickCount64() + 2500;
-                    t.death_seen = red_death_seen.load(), t.death_changed = red_death_changed.load();
-                    how = "his spin's death (" + pointer_brief(behavior) + ")";
-                }
-                else
-                    how = "the falling death (his attack's death wasn't found)";
                 died = body && request_scripted_death(body);
             }
             catch (const std::exception &e)
@@ -5747,17 +5761,20 @@ namespace ingame
             if (s != 3)
                 t.forbidden = false;
             const bool red = state.boss_rules && ((t.punished && (s == 1 || s == 2)) || (t.forbidden && s == 3));
-            // the death for a landing while red: was it his spin's?
-            if (t.death_check_at && now >= t.death_check_at)
+            // research: the death Crash's script played, and the hit Papu Papu's attack gave him
+            if (const auto n = death_values.load(); n != t.death_seen)
             {
-                t.death_check_at = 0;
-                const bool seen = red_death_seen.load() != t.death_seen, changed = red_death_changed.load() != t.death_changed;
-                std::cout << "Boss rule: Crash's death: "
-                          << (changed ? "his damage script's death " + pointer_brief(red_death_was.load()) + " became " + pointer_brief(red_death_behavior.load())
-                                      : seen ? std::string("his damage script's death message came, but its death isn't the kind expected; left as it was")
-                                             : std::string("his damage script's death message (0xblwcwf) didn't come within 2 seconds"))
-                          << "\n" << std::flush;
-                red_death_until = 0;
+                t.death_seen = n;
+                const auto v = death_value.load();
+                const auto [behavior, type] = boss_death_behavior(t.papu);
+                std::cout << "Boss research: Crash's death message carried " << pointer_brief(v) << " (0x" << std::hex << v << std::dec << "); Papu Papu's attack's death is "
+                          << pointer_brief(behavior) << " (0x" << std::hex << behavior << std::dec << ")" << (v && v == behavior ? ", the same" : "") << "\n" << std::flush;
+            }
+            if (const auto n = hit_values.load(); n != t.death_changed)
+            {
+                t.death_changed = n;
+                const auto v = hit_value.load();
+                std::cout << "Boss research: the hit message to Crash carried " << pointer_brief(v) << " (0x" << std::hex << v << std::dec << ")\n" << std::flush;
             }
             // the mask taken for a landing while red, a second later
             if (t.hit_check_at && now >= t.hit_check_at)
