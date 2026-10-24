@@ -4,11 +4,9 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **9 hits at most.** The health bar can only draw 9 notches, so a boss now has 9 hits at most, whatever the health setting. Papu Papu has 9 at 180% and at 200%. Every hit takes exactly one notch, with no notch to make up. A bigger bar for more hits can come later.
-- **No Aku Aku masks in harder boss fights.** With any of the harder boss settings on (more health, more speed, or the red rule), Crash loses his mask when the fight starts and gets none during it. Mask items wait for the next level. Every red landing is now the angel death.
-- **Red from the very start of the fight.** In V1.3.32, red started once Papu Papu was back in his spot, and you could still hit him while he was jumping into the arena (at the start, and again after a death). Red now starts as he comes into the arena.
-- **The game's "can't be hit" timer after a death.** If the timer is still running when the fight starts over, it's kept going for the opening red, so a landing then is the game's own bounce. V1.3.32's log showed a timer that had already ended won't start counting again. This build keeps it set anyway, to see whether that still keeps him from being hit.
-- **Landing on him in the opening red the first time in a visit** is still a real hit that gets taken back, with a flinch. The game only creates its timer at his first hit.
+- **Red at the start, the first time in a visit.** In V1.3.33 the first fight after arriving had no "can't be hit" timer yet (the game only makes it at his first hit), so landing on red Papu Papu then was a real hit: he flinched and the bar lost a notch, even though Crash still died. Now, for that red, his health script's list of the attacks that hurt him is emptied and his "can't be hit" switch is held on, so the landing should be the game's own bounce: no hit, no flinch, no notch, and Crash still dies. The list goes back as soon as his red ends. If the game doesn't use that list the way it looks, the log says so and the landing is still V1.3.33's hit taken back.
+- **Speed, a first step** (`/boss_speed 150` or `/boss_speed 200`): every wait in Papu Papu's fight (his AI's own timers: before his slam, before his spin, after a hit) is cut by the speed as it starts, on top of his faster spin. His settings for those waits stay the game's, so no wait is cut twice, and the speed no longer stacks up from one visit to the next. The log lists each wait with its length, to tell which one is which.
+- From V1.3.33: 9 hits at most, no Aku Aku masks in harder boss fights, red from the very start as he comes into the arena.
 - From V1.3.32: red ends after the slam that follows his spin.
 - From V1.3.31: red follows the game's own "can be hit" switch, so red always means he can't be hit.
 - From V1.3.30: a landing on red Papu bounces Crash off, and Papu isn't hurt and doesn't flinch.
