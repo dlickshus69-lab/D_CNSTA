@@ -566,8 +566,8 @@ void ClientRuntime::handle_commands()
                 if (argument == "grow" || argument == "keep")
                     boss_bar_grow = argument == "grow";
                 print_console(std::string("Boss bar: ") + (boss_bar_grow ? "grow" : "keep") +
-                              " (test). keep: the game's notches, full at the start, each hit takes part of one (works). grow: more notches "
-                              "(the fill still stops at the game's length: being worked on). From the next fight. /boss_bar keep or grow.");
+                              " (test). grow (the default): more notches (the fill still stops at the game's length: being worked on). keep: "
+                              "the game's notches, full at the start, each hit takes part of one (works). From the next fight. /boss_bar grow or keep.");
             }
             else if (command == "/clear")
                 feed_history.clear();

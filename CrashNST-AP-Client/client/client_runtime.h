@@ -145,7 +145,7 @@ class ClientRuntime
     std::string boss_wanted;
     // Harder bosses test commands (/boss_health, /boss_speed, /boss_rules); -1 leaves it to the seed
     int boss_health_test = -1, boss_speed_test = -1, boss_rules_test = -1;
-    bool boss_bar_grow = false; // /boss_bar (test)
+    bool boss_bar_grow = true; // /boss_bar (test; V1.3.22: grow by default, asked for)
     unsigned routing_start_count = 0, routing_secret_return_count = 0;
     std::string routing_error;
     std::string crate_error;
