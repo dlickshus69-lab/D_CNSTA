@@ -22,6 +22,7 @@
 #include <thread>
 #include <chrono>
 #include <unordered_map>
+#include <unordered_set>
 #include <string_view>
 #include <cctype>
 #include <map>
@@ -180,8 +181,11 @@ namespace ingame
                 return {};
             const auto keys = value<Address>(table + 40), lists = value<Address>(table + 24);
             Address events = 0;
+            // (V1.3.27: the keys read at once, not one by one)
+            std::vector<Address> all(static_cast<std::size_t>(bytes / 8));
+            const bool at_once = !all.empty() && read(keys, all);
             for (unsigned i = 0; i < bytes / 8; ++i)
-                if (value<Address>(keys + i * 8) == meta)
+                if ((at_once ? all[i] : value<Address>(keys + i * 8)) == meta)
                 {
                     events = value<Address>(lists + i * 8);
                     break;
@@ -581,6 +585,23 @@ namespace ingame
                     out << ", +" << off << " \"" << text << "\"";
             out << "): " << before << " -> " << after << "\n";
             std::cout << out.str() << std::flush;
+        }
+        // (V1.3.27) a yes/no game variable Crash's damage script uses, by its name (DamagedInvulnerable: he's blinking
+        // after a hit): 1 or 0, or -1 when it isn't known
+        int crash_game_flag(const char *name)
+        {
+            const auto count = std::min<unsigned>(death_watch_count.load(), 32);
+            for (unsigned i = 0; i < count; ++i)
+                if (std::strcmp(death_watch[i].name, name) == 0)
+                {
+                    const auto variable = death_watch[i].variable.load();
+                    const auto type = variable ? value<Address>(variable) : 0;
+                    if (!type || type < base() || type >= base() + 0x2000000 ||
+                        !code_matches(0x4e5c60, std::array<unsigned char, 5>{0xe9, 0xab, 0xe9, 0xff, 0xff}))
+                        return -1;
+                    return reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60)(variable) != 0 ? 1 : 0;
+                }
+            return -1;
         }
         void player_died_set(Address variable, unsigned char requested)
         {
@@ -1215,6 +1236,9 @@ namespace ingame
         std::atomic_bool own_hit_send{false};
         // deaths of the angel's kind (the death object 0xblwcwf carries starts with angel_death_code)
         std::atomic_uint angel_deaths{0};
+        // (V1.3.27) how many times Crash's damage script took the step from a hit to his death (it sends itself sdoxdefr,
+        // then a0rx8wy2 and 0xblwcwf), ours included
+        std::atomic_uint die_steps{0};
         std::mutex red_constant_mutex;
         std::vector<std::pair<Address, Address>> red_constants; // (where, the text it held)
         std::atomic_uint red_constants_out{0};
@@ -1550,6 +1574,8 @@ namespace ingame
                 {
                     const auto meta = value<Address>(event + 16);
                     const auto name = string(value<Address>(meta + 16), 120);
+                    if (target == crash && name.find("sdoxdefr") != std::string::npos)
+                        ++die_steps;
                     if (target == crash && name.find("0xblwcwf") != std::string::npos)
                     {
                         if (const auto at = event_field(meta, "ug0b8lyr"))
@@ -2487,6 +2513,30 @@ namespace ingame
             const auto end = reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize;
             return at + size <= end || readable(end, at + size - end);
         }
+        // readable() for a search through many objects: Windows is asked about each block of memory once, not about every
+        // pointer (V1.3.26's log: the bar searches asked tens of thousands of times, and the game stopped for 2 to 5 seconds)
+        struct ReadableRegions
+        {
+            std::map<Address, std::pair<Address, bool>> regions; // start -> (end, readable)
+            bool at(Address a)
+            {
+                if (a < 0x10000)
+                    return false;
+                if (auto it = regions.upper_bound(a); it != regions.begin())
+                    if (--it; a < it->second.first)
+                        return it->second.second;
+                MEMORY_BASIC_INFORMATION info{};
+                if (!VirtualQuery(reinterpret_cast<void *>(a), &info, sizeof(info)))
+                    return false;
+                const auto start = reinterpret_cast<Address>(info.BaseAddress), end = start + info.RegionSize;
+                const bool ok = info.State == MEM_COMMIT && !(info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) &&
+                                (info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE));
+                if (end > a)
+                    regions[start] = {end, ok};
+                return ok;
+            }
+            bool operator()(Address a, std::size_t size) { return at(a) && at(a + size - 1); }
+        };
         // copies of a position: x and y exact, height within a hop. a crate stacked on this one is a full crate
         // height (about 78) above, so it never matches
         bool crate_copy(const float *v, const std::array<float, 3> &t)
@@ -4548,9 +4598,10 @@ namespace ingame
                     pages.insert(p);
             }
             std::vector<Address> found, words(512);
+            ReadableRegions ok;
             for (const auto page : pages)
             {
-                if (!readable(page, 0x1000) || !read(page, words))
+                if (!ok(page, 0x1000) || !read(page, words))
                     continue;
                 for (unsigned i = 0; i < words.size(); ++i)
                 {
@@ -5104,9 +5155,12 @@ namespace ingame
             bool forbidden = false;
             // the death for it: whether Crash's script's death was changed (checked 2.5 seconds later)
             std::uint64_t death_check_at = 0;
-            // V1.3.24: his spin's hit sent again for it: whether Crash died, and the angel's death (checked 0.6 seconds later)
+            // V1.3.24: his spin's hit sent again for it: whether Crash died, and the angel's death (checked 0.8 seconds later)
             std::uint64_t replay_check_at = 0;
             unsigned replay_deaths = 0, replay_angels = 0;
+            // V1.3.27: and when Crash's damage script stopped short of his death, its next step (0.15 seconds later)
+            std::uint64_t die_step_at = 0;
+            unsigned die_steps_seen = 0;
             unsigned death_seen = 0, death_changed = 0, death_count = 0, death_angels = 0, death_skips = 0, crash_dumps = 0;
             bool crash_dumped_start = false;
             // research (V1.3.15): his health part (+0x14da2c0) as each state starts, to find what keeps him from being hit
@@ -5131,32 +5185,10 @@ namespace ingame
             float speed = 0, top_speed = 0;
             // the red glow: our tint on his model
             Address tint_model = 0, tint_bundle = 0, tint_handle = 0;
-            // research: the health bar's numbers
+            // the health bar: its health scripts seen, the bar, its setting (the bar the game copies it from), when it was found
             std::set<Address> bar_handlers;
-            struct BarField
-            {
-                Address at;
-                std::uint32_t last;
-                std::string label;
-                unsigned changes = 0;
-            };
-            std::vector<BarField> bar_fields;
-            // V1.3.18: snapshots of the bar's small numbers (fractions and counts) at the fight's start and after hits
-            Address bar_object = 0;
-            unsigned bar_scans = 0;
-            // V1.3.22 research: the objects the bar and its setting (the bar the game copies it from) lead to, their names, and
-            // which of their numbers change with a hit and not otherwise (read every second until the hit)
-            Address bar_template = 0;
+            Address bar_object = 0, bar_template = 0;
             std::uint64_t bar_found_at = 0;
-            std::vector<Address> bar_tree;
-            std::vector<std::uint32_t> bar_tree_last;
-            std::vector<char> bar_tree_noise;
-            unsigned bar_tree_stage = 0; // 0 not yet, 1 watching (until a hit), 2 hit: compare at bar_tree_at, 3 done
-            std::uint64_t bar_tree_at = 0;
-            std::uint64_t bar_snap_at = 0;
-            std::string bar_snap_when;
-            std::map<Address, std::uint32_t> bar_snapshot;
-            unsigned bar_snapshots = 0;
             // V1.3.25: the fill for more notches than the game's (see game_bar_width): the boss's notches as the game has them
             // and ours, the bar's parts (its own, not its setting's), BarParent's widest (the fill at full health), and the
             // setting's HealthBar (found once a visit, and whether its scale is ours)
@@ -5174,8 +5206,6 @@ namespace ingame
             unsigned try_target = 0;
             Address try_part = 0, try_at = 0;
             float try_game = 0, try_written = 0;
-            std::uint64_t bar_next = 0;
-            unsigned bar_lines = 0;
         } boss_tuning;
         constexpr std::array<float, 4> boss_red{1.6f, 0.12f, 0.12f, 0.6f};
         void tell_once(BossTuning &t, const std::string &key, const std::string &line)
@@ -5237,241 +5267,10 @@ namespace ingame
             if (const auto data = value<Address>(c + 16); typed(data, 0x13bbb10))
                 if (const auto off = field_offset(value<Address>(data + 32), "GuiBossHealthBar", 8))
                     t.bar_template = resolve(value<Address>(data + off)) ? resolve(value<Address>(data + off)) : value<Address>(data + off);
-            std::cout << "Boss bar: " << name << "'s health bar is " << object_brief(bar, 0x100, 6) << " (its setting: " << object_brief(t.bar_template, 0x100, 6) << ")\n";
-            dump_pointees(bar, "Boss bar: " + name, 0x100);
-            std::cout << std::flush;
-            // V1.3.17: wider (V1.3.16's log: the fill isn't in the bar's first 0x100 bytes, nor a 5/10/500/1000 in it, his
-            // actor or his health part): the bar's first 0x800 bytes and the first 0x200 of each object it points to in its
-            // first 0x100, and his health script; a number that keeps changing (a timer) stops being shown after 3 changes
-            const auto watch = [&](Address object, unsigned span, const std::string &label) {
-                for (unsigned off = 8; off < span; off += 4)
-                    t.bar_fields.push_back({object + off, value<std::uint32_t>(object + off), label + " +" + hex(off)});
-            };
-            watch(bar, 0x800, "bar");
-            for (unsigned off = 8; off < 0x100; off += 8)
-            {
-                const auto q = value<Address>(bar + off);
-                const auto object = resolve(q) ? resolve(q) : q;
-                if (object && object != bar && (object < base() || object >= module_end()) && readable(object, 0x200))
-                    watch(object, 0x200, "bar's +" + hex(off));
-            }
-            watch(c, 0x168, "health script");
-        }
-        // V1.3.18 research: the bar's fractions (0 to 1) and small counts (1 to 20) in the bar and what it points to, at the
-        // fight's start (all of them) and after each hit (the ones that changed). V1.3.17's change log hid numbers that
-        // changed often (they stopped showing after 3 changes), and the fill may be one of them
-        void snapshot_bar(BossTuning &t, const std::string &when)
-        {
-            if (!t.bar_object || t.bar_snapshots >= 8)
-                return;
-            std::vector<std::pair<Address, std::string>> places{{t.bar_object, "bar"}};
-            for (unsigned off = 8; off < 0x100; off += 8)
-            {
-                const auto q = value<Address>(t.bar_object + off);
-                const auto object = resolve(q) ? resolve(q) : q;
-                if (object && object != t.bar_object && (object < base() || object >= module_end()) && readable(object, 0x200))
-                    places.emplace_back(object, "bar's +" + hex(off));
-            }
-            std::ostringstream out;
-            unsigned shown = 0;
-            const bool first = t.bar_snapshot.empty();
-            // (V1.3.18 printed small whole numbers as decimals: 0.000000)
-            const auto fraction = [](std::uint32_t w) {
-                float f = 0;
-                std::memcpy(&f, &w, 4);
-                return std::isfinite(f) && f >= 1e-6f && f <= 1.0f;
-            };
-            const auto small = [&](std::uint32_t w) { return fraction(w) || (w >= 1 && w <= 20); };
-            const auto shown_as = [&](std::uint32_t w) {
-                float f = 0;
-                std::memcpy(&f, &w, 4);
-                return fraction(w) ? std::to_string(f) : std::to_string(static_cast<int>(w));
-            };
-            for (const auto &[place, label] : places)
-            {
-                std::vector<std::uint32_t> words((place == t.bar_object ? 0x800 : 0x200) / 4);
-                if (!read(place, words))
-                    continue;
-                for (std::size_t i = 2; i < words.size(); ++i)
-                {
-                    const auto at = place + i * 4;
-                    const auto old = t.bar_snapshot.find(at);
-                    const bool changed = old != t.bar_snapshot.end() && old->second != words[i];
-                    if ((first && small(words[i])) || (!first && changed && (small(words[i]) || small(old->second))))
-                        if (shown++ < 150)
-                            out << " " << label << " +" << hex(static_cast<unsigned>(i * 4)) << "=" << (first ? "" : shown_as(old->second) + "->") << shown_as(words[i]);
-                    t.bar_snapshot[at] = words[i];
-                }
-            }
-            ++t.bar_snapshots;
-            std::cout << "Boss bar snapshot (" << when << "):" << (shown ? out.str() : std::string(" nothing")) << (shown > 150 ? " ..." : "") << "\n" << std::flush;
-        }
-        // V1.3.20 research: every on-screen box among the objects the bar leads to (three levels deep): six numbers (two
-        // corners) followed by the screen size. V1.3.19's clip: the frame and notches grew to 10, but the blue fill and the
-        // dark track behind it end halfway (the world shows through the rest), so the fill's box is the one to find
-        void scan_bar_boxes(BossTuning &t, const std::string &when)
-        {
-            if (!t.bar_object || t.bar_scans >= 3)
-                return;
-            ++t.bar_scans;
-            std::vector<std::pair<Address, unsigned>> queue{{t.bar_object, 0}};
-            std::set<Address> seen{t.bar_object};
-            std::ostringstream out;
-            unsigned shown = 0;
-            for (std::size_t q = 0; q < queue.size() && q < 3000; ++q)
-            {
-                const auto [object, depth] = queue[q];
-                std::vector<std::uint32_t> words(0x200 / 4);
-                if (!read(object, words))
-                    continue;
-                std::vector<float> f(words.size());
-                std::memcpy(f.data(), words.data(), words.size() * 4);
-                for (std::size_t i = 6; i + 1 < f.size(); ++i)
-                {
-                    const float w = f[i], h = f[i + 1];
-                    if (!(w >= 640 && w <= 10000 && h >= 360 && h <= 10000 && w == std::floor(w) && h == std::floor(h)))
-                        continue;
-                    bool box = true;
-                    for (std::size_t k = i - 6; k < i; ++k)
-                        box = box && std::isfinite(f[k]) && std::abs(f[k]) < 20000;
-                    if (!box || (f[i - 6] == 0 && f[i - 3] == 0))
-                        continue;
-                    if (shown++ < 60)
-                    {
-                        const auto vt = value<Address>(object);
-                        out << "\nBoss bar box (" << when << "): depth " << depth << " 0x" << std::hex << object << std::dec << " +" << hex(static_cast<unsigned>((i - 6) * 4))
-                            << (vt >= base() && vt < module_end() ? " type " + hex(static_cast<unsigned>(vt - base())) : std::string()) << ": (" << f[i - 6] << ", " << f[i - 5]
-                            << ", " << f[i - 4] << ") to (" << f[i - 3] << ", " << f[i - 2] << ", " << f[i - 1] << ") on " << w << " x " << h;
-                    }
-                }
-                if (depth >= 3)
-                    continue;
-                for (std::size_t i = 0; i + 1 < words.size(); i += 2)
-                {
-                    const Address p = words[i] | (static_cast<Address>(words[i + 1]) << 32);
-                    if (p >= 0x10000 && p < 0x7fffffff0000ULL && (p < base() || p >= module_end()) && !seen.count(p) && readable(p, 0x40))
-                        seen.insert(p), queue.emplace_back(p, depth + 1);
-                }
-            }
-            std::cout << "Boss bar boxes (" << when << "): " << shown << " among " << std::min<std::size_t>(queue.size(), 3000) << " objects" << out.str() << "\n" << std::flush;
-        }
-        void bar_tree_build(BossTuning &t)
-        {
-            t.bar_tree.clear();
-            std::vector<std::pair<Address, unsigned>> queue;
-            std::set<Address> seen;
-            for (const auto root : {t.bar_object, t.bar_template})
-                if (root && seen.insert(root).second)
-                    queue.emplace_back(root, 0);
-            std::ostringstream names;
-            unsigned named = 0;
-            for (std::size_t q = 0; q < queue.size() && t.bar_tree.size() < 3000; ++q)
-            {
-                const auto [object, depth] = queue[q];
-                std::vector<std::uint32_t> words(0x200 / 4);
-                if (!read(object, words))
-                    continue;
-                t.bar_tree.push_back(object);
-                const auto vt = value<Address>(object);
-                if (vt >= base() && vt < module_end())
-                    if (const auto brief = object_brief(object, 0x100, 4); brief.find('"') != std::string::npos && named++ < 250)
-                    {
-                        names << "\nBoss bar tree: depth " << depth << " #" << t.bar_tree.size() - 1 << " 0x" << std::hex << object << std::dec << " " << brief;
-                        // (V1.3.22) its numbers: to compare bars with different counts (Papu Papu's 10 against the
-                        // game's own, N. Gin's)
-                        unsigned numbers = 0;
-                        for (std::size_t i = 2; i < 0x40 && numbers < 24; ++i)
-                        {
-                            float f = 0;
-                            std::memcpy(&f, &words[i], 4);
-                            const int v = static_cast<int>(words[i]);
-                            if (v >= 1 && v <= 10000)
-                                names << " +" << hex(static_cast<unsigned>(i * 4)) << "=" << v, ++numbers;
-                            else if (std::isfinite(f) && std::abs(f) >= 0.01f && std::abs(f) <= 10000.0f)
-                                names << " +" << hex(static_cast<unsigned>(i * 4)) << "=" << f, ++numbers;
-                        }
-                    }
-                if (depth >= 5)
-                    continue;
-                for (std::size_t i = 0; i + 1 < words.size(); i += 2)
-                {
-                    const Address p = words[i] | (static_cast<Address>(words[i + 1]) << 32);
-                    if (p >= 0x10000 && p < 0x7fffffff0000ULL && (p < base() || p >= module_end()) && !seen.count(p) && readable(p, 0x40))
-                        seen.insert(p), queue.emplace_back(p, depth + 1);
-                }
-            }
-            std::cout << "Boss bar tree: " << t.bar_tree.size() << " objects, " << named << " with names" << names.str() << "\n" << std::flush;
-        }
-        void bar_tree_read(const BossTuning &t, std::vector<std::uint32_t> &out)
-        {
-            out.assign(t.bar_tree.size() * 0x80, 0);
-            std::vector<std::uint32_t> words(0x80);
-            for (std::size_t k = 0; k < t.bar_tree.size(); ++k)
-                if (read(t.bar_tree[k], words))
-                    std::copy(words.begin(), words.end(), out.begin() + static_cast<std::ptrdiff_t>(k * 0x80));
-        }
-        // every second until a hit: what changes then is "noise"; after the hit, what changed and isn't
-        void bar_tree_update(BossTuning &t, std::uint64_t now, bool hit_done)
-        {
-            std::vector<std::uint32_t> words;
-            bar_tree_read(t, words);
-            if (!hit_done)
-            {
-                if (t.bar_tree_noise.size() != words.size())
-                    t.bar_tree_noise.assign(words.size(), 0);
-                for (std::size_t i = 0; i < words.size() && i < t.bar_tree_last.size(); ++i)
-                    t.bar_tree_noise[i] |= words[i] != t.bar_tree_last[i];
-                t.bar_tree_last = std::move(words);
-                t.bar_tree_at = now + 1000;
-                return;
-            }
-            std::ostringstream out;
-            unsigned changed = 0, shown = 0;
-            for (std::size_t i = 0; i < words.size() && i < t.bar_tree_last.size() && i < t.bar_tree_noise.size(); ++i)
-            {
-                if (words[i] == t.bar_tree_last[i] || t.bar_tree_noise[i])
-                    continue;
-                ++changed;
-                if (shown++ >= 150)
-                    continue;
-                const auto k = i / 0x80;
-                const auto off = static_cast<unsigned>((i % 0x80) * 4);
-                float a = 0, b = 0;
-                std::memcpy(&a, &t.bar_tree_last[i], 4), std::memcpy(&b, &words[i], 4);
-                const auto vt = value<Address>(t.bar_tree[k]);
-                out << "\nBoss bar change: #" << k << " 0x" << std::hex << t.bar_tree[k] << std::dec
-                    << (vt >= base() && vt < module_end() ? " type " + hex(static_cast<unsigned>(vt - base())) : std::string()) << " +" << hex(off) << " "
-                    << static_cast<int>(t.bar_tree_last[i]) << " -> " << static_cast<int>(words[i]);
-                if (std::isfinite(b) && std::abs(b) > 1e-6f && std::abs(b) < 1e7f)
-                    out << " (decimal " << a << " -> " << b << ")";
-            }
-            std::cout << "Boss bar: " << changed << " numbers changed with the hit and not before it" << out.str() << "\n" << std::flush;
-        }
-        void update_boss_bar(BossTuning &t, std::uint64_t now)
-        {
-            // (V1.3.22) every other boss's bar tree too, 8 seconds after it's found, to compare (N. Gin's, asked for)
-            if (t.level != "B101" && t.bar_object && t.bar_tree_stage == 0 && t.bar_found_at && now - t.bar_found_at > 8000)
-                bar_tree_build(t), t.bar_tree_stage = 3;
-            if (t.bar_fields.empty() || now < t.bar_next || t.bar_lines >= 400)
-                return;
-            t.bar_next = now + 100;
-            for (auto &f : t.bar_fields)
-            {
-                const auto v = value<std::uint32_t>(f.at);
-                if (v == f.last)
-                    continue;
-                if (++f.changes <= 3 && t.bar_lines++ < 400)
-                {
-                    float a = 0, b = 0;
-                    std::memcpy(&a, &f.last, 4), std::memcpy(&b, &v, 4);
-                    std::cout << "Boss bar +" << seconds(now - t.entered) << ": " << f.label << " " << static_cast<int>(f.last) << " -> " << static_cast<int>(v);
-                    if (std::isfinite(b) && std::abs(b) > 1e-6f && std::abs(b) < 1e7f)
-                        std::cout << " (decimal " << a << " -> " << b << ")";
-                    std::cout << (f.changes == 3 ? " (keeps changing: not shown again)" : "") << "\n";
-                }
-                f.last = v;
-            }
-            std::cout << std::flush;
+            // (V1.3.17 to V1.3.26 also watched thousands of the bar's numbers here, and V1.3.22 to V1.3.26 searched what it
+            // leads to: research that's done, and that made the game stop for seconds, V1.3.26's log)
+            std::cout << "Boss bar: " << name << "'s health bar is " << object_brief(bar, 0x100, 6) << " (its setting: " << object_brief(t.bar_template, 0x100, 6) << ")\n"
+                      << std::flush;
         }
         // V1.3.25: the fill for more notches than the game's. V1.3.21's clip and V1.3.22's log: with Papu Papu's 10 notches
         // the bar's layout is the 10 notches' (the frame, notches, dark track and BarParent, which the blue is shown up to:
@@ -5500,12 +5299,13 @@ namespace ingame
         void bar_reach(Address root, unsigned depth_most, std::size_t most, std::vector<std::pair<Address, unsigned>> &found)
         {
             std::vector<std::pair<Address, unsigned>> queue{{root, 0}};
-            std::set<Address> seen{root};
+            std::unordered_set<Address> seen{root};
+            ReadableRegions ok;
             std::vector<std::uint32_t> words(0x200 / 4);
             for (std::size_t q = 0; q < queue.size() && found.size() < most; ++q)
             {
                 const auto [object, depth] = queue[q];
-                if (!read(object, words))
+                if (!ok(object, 0x200) || !read(object, words))
                     continue;
                 found.emplace_back(object, depth);
                 if (depth >= depth_most)
@@ -5513,7 +5313,7 @@ namespace ingame
                 for (std::size_t i = 0; i + 1 < words.size(); i += 2)
                 {
                     const Address p = words[i] | (static_cast<Address>(words[i + 1]) << 32);
-                    if (p >= 0x10000 && p < 0x7fffffff0000ULL && (p < base() || p >= module_end()) && !seen.count(p) && readable(p, 0x40))
+                    if (p >= 0x10000 && p < 0x7fffffff0000ULL && (p < base() || p >= module_end()) && !seen.count(p) && ok(p, 0x40))
                         seen.insert(p), queue.emplace_back(p, depth + 1);
                 }
             }
@@ -6218,6 +6018,81 @@ namespace ingame
             out << "; Aku Aku takes the hit (the game's own message to him)";
             return true;
         }
+        // Crash's damage script (Crash_DamageManager), or 0
+        Address crash_damage_script()
+        {
+            for (const auto &[c, script] : entity_scripts(player(), 256))
+                if (script == "Crash_DamageManager")
+                    return c;
+            return 0;
+        }
+        // what Crash's damage script holds as the death it plays next (deathClip), for the log
+        std::string crash_death_clip()
+        {
+            const auto damage = crash_damage_script();
+            const auto at = damage ? field_offset(value<Address>(damage + 56), "deathClip", 8) : 0;
+            return at ? pointer_brief(value<Address>(damage + at)) : std::string("?");
+        }
+        // V1.3.27: the angel death, tenth try. V1.3.26's log: his hit message reached Crash's damage script, which kept his
+        // death in it (deathClip "Death_Common_Spin", the attacker) and went no further. When his spin really kills Crash,
+        // the damage script sends itself sdoxdefr right then, then a0rx8wy2 and 0xblwcwf (the death, played from deathClip).
+        // So that next step, when the game didn't take it: from Crash's damage script, by its own node for it (Crash himself
+        // its one value) when that's found, else by a node of ours (as DeathLink's death is sent)
+        bool crash_die_step(std::ostream &out)
+        {
+            const bool sender_ok = event_hook.installed || code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0});
+            const auto damage = crash_damage_script();
+            if (!damage || !sender_ok)
+            {
+                out << (damage ? "the game's message sender differs" : "Crash's damage script wasn't found");
+                return false;
+            }
+            const auto meta = value<Address>(damage + 56);
+            Address message = 0, target = 0;
+            for (const auto delegator : list(value<Address>(meta + 160), 128))
+            {
+                const auto m = value<Address>(delegator + 24), to = value<Address>(delegator + 32);
+                if (typed(delegator, 0x13bc268) && typed(m, 0x17b6578) && typed(to, 0x13bbcb8) &&
+                    string(value<Address>(m + 16), 120) == "Crash_DamageManager_c.New_Graph_Event_1_id_sdoxdefr")
+                {
+                    message = m, target = to;
+                    break;
+                }
+            }
+            if (!message)
+            {
+                out << "Crash's damage script doesn't take sdoxdefr here";
+                return false;
+            }
+            const auto right = [&](Address node) {
+                const auto args = value<Address>(node + 32);
+                const auto values = list(args, 16);
+                return typed(node, 0x13bc390) && value<Address>(node + 16) == message && typed(args, 0x1745070) && values.size() == 4 && typed(values[0], 0x13bbcb8);
+            };
+            // (looked for once for each script description)
+            static Address found_for = 0, found = 0;
+            if (found_for != meta)
+            {
+                found_for = meta, found = 0;
+                std::ostringstream seen;
+                unsigned count = 0;
+                for (const auto n : aku_send_nodes(meta, message))
+                {
+                    if (count++ < 6)
+                        seen << "\nBoss rule: a sender of sdoxdefr in Crash's damage script" << send_arguments(n) << (right(n) && !found ? " (this one)" : "");
+                    if (!found && right(n))
+                        found = n;
+                }
+                std::cout << "Boss rule: Crash's damage script sends sdoxdefr from " << count << " nodes" << seen.str() << "\n" << std::flush;
+            }
+            const Address node = found && right(found) ? found : 0;
+            std::array<Address, 11> own{base() + 0x13bc390, 0, message, target};
+            std::array<Address, 6> context{damage};
+            reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(node ? node : reinterpret_cast<Address>(own.data()), reinterpret_cast<Address>(context.data()));
+            out << (node ? "by its own node" : "by a node of ours");
+            return true;
+        }
         // the angel death's texts (see red_constants): every "Death..." text constant (+0x1755b20, the text at +24) around
         // Crash's damage script description says clip; how many, and which texts they held
         [[maybe_unused]] unsigned swap_death_constants(Address damage, Address clip, std::string &texts)
@@ -6265,6 +6140,12 @@ namespace ingame
                 out << "; Crash is invincible (three masks): no hit";
                 return;
             }
+            // (V1.3.27) still blinking from a hit: no hit, as the game does then
+            if (crash_game_flag("DamagedInvulnerable") == 1)
+            {
+                out << "; Crash is still blinking from a hit: no hit";
+                return;
+            }
             if (masks >= 1)
             {
                 // (V1.3.14 to V1.3.18 set the mask count one lower: his mask stayed on screen and Crash didn't flinch, but
@@ -6278,7 +6159,10 @@ namespace ingame
             std::ostringstream replay;
             if (replay_real_hit(t, replay))
             {
-                t.replay_check_at = GetTickCount64() + 600;
+                // (V1.3.27) and his damage script's next step to the death if it stops short (see crash_die_step)
+                const auto now = GetTickCount64();
+                t.die_step_at = now + 150, t.die_steps_seen = die_steps.load();
+                t.replay_check_at = now + 800;
                 t.replay_deaths = death_values.load(), t.replay_angels = angel_deaths.load();
                 out << "; no mask: his attack's own hit message for Crash, with his death (the angel)";
                 return;
@@ -6491,11 +6375,6 @@ namespace ingame
                     // (the messages kept from him for this landing are this same landing)
                     t.blocked_told = now, t.blocked_seen = boss_blocked.load();
                 }
-                // research (V1.3.22): the bar's tree, watched from the fight's start until his first hit that counts
-                if (t.state == 5 && s == 1 && t.bar_tree_stage == 0)
-                    t.bar_tree_at = now + 1500;
-                else if (s == 3 && !t.was_red && t.bar_tree_stage == 1)
-                    t.bar_tree_stage = 2, t.bar_tree_at = now + 1500;
                 // research: what in his health part changed since the last state began
                 if (!t.health_part || !typed(t.health_part, 0x14da2c0))
                 {
@@ -6609,16 +6488,6 @@ namespace ingame
                 const auto v = hit_value.load();
                 std::cout << "Boss research: the hit message to Crash carried " << pointer_brief(v) << " (0x" << std::hex << v << std::dec << ")\n" << std::flush;
             }
-            if (t.bar_tree_at && now >= t.bar_tree_at && t.bar_object)
-            {
-                t.bar_tree_at = 0;
-                if (t.bar_tree_stage == 0)
-                    bar_tree_build(t), t.bar_tree_stage = 1, bar_tree_update(t, now, false);
-                else if (t.bar_tree_stage == 1)
-                    bar_tree_update(t, now, false);
-                else if (t.bar_tree_stage == 2)
-                    bar_tree_update(t, now, true), t.bar_tree_stage = 3;
-            }
             // the angel death for a landing while red: was it swapped in?
             if (t.death_check_at && now >= t.death_check_at)
             {
@@ -6631,16 +6500,37 @@ namespace ingame
                           << (still_out ? " (his death message didn't come within 2.5 s; the death texts were put back now)" : "") << "\n" << std::flush;
                 red_death_until = 0;
             }
-            // (V1.3.24) his attack's hit message for a landing while red: Crash's death, and which kind; the falling death if
-            // it didn't kill him
+            // (V1.3.27) his attack's hit message for a landing while red: when Crash's damage script kept his death but
+            // stopped short of it (V1.3.26), its next step (see crash_die_step); not when he has a mask or blinks by then
+            if (t.die_step_at && now >= t.die_step_at)
+            {
+                t.die_step_at = 0;
+                const bool died = death_values.load() != t.replay_deaths, stepped = die_steps.load() != t.die_steps_seen;
+                const bool mask = aku_manager_state(player()).second, blinking = crash_game_flag("DamagedInvulnerable") == 1;
+                std::cout << "Boss rule: after his hit message, Crash's damage script " << (died ? "killed him" : stepped ? "went on to his death itself" : "stopped there")
+                          << " (the death it holds: " << crash_death_clip() << ")";
+                if (died || stepped || mask || blinking)
+                    std::cout << (died || stepped ? "" : mask ? "; he has a mask now: nothing more" : "; he's blinking now: nothing more") << "\n" << std::flush;
+                else
+                {
+                    std::cout << "; its next step to his death is sent\n" << std::flush;
+                    std::ostringstream note;
+                    const bool sent = crash_die_step(note);
+                    std::cout << "Boss rule: Crash's damage script's next step (sdoxdefr) " << (sent ? "sent " : "not sent: ") << note.str() << "\n" << std::flush;
+                }
+            }
+            // (V1.3.24) and whether it killed him, and which kind of death; the falling death if it didn't
             if (t.replay_check_at && now >= t.replay_check_at)
             {
                 t.replay_check_at = 0;
                 const bool died = death_values.load() != t.replay_deaths, angel = angel_deaths.load() != t.replay_angels;
-                std::cout << "Boss rule: his hit message: " << (died ? (angel ? "Crash died the angel's death" : "Crash died, but not the angel's death") : "Crash didn't die from it");
-                if (!died)
+                std::cout << "Boss rule: his hit message: " << (died ? (angel ? "Crash died the angel's death" : "Crash died, but not the angel's death") : "Crash didn't die from it")
+                          << (died ? " (the death " + pointer_brief(death_value.load()) + ")" : std::string()) << "\n" << std::flush;
+                const bool mask = aku_manager_state(player()).second, blinking = crash_game_flag("DamagedInvulnerable") == 1;
+                if (!died && !mask && !blinking)
                 {
                     bool falling = false;
+                    std::string error;
                     try
                     {
                         const auto body = controlled_actor();
@@ -6648,11 +6538,11 @@ namespace ingame
                     }
                     catch (const std::exception &e)
                     {
-                        std::cout << " (" << e.what() << ")";
+                        error = std::string(" (") + e.what() + ")";
                     }
-                    std::cout << (falling ? "; he loses a life the falling way instead" : "; and his life couldn't be taken the falling way either");
+                    std::cout << "Boss rule: " << (falling ? "Crash loses a life the falling way instead" : "his life couldn't be taken the falling way either") << error << "\n"
+                              << std::flush;
                 }
-                std::cout << "\n" << std::flush;
             }
             // the mask taken for a landing while red, a second later
             if (t.hit_check_at && now >= t.hit_check_at)
@@ -6768,7 +6658,6 @@ namespace ingame
                 return;
             if (boss == "B101")
                 papu_rule(t, state, now);
-            update_boss_bar(t, now);
             stretch_bar_fill(t, state, now);
             if (now < t.next)
                 return;
