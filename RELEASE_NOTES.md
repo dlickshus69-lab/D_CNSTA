@@ -4,6 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
+- **Fix: the game closed right at start** for some players (since V1.3.10, and the first Stable V1.3). An update to the build tools made the client's DLLs link one Windows function in a way that can fail as the game starts, depending on where Windows loads them. Fixed, and every build is now checked for it.
+
 - **Papu Papu, round 5** (`/boss_rules on`):
   - Landing on him while he's red: the hit is **kept from happening**. The messages his scripts send when he's hit are held back, so he shouldn't flinch or lose health, and Crash isn't bounced off.
   - Crash takes **the game's own hit** instead. V1.3.10 sent it with the values of another copy of that message, so Crash's script ignored it.

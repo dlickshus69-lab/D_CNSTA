@@ -33,6 +33,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: msys2/setup-msys2@v2
+        id: msys2
         with:
           msystem: MINGW64
           update: true
@@ -80,6 +81,15 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Check the DLLs have no 32-bit pseudo relocations
+        # one of those can stop a DLL from loading (the game closes at once), depending on where Windows puts it
+        # (V1.3.10, V1.3.11, Stable V1.3: libmingwex's fesetenv calling msvcrt's _fpreset)
+        shell: pwsh
+        run: |
+          $nm = Join-Path "${{ steps.msys2.outputs.msys2-location }}" "mingw64\bin\nm.exe"
+          python CrashNST-AP-Client/tools/check_pseudo_relocs.py --nm $nm build/client/crash_nst_ingame.dll build/client/proxy/dinput8.dll
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Arrange files like the game folder
         run: |
