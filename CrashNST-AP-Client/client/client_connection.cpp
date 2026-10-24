@@ -202,7 +202,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /boss name, /boss_health, /boss_speed, /boss_rules (tests) | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules (tests) | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -416,6 +416,15 @@ void ClientRuntime::handle_commands()
                     ingame::set_countdown_volume(static_cast<unsigned>(value));
                     std::ofstream(standalone::state_directory() / "nitro_volume.txt", std::ios::trunc) << value << '\n';
                     print_console("Nitro Trap countdown volume: " + std::to_string(value) + ".");
+                }
+            }
+            else if (command == "/aku_give")
+            {
+                // test (V1.3.20): one Aku Aku mask for Crash now, as the Aku Aku Mask item gives (in a level, once Crash can move)
+                if (box_markers)
+                {
+                    box_markers->request_aku_give();
+                    print_console("Aku Aku: one mask for Crash now (test; each use gives one more, up to three).");
                 }
             }
             else if (command == "/skip_filler")

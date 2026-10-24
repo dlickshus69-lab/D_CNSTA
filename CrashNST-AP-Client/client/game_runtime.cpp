@@ -1170,10 +1170,18 @@ namespace ingame
         // but an object that starts with the code that plays it. His spin's death (the angel) starts with +0xca4180, every
         // time the same object; DeathLink's falling death with +0xca31a0. So for a landing on red: DeathLink's death, with
         // that falling death object swapped for an angel one, in Crash's own 0xblwcwf, for 2 seconds
-        constexpr Address angel_death_code = 0xca4180, falling_death_code = 0xca31a0;
-        std::atomic<Address> angel_seen{0}, red_death_object{0};
+        // V1.3.20: V1.3.18 tried to borrow the angel death object itself, but it only exists during a real death (V1.3.18's
+        // log). V1.3.19's log showed where the death to play comes from: Crash's damage script's deathClip (and
+        // defaultDeathClip) setting. After his spin's death it holds Papu Papu's own "Death_Common_Spin" (the very same text
+        // his attack setting points to), after DeathLink's death a falling one. So while DeathLink's death runs: when
+        // Crash's script sends a0rx8wy2 (after it has set deathClip, before it makes the death for 0xblwcwf), deathClip
+        // says Papu Papu's, only if both settings are of the same kind; when 0xblwcwf goes, it's put back as it was, so the
+        // game never keeps our value
+        constexpr Address angel_death_code = 0xca4180; // what the angel death object starts with: to tell it worked
+        std::atomic<Address> red_death_name{0}, red_death_type{0};
         std::atomic<std::uint64_t> red_death_until{0};
-        std::atomic_uint red_death_changed{0};
+        std::atomic<Address> red_clip_at{0}, red_clip_old{0}, red_default_at{0}, red_default_old{0};
+        std::atomic_uint red_death_changed{0}, red_death_angel{0}, red_death_skipped{0};
         // a message's field by part of its name: its offset if it's 8 bytes, or 0
         unsigned event_field(Address meta, const char *part)
         {
@@ -1469,24 +1477,74 @@ namespace ingame
                 {
                     const auto meta = value<Address>(event + 16);
                     const auto name = string(value<Address>(meta + 16), 120);
+                    // the angel death for a landing on red (see red_death_*): deathClip says Papu Papu's death now
+                    if (target == crash && component && !red_clip_at.load() && GetTickCount64() < red_death_until.load() &&
+                        name.find("a0rx8wy2") != std::string::npos)
+                    {
+                        const auto script = value<Address>(component + 56);
+                        const auto clip = red_death_name.load(), type = red_death_type.load();
+                        if (clip && type && string(value<Address>(script + 16), 120) == "Scripts.Graph.Crash_DamageManager")
+                        {
+                            const auto count = value<unsigned>(script + 24);
+                            const auto fields = value<Address>(script + 40);
+                            Address empty = 0; // (the empty text his other text settings hold)
+                            for (unsigned i = 0; fields && count <= 512 && i < count; ++i)
+                            {
+                                const auto field = value<Address>(fields + i * 8);
+                                if (string(value<Address>(field + 48), 64) == "String_id_tubawmq4" && value<std::uint16_t>(field + 22) == 8)
+                                    empty = value<Address>(component + value<std::uint16_t>(field + 24));
+                            }
+                            for (unsigned i = 0; fields && count <= 512 && i < count; ++i)
+                            {
+                                const auto field = value<Address>(fields + i * 8);
+                                const auto field_name = string(value<Address>(field + 48), 64);
+                                const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                                if ((field_name != "deathClip" && field_name != "defaultDeathClip") || bytes != 8 || offset < 0x40 || value<Address>(field) != type)
+                                    continue;
+                                const auto at = component + offset;
+                                const auto old = value<Address>(at);
+                                // only once the game has set it for this death (not the empty text it starts with)
+                                if (!old || old == empty || old == clip)
+                                {
+                                    ++red_death_skipped;
+                                    continue;
+                                }
+                                SIZE_T done = 0;
+                                if (WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(at), &clip, sizeof(clip), &done))
+                                {
+                                    if (field_name == "deathClip")
+                                        red_clip_old = old, red_clip_at = at;
+                                    else
+                                        red_default_old = old, red_default_at = at;
+                                    ++red_death_changed;
+                                }
+                            }
+                        }
+                    }
                     if (target == crash && name.find("0xblwcwf") != std::string::npos)
+                    {
                         if (const auto at = event_field(meta, "ug0b8lyr"))
                         {
                             const auto v = value<Address>(event + at);
                             death_value = v, ++death_values;
-                            if (v && value<Address>(v) == base() + angel_death_code)
-                                angel_seen = v; // a real angel death: kept for later
-                            const auto now = GetTickCount64();
-                            const auto angel = red_death_object.load();
-                            if (now < red_death_until.load() && v && value<Address>(v) == base() + falling_death_code && angel &&
-                                value<Address>(angel) == base() + angel_death_code)
+                            if (red_clip_at.load() && v && value<Address>(v) == base() + angel_death_code)
+                                ++red_death_angel;
+                        }
+                        // deathClip back as it was (if the game hasn't changed it since)
+                        for (auto *pair : {&red_clip_at, &red_default_at})
+                        {
+                            const auto at = pair->load();
+                            const auto old = pair == &red_clip_at ? red_clip_old.load() : red_default_old.load();
+                            if (at && value<Address>(at) == red_death_name.load())
                             {
                                 SIZE_T done = 0;
-                                if (WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(event + at), &angel, sizeof(angel), &done))
-                                    ++red_death_changed;
-                                red_death_until = 0;
+                                WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(at), &old, sizeof(old), &done);
                             }
+                            *pair = 0;
                         }
+                        if (red_clip_at.load() == 0)
+                            red_death_until = 0;
+                    }
                     if (name.find("ha5y20l3") != std::string::npos)
                         if (const auto at = event_field(meta, "x9pcuxft"))
                             hit_value = value<Address>(event + at), ++hit_values;
@@ -4985,7 +5043,7 @@ namespace ingame
             bool forbidden = false;
             // the death for it: whether Crash's script's death was changed (checked 2.5 seconds later)
             std::uint64_t death_check_at = 0;
-            unsigned death_seen = 0, death_changed = 0, death_count = 0, crash_dumps = 0;
+            unsigned death_seen = 0, death_changed = 0, death_count = 0, death_angels = 0, death_skips = 0, crash_dumps = 0;
             bool crash_dumped_start = false;
             // research (V1.3.15): his health part (+0x14da2c0) as each state starts, to find what keeps him from being hit
             // after a hit (the game's own: Crash bounces off him then), for the red time
@@ -5019,6 +5077,7 @@ namespace ingame
             std::vector<BarField> bar_fields;
             // V1.3.18: snapshots of the bar's small numbers (fractions and counts) at the fight's start and after hits
             Address bar_object = 0;
+            unsigned bar_scans = 0;
             std::uint64_t bar_snap_at = 0;
             std::string bar_snap_when;
             std::map<Address, std::uint32_t> bar_snapshot;
@@ -5151,6 +5210,55 @@ namespace ingame
             ++t.bar_snapshots;
             std::cout << "Boss bar snapshot (" << when << "):" << (shown ? out.str() : std::string(" nothing")) << (shown > 150 ? " ..." : "") << "\n" << std::flush;
         }
+        // V1.3.20 research: every on-screen box among the objects the bar leads to (three levels deep): six numbers (two
+        // corners) followed by the screen size. V1.3.19's clip: the frame and notches grew to 10, but the blue fill and the
+        // dark track behind it end halfway (the world shows through the rest), so the fill's box is the one to find
+        void scan_bar_boxes(BossTuning &t, const std::string &when)
+        {
+            if (!t.bar_object || t.bar_scans >= 3)
+                return;
+            ++t.bar_scans;
+            std::vector<std::pair<Address, unsigned>> queue{{t.bar_object, 0}};
+            std::set<Address> seen{t.bar_object};
+            std::ostringstream out;
+            unsigned shown = 0;
+            for (std::size_t q = 0; q < queue.size() && q < 3000; ++q)
+            {
+                const auto [object, depth] = queue[q];
+                std::vector<std::uint32_t> words(0x200 / 4);
+                if (!read(object, words))
+                    continue;
+                std::vector<float> f(words.size());
+                std::memcpy(f.data(), words.data(), words.size() * 4);
+                for (std::size_t i = 6; i + 1 < f.size(); ++i)
+                {
+                    const float w = f[i], h = f[i + 1];
+                    if (!(w >= 640 && w <= 10000 && h >= 360 && h <= 10000 && w == std::floor(w) && h == std::floor(h)))
+                        continue;
+                    bool box = true;
+                    for (std::size_t k = i - 6; k < i; ++k)
+                        box = box && std::isfinite(f[k]) && std::abs(f[k]) < 20000;
+                    if (!box || (f[i - 6] == 0 && f[i - 3] == 0))
+                        continue;
+                    if (shown++ < 60)
+                    {
+                        const auto vt = value<Address>(object);
+                        out << "\nBoss bar box (" << when << "): depth " << depth << " 0x" << std::hex << object << std::dec << " +" << hex(static_cast<unsigned>((i - 6) * 4))
+                            << (vt >= base() && vt < module_end() ? " type " + hex(static_cast<unsigned>(vt - base())) : std::string()) << ": (" << f[i - 6] << ", " << f[i - 5]
+                            << ", " << f[i - 4] << ") to (" << f[i - 3] << ", " << f[i - 2] << ", " << f[i - 1] << ") on " << w << " x " << h;
+                    }
+                }
+                if (depth >= 3)
+                    continue;
+                for (std::size_t i = 0; i + 1 < words.size(); i += 2)
+                {
+                    const Address p = words[i] | (static_cast<Address>(words[i + 1]) << 32);
+                    if (p >= 0x10000 && p < 0x7fffffff0000ULL && (p < base() || p >= module_end()) && !seen.count(p) && readable(p, 0x40))
+                        seen.insert(p), queue.emplace_back(p, depth + 1);
+                }
+            }
+            std::cout << "Boss bar boxes (" << when << "): " << shown << " among " << std::min<std::size_t>(queue.size(), 3000) << " objects" << out.str() << "\n" << std::flush;
+        }
         void update_boss_bar(BossTuning &t, std::uint64_t now)
         {
             if (t.bar_fields.empty() || now < t.bar_next || t.bar_lines >= 400)
@@ -5272,9 +5380,15 @@ namespace ingame
             const bool eligible = value<Address>(data + name_at) && boss != "B204" && boss != "B304" && boss != "B205" &&
                                   (boss != "B105" || name.find("Hulk") != std::string::npos);
             const int hits = eligible ? std::max(original, static_cast<int>(std::lround(original * percent / 100.0))) : original;
-            if (value<int>(data + hit_at) != hits)
-                write(data + hit_at, hits), boss_hits_changed = boss_hits_changed || hits != original;
             const int max_health = value<int>(c + max_at);
+            if (const int was = value<int>(data + hit_at); was != hits)
+            {
+                write(data + hit_at, hits), boss_hits_changed = boss_hits_changed || hits != original;
+                // research (V1.3.20): when the count changes, and whether his health script had started by then
+                std::cout << "Boss health: " << name << "'s HitCount " << was << " -> " << hits << ", " << seconds(GetTickCount64() - t.entered)
+                          << " into the level; his health script " << (max_health > 0 ? "had started (maxHealth " + std::to_string(max_health) + ")" : std::string("hadn't started"))
+                          << "\n" << std::flush;
+            }
             if (max_health <= 0)
                 return; // not started yet
             watch_boss_bar(t, c, name);
@@ -5537,51 +5651,6 @@ namespace ingame
             }
             return {0, 0};
         }
-        // an angel death object (see angel_death_code): one seen in a real death this game session; else one that Papu
-        // Papu's attack's death setting points to; else the only one among Crash's parts. Where it came from goes in how
-        Address find_angel(BossTuning &t, std::string &how)
-        {
-            const auto angel = [](Address p) { return p && value<Address>(p) == base() + angel_death_code; };
-            if (const auto seen = angel_seen.load(); angel(seen))
-            {
-                how = "the angel (as his spin gave earlier)";
-                return seen;
-            }
-            const auto setting = boss_death_behavior(t.papu).first;
-            if (setting && readable(setting, 0x100))
-            {
-                if (t.told.insert("deathsetting").second)
-                {
-                    std::ostringstream o;
-                    o << "Boss research: Papu Papu's attack's death setting " << pointer_brief(setting) << " starts:";
-                    for (unsigned off = 0; off < 0x60; off += 8)
-                        o << " +" << hex(off) << "=0x" << std::hex << value<Address>(setting + off) << std::dec;
-                    std::cout << o.str() << "\n" << std::flush;
-                }
-                for (unsigned off = 0; off < 0x100; off += 8)
-                    if (const auto p = value<Address>(setting + off); angel(p))
-                    {
-                        how = "the angel (from his attack's death setting +" + hex(off) + ")";
-                        return p;
-                    }
-            }
-            std::set<Address> found;
-            for (const auto c : list(value<Address>(player() + 24), 256))
-            {
-                if (angel(c))
-                    found.insert(c);
-                for (unsigned off = 8; off < 0x100; off += 8)
-                    if (const auto p = value<Address>(c + off); angel(p))
-                        found.insert(p);
-            }
-            if (found.size() == 1)
-            {
-                how = "the angel (from Crash's parts)";
-                return *found.begin();
-            }
-            how = "the falling death (no angel death found yet: " + std::to_string(found.size()) + " among Crash's parts; one from his spin gets kept)";
-            return 0;
-        }
         void boss_rule_hit(BossTuning &t, std::ostream &out)
         {
             const auto crash = player();
@@ -5606,12 +5675,16 @@ namespace ingame
             try
             {
                 const auto body = controlled_actor();
-                if (const auto angel = find_angel(t, how))
+                if (const auto [setting, type] = boss_death_behavior(t.papu); setting && type)
                 {
-                    red_death_object = angel;
+                    red_death_name = setting, red_death_type = type;
                     red_death_until = GetTickCount64() + 2000;
-                    t.death_check_at = GetTickCount64() + 2500, t.death_count = red_death_changed.load();
+                    t.death_check_at = GetTickCount64() + 2500;
+                    t.death_count = red_death_changed.load(), t.death_angels = red_death_angel.load(), t.death_skips = red_death_skipped.load();
+                    how = "his spin's death, " + pointer_brief(setting);
                 }
+                else
+                    how = "the falling death (his attack's death setting wasn't found)";
                 died = body && request_scripted_death(body);
             }
             catch (const std::exception &e)
@@ -5932,15 +6005,16 @@ namespace ingame
                 std::cout << "Boss research: the hit message to Crash carried " << pointer_brief(v) << " (0x" << std::hex << v << std::dec << ")\n" << std::flush;
             }
             if (t.bar_snap_at && now >= t.bar_snap_at)
-                t.bar_snap_at = 0, snapshot_bar(t, t.bar_snap_when);
+                t.bar_snap_at = 0, snapshot_bar(t, t.bar_snap_when), scan_bar_boxes(t, t.bar_snap_when);
             // the angel death for a landing while red: was it swapped in?
             if (t.death_check_at && now >= t.death_check_at)
             {
                 t.death_check_at = 0;
-                std::cout << "Boss rule: Crash's death: "
-                          << (red_death_changed.load() != t.death_count ? "the falling death was swapped for the angel"
-                                                                          : "not swapped (Crash's death message didn't come with the falling death within 2 seconds)")
-                          << "\n" << std::flush;
+                const unsigned changed = red_death_changed.load() - t.death_count, angels = red_death_angel.load() - t.death_angels,
+                               skipped = red_death_skipped.load() - t.death_skips;
+                std::cout << "Boss rule: Crash's death: " << changed << " of his death settings said Papu Papu's death"
+                          << (skipped ? " (" + std::to_string(skipped) + " not yet set by the game, left alone)" : std::string()) << "; the death made from it "
+                          << (angels ? "was the angel's kind" : changed ? "wasn't the angel's kind" : "-") << "\n" << std::flush;
                 red_death_until = 0;
             }
             // the mask taken for a landing while red, a second later
