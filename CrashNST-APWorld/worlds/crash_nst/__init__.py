@@ -1082,8 +1082,6 @@ class CrashWorld(World):
         # trap item IDs are BASE + TRAP_IDS. counts tell the client which hooks it needs.
         result["trap_counts"] = getattr(self, "trap_counts", dict.fromkeys(TRAPS, 0))
         result["trap_duration"] = self.options.trap_duration.value
-        # the client picks the skin from CrashNSTAP\\skins by this name ("default_crash" is the game's own Crash)
-        result["crash_skin"] = str(self.options.crash_skin.current_key)
         # Crash colors: "default", a color name or "#rrggbb" per part; the client recolors the game's own Crash.pak
         result["crash_colors"] = {
             "fur": str(self.options.crash_fur_color.current_key),
