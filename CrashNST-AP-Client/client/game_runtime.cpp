@@ -1062,7 +1062,10 @@ namespace ingame
             }
             return 0;
         }
-        bool request_scripted_death(Address actor)
+        // (V1.3.15) with a death of the game's kind, behavior (as a boss's attack names it, e.g. Papu Papu's
+        // "Death_Common_Spin": the angel flying up), set as the death message's parameter when that parameter is of the
+        // behavior's type; without one, the falling death DeathLink uses. note gets what was done
+        bool request_scripted_death(Address actor, Address behavior = 0, Address behavior_type = 0, std::string *note = nullptr)
         {
             if (!event_hook.installed && !code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
                                                                                                 0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0}))
@@ -1089,6 +1092,36 @@ namespace ingame
                     // CrashFallingDeath runs the normal respawn script. 
                     // KillEntity leaves this reused actor at zero health so we can't use it :(
                     std::array<Address, 11> sender{base() + 0x13bc390, 0, message, target};
+                    if (behavior)
+                    {
+                        Address param_type = 0;
+                        const auto count = value<unsigned>(message + 24);
+                        const auto fields = value<Address>(message + 40);
+                        for (unsigned i = 0; fields && count <= 64 && i < count; ++i)
+                        {
+                            const auto field = value<Address>(fields + i * 8);
+                            if (string(value<Address>(field + 48)) == "GraphEvent_id_snc05c5g_Definition_Parameter")
+                                param_type = value<Address>(field);
+                        }
+                        const bool same = param_type && param_type == behavior_type;
+                        if (same)
+                            sender[7] = behavior; // (the parameter's place: +56)
+                        if (note)
+                        {
+                            std::ostringstream out;
+                            const auto at = [](Address a) {
+                                std::ostringstream o;
+                                if (a > base() && a < base() + 0x2000000)
+                                    o << "+0x" << std::hex << (a - base());
+                                else
+                                    o << "0x" << std::hex << a;
+                                return o.str();
+                            };
+                            out << (same ? "the death the boss's attack gives" : "the falling death") << " (the death message's parameter is type " << at(param_type)
+                                << ", the boss's death " << at(behavior_type) << ")";
+                            *note = out.str();
+                        }
+                    }
                     std::array<Address, 6> context{component};
                     reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(
                         reinterpret_cast<Address>(sender.data()), reinterpret_cast<Address>(context.data()));
@@ -4896,6 +4929,11 @@ namespace ingame
             // V1.3.13: a landing while red makes him flinch (the game's hit reaction); he stays red through it, so it's
             // clear it didn't count
             bool forbidden = false;
+            // research (V1.3.15): his health part (+0x14da2c0) as each state starts, to find what keeps him from being hit
+            // after a hit (the game's own: Crash bounces off him then), for the red time
+            Address health_part = 0;
+            std::vector<std::uint32_t> health_words;
+            unsigned health_lines = 0;
             // V1.3.13: his fight's pace with more health: the game's hit count (HitCount, 5) and, at the fight's start, his
             // spin length and hit count
             int papu_original = 0, laps_start = 0, hits_start = 0;
@@ -4937,10 +4975,10 @@ namespace ingame
             return 0;
         }
         // an entity's running scripts: (component, name without "Scripts.Graph.")
-        std::vector<std::pair<Address, std::string>> entity_scripts(Address owner)
+        std::vector<std::pair<Address, std::string>> entity_scripts(Address owner, unsigned limit = 64)
         {
             std::vector<std::pair<Address, std::string>> result;
-            for (const auto c : list(value<Address>(owner + 24), 64))
+            for (const auto c : list(value<Address>(owner + 24), limit))
                 if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78) && value<Address>(c + 24) == owner)
                 {
                     auto script = string(value<Address>(value<Address>(c + 56) + 16), 120);
@@ -4999,9 +5037,15 @@ namespace ingame
         }
         // health: the boss himself (his health bar has his name), not the lions or blobs he sends; not N. Gin's mechs (both
         // only get faster), not Cortex's chase in Crash 2 (more health can't be beaten in time), and of Brio only his
-        // last form (his first phase stays). V1.3.6: his HitCount (the bar's notches) stays the game's; once his health
-        // script has made his health (HitCount x 100), his health and maxHealth go up together, so a hit takes part of a
-        // notch. Done again whenever the fight starts over (a death resets the boss to the game's health)
+        // last form (his first phase stays). Done again whenever the fight starts over (a death resets the boss to the
+        // game's health).
+        // V1.3.15: his bar grows to match. His HitCount (the bar's notches; his health script makes maxHealth HitCount x
+        // 100 when it starts) goes up with the percent as soon as he's there, and once his script has started, his actor's
+        // health (+0xf8, what the bar's fill and the game count) goes up to the same. V1.3.5 changed only HitCount: the bar
+        // grew but his health stayed the game's, so it was half full. V1.3.6 to V1.3.14 left HitCount alone and raised
+        // only his health and maxHealth: right health, the game's notches
+        std::map<std::string, int> game_hits;
+        bool boss_hits_changed = false; // a HitCount was changed this game session (it's put back at 100%)
         void tune_boss_health(BossTuning &t, const std::string &boss, Address owner, const std::string &name, Address c, unsigned percent)
         {
             const auto data = value<Address>(c + 16);
@@ -5015,43 +5059,52 @@ namespace ingame
                                                   ", maxHealth " + std::to_string(max_at) + ")");
                 return;
             }
-            auto it = t.hits.find(data + hit_at);
-            if (it == t.hits.end())
-                it = t.hits.emplace(data + hit_at, value<int>(data + hit_at)).first;
+            // the game's count, as first seen in this game session (his settings can stay loaded from one visit to the next,
+            // with ours in them)
+            auto it = game_hits.find(boss + "|" + name);
+            if (it == game_hits.end())
+                it = game_hits.emplace(boss + "|" + name, value<int>(data + hit_at)).first;
             const int original = it->second;
             if (original < 1 || original > 50)
                 return;
             if (name.find("PapuPapu") != std::string::npos)
                 t.papu_original = original;
-            if (value<int>(data + hit_at) != original)
-                write(data + hit_at, original);
+            const bool eligible = value<Address>(data + name_at) && boss != "B204" && boss != "B304" && boss != "B205" &&
+                                  (boss != "B105" || name.find("Hulk") != std::string::npos);
+            const int hits = eligible ? std::max(original, static_cast<int>(std::lround(original * percent / 100.0))) : original;
+            if (value<int>(data + hit_at) != hits)
+                write(data + hit_at, hits), boss_hits_changed = boss_hits_changed || hits != original;
             const int max_health = value<int>(c + max_at);
             if (max_health <= 0)
                 return; // not started yet
             watch_boss_bar(t, c, name);
-            const bool eligible = value<Address>(data + name_at) && boss != "B204" && boss != "B304" && boss != "B205" &&
-                                  (boss != "B105" || name.find("Hulk") != std::string::npos);
             if (!eligible)
             {
                 tell_once(t, "same" + name, "Boss health: " + name + " keeps his " + std::to_string(original) + " hits");
                 return;
             }
-            const int hits = std::max(original, static_cast<int>(std::lround(original * percent / 100.0)));
-            if (hits == original || max_health != original * 100)
-                return; // nothing to do, or done
+            const int target = hits * 100;
             const bool actor = typed(owner, 0x1592220) && health_getter_ok();
             const int health = actor ? actor_health(owner) : -1, raw = value<int>(owner + 0xf8);
-            if (!actor || health != raw || health != max_health)
+            if (hits == original || (actor && max_health == target && raw == target))
+                return; // nothing to do, or done
+            // only while he's at full health (the game's, or ours): a hit taken already stays taken
+            if (!actor || health != raw || (raw != original * 100 && raw != target) || (max_health != original * 100 && max_health != target))
             {
-                tell_once(t, "notfull" + name + std::to_string(health),
+                tell_once(t, "notfull" + name + std::to_string(health) + "/" + std::to_string(max_health),
                           "Boss health: " + name + " left as he is (" + (actor ? "health " + std::to_string(health) + ", +0xf8 " + std::to_string(raw) : std::string("not an actor")) +
                               ", maxHealth " + std::to_string(max_health) + ")");
                 return;
             }
-            write(c + max_at, hits * 100);
-            write(owner + 0xf8, hits * 100);
+            // his script started with our count: the bar has our notches. If it started before (the game's count), the
+            // health is still ours but the bar keeps the game's notches
+            const bool grown = max_health == target;
+            write(c + max_at, target);
+            write(owner + 0xf8, target);
             std::cout << "Boss health: " << name << " " << original << " hits -> " << hits << " (" << percent << "%): health " << health << " -> "
-                      << actor_health(owner) << ", maxHealth " << value<int>(c + max_at) << "; his bar keeps " << original << " notches\n" << std::flush;
+                      << actor_health(owner) << ", maxHealth " << value<int>(c + max_at) << "; his bar "
+                      << (grown ? "has " + std::to_string(hits) + " notches" : "keeps " + std::to_string(original) + " notches (his script started before the count changed)")
+                      << "\n" << std::flush;
         }
         // speed: the settings known to set a boss's pace. A speed or speed multiplier goes up by the percent, a wait goes
         // down by it
@@ -5258,7 +5311,22 @@ namespace ingame
         }
         // without the game's hit: as one would be (a mask less, nothing while invincible, a life without a mask). (His
         // state is the mask count while a mask is out, as /aku_give reads it)
-        void boss_rule_hit(std::ostream &out)
+        // the death a boss's attack gives Crash (his attack script's CrashDeathDefaultBehaviorEvent: Papu Papu's is
+        // "Death_Common_Spin", the angel flying up) and that setting's type, or {0, 0}
+        std::pair<Address, Address> boss_death_behavior(Address boss)
+        {
+            for (const auto &[c, script] : entity_scripts(boss))
+            {
+                const auto data = value<Address>(c + 16);
+                if (script != "common_BossAttackDamageHandler" || !typed(data, 0x13bbb10))
+                    continue;
+                const auto field = field_named(value<Address>(data + 32), "CrashDeathDefaultBehaviorEvent");
+                if (field && value<std::uint16_t>(field + 22) == 8)
+                    return {value<Address>(data + value<std::uint16_t>(field + 24)), value<Address>(field)};
+            }
+            return {0, 0};
+        }
+        void boss_rule_hit(BossTuning &t, std::ostream &out)
         {
             const auto crash = player();
             const auto [state, mask_out] = aku_manager_state(crash);
@@ -5277,17 +5345,22 @@ namespace ingame
                     return;
                 }
             }
+            // V1.3.15 (asked for): the death his spin gives, the angel flying up, not DeathLink's falling death (V1.3.14)
             bool died = false;
+            std::string how;
             try
             {
                 const auto body = controlled_actor();
-                died = body && request_scripted_death(body);
+                const auto [behavior, type] = boss_death_behavior(t.papu);
+                died = body && request_scripted_death(body, behavior, type, &how);
+                if (!behavior)
+                    how = "the falling death (his attack's death wasn't found)";
             }
             catch (const std::exception &e)
             {
                 out << " (" << e.what() << ")";
             }
-            out << (died ? "; no mask: Crash loses a life (as from his spin)" : "; no mask, and Crash's life couldn't be taken");
+            out << (died ? "; no mask: Crash loses a life, " + how : std::string("; no mask, and Crash's life couldn't be taken"));
         }
         // his health as the game keeps it, wherever that is (V1.3.8: not a whole number on his actor): his actor's first
         // 0x1000 bytes and each of his parts' first 0x400, as 4-byte words
@@ -5410,7 +5483,7 @@ namespace ingame
             // done directly: a mask less, nothing while invincible, a life without a mask
             const auto [state, mask_out] = aku_manager_state(player());
             t.hit_masks = mask_out ? std::clamp(state, 1, 3) : 0;
-            boss_rule_hit(line);
+            boss_rule_hit(t, line);
             if (t.hit_masks == 1 || t.hit_masks == 2)
                 t.hit_check_at = now + 1000;
         }
@@ -5481,6 +5554,42 @@ namespace ingame
                     std::cout << line.str() << "\n" << std::flush;
                     // (the messages kept from him for this landing are this same landing)
                     t.blocked_told = now, t.blocked_seen = boss_blocked.load();
+                }
+                // research: what in his health part changed since the last state began
+                if (!t.health_part || !typed(t.health_part, 0x14da2c0))
+                {
+                    t.health_part = 0, t.health_words.clear();
+                    for (const auto c : list(value<Address>(t.papu + 24), 128))
+                        if (typed(c, 0x14da2c0))
+                            t.health_part = c;
+                }
+                if (t.health_part)
+                {
+                    std::vector<std::uint32_t> words(0x400 / 4);
+                    if (read(t.health_part, words))
+                    {
+                        if (t.health_words.size() == words.size() && t.health_lines < 60)
+                        {
+                            std::ostringstream out;
+                            unsigned changed = 0;
+                            for (std::size_t i = 2; i < words.size(); ++i)
+                                if (words[i] != t.health_words[i] && changed++ < 16)
+                                {
+                                    float a = 0, b = 0;
+                                    std::memcpy(&a, &t.health_words[i], 4), std::memcpy(&b, &words[i], 4);
+                                    out << " +" << hex(static_cast<unsigned>(i * 4)) << " " << static_cast<int>(t.health_words[i]) << "->" << static_cast<int>(words[i]);
+                                    if (std::isfinite(a) && std::isfinite(b) && std::abs(b) > 1e-6f && std::abs(b) < 1e7f)
+                                        out << " (" << a << "->" << b << ")";
+                                }
+                            if (changed)
+                            {
+                                ++t.health_lines;
+                                std::cout << "Boss research: his health part, state " << t.state << " -> " << s << ":" << out.str() << (changed > 16 ? " ..." : "") << "\n"
+                                          << std::flush;
+                            }
+                        }
+                        t.health_words = std::move(words);
+                    }
                 }
                 t.state = s, t.state_since = now, t.top_speed = 0, t.turn_most = -1e9f, t.turn_least = 1e9f;
             }
@@ -5635,7 +5744,7 @@ namespace ingame
             t.next = now + 500;
             const unsigned health = std::clamp(state.boss_health, 100u, 200u), speed = std::clamp(state.boss_speed, 100u, 200u);
             // (research: until the boss is found, also with the game's own settings)
-            if (health == 100 && speed == 100 && !state.boss_rules && boss_event_since.load())
+            if (health == 100 && speed == 100 && !state.boss_rules && boss_event_since.load() && !boss_hits_changed)
                 return;
             for (const auto owner : event_owners())
             {
@@ -5659,11 +5768,13 @@ namespace ingame
                                 other_script == "common_BossInvulnerableDeflectPlayerHandler")
                                 log_script_messages(t, other, name + " " + other_script);
                         if (const auto crash = player())
-                            for (const auto &[mine, mine_script] : entity_scripts(crash))
+                            // (Crash has more than 64 parts: V1.3.14 never found his)
+                            for (const auto &[mine, mine_script] : entity_scripts(crash, 256))
                                 if (mine_script == "Crash_DamageManager")
                                     log_script_messages(t, mine, "Crash " + mine_script);
                     }
-                    if (script == "common_BossHealthHandler" && health != 100)
+                    // (also at 100%: a count changed for an earlier fight goes back)
+                    if (script == "common_BossHealthHandler" && (health != 100 || boss_hits_changed))
                         tune_boss_health(t, boss, owner, name, c, health);
                     else if (speed != 100)
                         tune_boss_speed(t, c, name, script, speed);

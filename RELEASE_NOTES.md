@@ -4,7 +4,9 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Papu Papu, round 7** (`/boss_rules on`): landing on him while he's red is now a real hit for Crash. With Aku Aku, Crash loses the mask; without one, he loses a life, just like getting hit by Papu's spin. V1.3.13's log showed the client's copy of the game's hit message did nothing: it carries Papu's attack damage, which only exists while his attack is touching Crash.
-  - He **stays red** while he flinches from a landing that didn't count. Before, the red went away as you landed, so it looked like a normal hit.
-- From V1.3.13: **`/skip_filler yes`** (every 1-Up, Wumpa Fruit and Aku Aku Mask received so far counts as given), **one Aku Aku Mask in boss fights**, Papu Papu's last hit always counts (no more getting stuck), and his spins keep the game's length with more health.
+- **Papu Papu, round 8**:
+  - **The angel death.** Landing on him while he's red with no mask now gives the death his spin gives (the angel flying up), not DeathLink's falling death. With a mask, Crash loses the mask, as before.
+  - **His health bar grows to match** (`/boss_health`). At 200% the bar has 10 notches and starts full, and each hit takes one notch. V1.3.5 grew the bar but left his health at the game's (half full). Since V1.3.6 his health was right but the bar kept 5 notches. Now both.
+  - Research for keeping a red landing from counting at all: the log shows what changes in his health part with each state.
+- From V1.3.13–14: `/skip_filler yes`, one Aku Aku Mask in boss fights, a landing while red is a real hit for Crash, his last hit always counts, his spins keep the game's length, and he stays red through the flinch.
 - **Options page** (from V1.3.10): the colors are a plain list (each color, or Random), no Crash Skin option.
