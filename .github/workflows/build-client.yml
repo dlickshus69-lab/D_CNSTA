@@ -133,9 +133,10 @@ jobs:
           if ([int]$env:GITHUB_RUN_ATTEMPT -gt 1) { $tag = "$tag-$env:GITHUB_RUN_ATTEMPT" }
           # the release text: what's in this build (RELEASE_NOTES.md, written with each change), read by gh from the file
           # (passed as text, quotes in it split it into several arguments: the V1.3 Stable build's "#RRGGBB")
-          $notes = if (Test-Path RELEASE_NOTES.md) { @("--notes-file", "RELEASE_NOTES.md") } else { @("--notes", "") }
+          # (typed lists: a one-item list from an if would become plain text, and splatting text passes it letter by letter)
+          [string[]]$notes = if (Test-Path RELEASE_NOTES.md) { @("--notes-file", "RELEASE_NOTES.md") } else { @("--notes", "") }
           $title = "Dlickshus Crash Bandicoot N. Sane Trilogy Archipelago V$version ($kind)"
-          $mark = if ($stable) { @("--latest") } else { @("--prerelease", "--latest=false") }
+          [string[]]$mark = if ($stable) { @("--latest") } else { @("--prerelease", "--latest=false") }
           $created = $false
           for ($attempt = 1; $attempt -le 3 -and -not $created; $attempt++) {
             $apworld = if ($stable) { "CrashNST-APWorld/dist/crash_nst.apworld" } else { "CrashNST-APWorld/dist/crash_nst_testing.apworld" }
