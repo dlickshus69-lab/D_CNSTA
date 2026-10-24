@@ -202,7 +202,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules (tests) | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_bar (tests) | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -559,6 +559,15 @@ void ClientRuntime::handle_commands()
                               ". With them on, Papu Papu glows red after each hit, until the end of his next spin, and can't be hit then; "
                               "landing on him while he's red is a hit for Crash (the game's own: Aku Aku takes it, or a life without him) "
                               "and doesn't count. /boss_rules on, off, or seed.");
+            }
+            else if (command == "/boss_bar")
+            {
+                // test (V1.3.21): with more health, grow the bar's notches (the fill doesn't grow with them yet) or keep the game's
+                if (argument == "grow" || argument == "keep")
+                    boss_bar_grow = argument == "grow";
+                print_console(std::string("Boss bar: ") + (boss_bar_grow ? "grow" : "keep") +
+                              " (test). keep: the game's notches, full at the start, each hit takes part of one (works). grow: more notches "
+                              "(the fill still stops at the game's length: being worked on). From the next fight. /boss_bar keep or grow.");
             }
             else if (command == "/clear")
                 feed_history.clear();

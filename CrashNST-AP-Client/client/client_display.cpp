@@ -315,7 +315,7 @@ void ClientRuntime::update_display(ClientTick &tick)
                 speed = static_cast<unsigned>(boss_speed_test);
             if (boss_rules_test >= 0)
                 rules = boss_rules_test == 1;
-            box_markers->boss_settings(health, speed, rules);
+            box_markers->boss_settings(health, speed, rules, boss_bar_grow);
         }
         auto collectible_checked = tick.checked;
         collectible_checked.insert(pending.begin(), pending.end());

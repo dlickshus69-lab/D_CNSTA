@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 25, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 26, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -171,6 +171,9 @@ namespace ingame
         // percent (100 is the game's own), and the rules on bosses that can be hit any time (Papu Papu glows red while
         // he can't be; landing on him then costs a life)
         unsigned boss_health = 100, boss_speed = 100, boss_rules = 0;
+        // (V1.3.21 test, /boss_bar) with more health: 1 grows the bar's notches with it (its fill doesn't grow yet), 0 keeps
+        // the game's notches (each hit takes part of one)
+        unsigned boss_bar_grow = 0;
         // set by the game thread every frame it runs (GetTickCount64)
         std::uint64_t heartbeat_game = 0;
         // set by the client: trap time is accounted for up to here while the game thread wasn't running

@@ -1182,6 +1182,11 @@ namespace ingame
         std::atomic<std::uint64_t> red_death_until{0};
         std::atomic<Address> red_clip_at{0}, red_clip_old{0}, red_default_at{0}, red_default_old{0};
         std::atomic_uint red_death_changed{0}, red_death_angel{0}, red_death_skipped{0};
+        // V1.3.21: V1.3.20's log: when a0rx8wy2 goes, deathClip still holds the empty text it starts with (V1.3.20 left
+        // it alone then, waiting for the game's). The guess now: the game fills in a death of its own only when there's
+        // none (after his spin hits Crash, deathClip already holds Papu Papu's death), so ours goes in while it's empty.
+        // What it held, for the log
+        std::atomic<Address> red_clip_seen{0};
         // a message's field by part of its name: its offset if it's 8 bytes, or 0
         unsigned event_field(Address meta, const char *part)
         {
@@ -1499,12 +1504,13 @@ namespace ingame
                                 const auto field = value<Address>(fields + i * 8);
                                 const auto field_name = string(value<Address>(field + 48), 64);
                                 const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
-                                if ((field_name != "deathClip" && field_name != "defaultDeathClip") || bytes != 8 || offset < 0x40 || value<Address>(field) != type)
+                                if (field_name != "deathClip" || bytes != 8 || offset < 0x40 || value<Address>(field) != type)
                                     continue;
                                 const auto at = component + offset;
                                 const auto old = value<Address>(at);
-                                // only once the game has set it for this death (not the empty text it starts with)
-                                if (!old || old == empty || old == clip)
+                                red_clip_seen = old;
+                                // only while it holds no death (the empty text it starts with): a death of the game's stays
+                                if (!old || old != empty)
                                 {
                                     ++red_death_skipped;
                                     continue;
@@ -5354,7 +5360,8 @@ namespace ingame
         }
         std::map<std::string, int> game_hits;
         bool boss_hits_changed = false; // a HitCount was changed this game session (it's put back at 100%)
-        void tune_boss_health(BossTuning &t, const std::string &boss, Address owner, const std::string &name, Address c, unsigned percent)
+        // (V1.3.21: grow says whether the notches grow too, /boss_bar; the health is ours either way)
+        void tune_boss_health(BossTuning &t, const std::string &boss, Address owner, const std::string &name, Address c, unsigned percent, bool grow)
         {
             const auto data = value<Address>(c + 16);
             if (!typed(data, 0x13bbb10))
@@ -5380,12 +5387,13 @@ namespace ingame
             const bool eligible = value<Address>(data + name_at) && boss != "B204" && boss != "B304" && boss != "B205" &&
                                   (boss != "B105" || name.find("Hulk") != std::string::npos);
             const int hits = eligible ? std::max(original, static_cast<int>(std::lround(original * percent / 100.0))) : original;
+            const int notches = grow ? hits : original;
             const int max_health = value<int>(c + max_at);
-            if (const int was = value<int>(data + hit_at); was != hits)
+            if (const int was = value<int>(data + hit_at); was != notches)
             {
-                write(data + hit_at, hits), boss_hits_changed = boss_hits_changed || hits != original;
+                write(data + hit_at, notches), boss_hits_changed = boss_hits_changed || notches != original;
                 // research (V1.3.20): when the count changes, and whether his health script had started by then
-                std::cout << "Boss health: " << name << "'s HitCount " << was << " -> " << hits << ", " << seconds(GetTickCount64() - t.entered)
+                std::cout << "Boss health: " << name << "'s HitCount " << was << " -> " << notches << ", " << seconds(GetTickCount64() - t.entered)
                           << " into the level; his health script " << (max_health > 0 ? "had started (maxHealth " + std::to_string(max_health) + ")" : std::string("hadn't started"))
                           << "\n" << std::flush;
             }
@@ -5428,7 +5436,8 @@ namespace ingame
             write(owner + 0xf8, target);
             std::cout << "Boss health: " << name << " " << original << " hits -> " << hits << " (" << percent << "%): health " << health << " -> "
                       << actor_health(owner) << ", maxHealth " << value<int>(c + max_at) << "; his bar "
-                      << (grown ? "has " + std::to_string(hits) + " notches" : "keeps " + std::to_string(original) + " notches (his script started before the count changed)")
+                      << (grown ? "has " + std::to_string(hits) + " notches"
+                                : "keeps the game's " + std::to_string(original) + " notches" + (grow ? std::string(" (his script started before the count changed)") : std::string()))
                       << "\n" << std::flush;
         }
         // speed: the settings known to set a boss's pace. A speed or speed multiplier goes up by the percent, a wait goes
@@ -5651,6 +5660,59 @@ namespace ingame
             }
             return {0, 0};
         }
+        // a hit for Crash with a mask, the game's way. V1.3.20's log: when Papu Papu's spin hits Crash with a mask, Crash's
+        // damage script sends Aku Aku's manager 7ajlmc3q with a "1" (from one node of its script), and Aku's manager does
+        // the rest (the mask goes, Crash blinks: DamagedInvulnerable). The very same node is sent again here, from Crash's
+        // damage script
+        bool aku_take_hit(std::ostream &out)
+        {
+            const auto crash = player();
+            Address damage = 0;
+            for (const auto &[c, script] : entity_scripts(crash, 256))
+                if (script == "Crash_DamageManager")
+                    damage = c;
+            const auto aku = aku_manager_component(crash);
+            if (!damage || !aku)
+            {
+                out << "; Crash's damage or Aku Aku script wasn't found";
+                return false;
+            }
+            const auto message = aku_message(aku, "7ajlmc3q").first;
+            if (!message)
+            {
+                out << "; Aku Aku's manager doesn't take 7ajlmc3q here";
+                return false;
+            }
+            const auto meta = value<Address>(damage + 56);
+            const auto right = [&](Address node) {
+                const auto values = list(value<Address>(node + 32), 16);
+                return typed(node, 0x13bc390) && value<Address>(node + 16) == message && typed(value<Address>(node + 32), 0x1745070) && values.size() == 6 &&
+                       typed(values[3], 0x1748280) && (value<std::uint64_t>(values[3] + 24) & 0xff) == 1;
+            };
+            static Address found_for = 0, found = 0;
+            Address node = found_for == meta && found && right(found) ? found : 0;
+            if (!node)
+            {
+                std::ostringstream seen;
+                unsigned count = 0;
+                for (const auto n : aku_send_nodes(meta, message))
+                {
+                    if (count++ < 6)
+                        seen << "\nBoss rule: a sender of Aku Aku's hit message in Crash's damage script" << send_arguments(n) << (right(n) ? " (the hit)" : "");
+                    if (!node && right(n))
+                        node = found = n, found_for = meta;
+                }
+                std::cout << "Boss rule: Aku Aku's hit message: " << count << " senders in Crash's damage script" << seen.str() << "\n" << std::flush;
+            }
+            if (!node)
+            {
+                out << "; the game's sender of Aku Aku's hit wasn't found";
+                return false;
+            }
+            aku_send(damage, node);
+            out << "; Aku Aku takes the hit (the game's own message to him)";
+            return true;
+        }
         void boss_rule_hit(BossTuning &t, std::ostream &out)
         {
             const auto crash = player();
@@ -5664,8 +5726,9 @@ namespace ingame
             if (masks >= 1)
             {
                 // (V1.3.14 to V1.3.18 set the mask count one lower: his mask stayed on screen and Crash didn't flinch, but
-                // the next hit then killed him. Off until the game's own masked hit is known: research below)
-                out << "; Crash has a mask: no hit yet (the game's way of taking a mask isn't known yet)";
+                // the next hit then killed him. V1.3.21: the game's own message to Aku Aku)
+                if (!aku_take_hit(out))
+                    out << "; Crash has a mask: no hit";
                 return;
             }
             // (V1.3.15 and V1.3.16 tried for the death his spin gives, the angel, asked for: see death_value. DeathLink's
@@ -6012,9 +6075,9 @@ namespace ingame
                 t.death_check_at = 0;
                 const unsigned changed = red_death_changed.load() - t.death_count, angels = red_death_angel.load() - t.death_angels,
                                skipped = red_death_skipped.load() - t.death_skips;
-                std::cout << "Boss rule: Crash's death: " << changed << " of his death settings said Papu Papu's death"
-                          << (skipped ? " (" + std::to_string(skipped) + " not yet set by the game, left alone)" : std::string()) << "; the death made from it "
-                          << (angels ? "was the angel's kind" : changed ? "wasn't the angel's kind" : "-") << "\n" << std::flush;
+                std::cout << "Boss rule: Crash's death: his deathClip held " << pointer_brief(red_clip_seen.load()) << "; "
+                          << (changed ? "it said Papu Papu's death" : skipped ? "left alone (it held a death already)" : "not reached (a0rx8wy2 didn't come)")
+                          << "; the death made " << (angels ? "was the angel's kind" : changed ? "wasn't the angel's kind" : "-") << "\n" << std::flush;
                 red_death_until = 0;
             }
             // the mask taken for a landing while red, a second later
@@ -6163,7 +6226,7 @@ namespace ingame
                     }
                     // (also at 100%: a count changed for an earlier fight goes back)
                     if (script == "common_BossHealthHandler" && (health != 100 || boss_hits_changed))
-                        tune_boss_health(t, boss, owner, name, c, health);
+                        tune_boss_health(t, boss, owner, name, c, health, state.boss_bar_grow != 0);
                     else if (speed != 100)
                         tune_boss_speed(t, c, name, script, speed);
                     if (boss == "B101" && script == "BossPapuPapu_AiHandler" && t.papu_ai != c)
