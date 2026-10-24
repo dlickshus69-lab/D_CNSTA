@@ -211,12 +211,12 @@ namespace crash_colors
         }
         // the parts' typical colors in the game's textures
         constexpr Rgb fur_reference{148, 64, 32}, chest_reference{189, 121, 115}, pants_reference{8, 52, 197}, shoes_reference{82, 36, 57},
-            hair_reference{98, 48, 41};
+            hair_reference{98, 48, 41}, gloves_reference{82, 52, 32}, eyebrows_reference{49, 32, 16};
     }
 
     const char *part_name(Part part)
     {
-        static const char *const names[]{"fur", "chest", "pants", "shoes", "hair"};
+        static const char *const names[]{"fur", "chest", "pants", "shoes", "hair", "gloves", "eyebrows"};
         return part < PartCount ? names[part] : "";
     }
     Part part_by_name(const std::string &name)
@@ -231,6 +231,10 @@ namespace crash_colors
             return Hair;
         if (key == "jaw" || key == "muzzle" || key == "belly")
             return Chest;
+        if (key == "glove")
+            return Gloves;
+        if (key == "eyebrow" || key == "brows" || key == "brow")
+            return Eyebrows;
         return PartCount;
     }
     const std::vector<std::pair<std::string, Rgb>> &palette()
@@ -313,12 +317,14 @@ namespace crash_colors
         }
         return out;
     }
-    std::vector<unsigned char> recolor_cloth(const std::vector<unsigned char> &igz, const std::optional<Rgb> &pants, const std::optional<Rgb> &shoes)
+    std::vector<unsigned char> recolor_cloth(const std::vector<unsigned char> &igz, const std::optional<Rgb> &pants, const std::optional<Rgb> &shoes,
+                                             const std::optional<Rgb> &gloves)
     {
         std::size_t header = 0;
         auto out = checked(igz, bc1_bytes, "CrashCloth_C", header);
         const auto pants_t = pants ? std::optional<Target>(target(pants_reference, *pants)) : std::nullopt;
         const auto shoes_t = shoes ? std::optional<Target>(target(shoes_reference, *shoes)) : std::nullopt;
+        const auto gloves_t = gloves ? std::optional<Target>(target(gloves_reference, *gloves)) : std::nullopt;
         for (const auto &[at, per_row] : levels(8))
         {
             auto *data = out.data() + header + at;
@@ -336,7 +342,26 @@ namespace crash_colors
                     if (hsv.h >= 0.035 && hsv.h <= 0.12 && hsv.s >= 0.4 && hsv.v <= 0.42)
                         leather[k] = true;
                 }
+            // the gloves (V1.3.3): the leather's browns, also in the blocks along its edge (shared with the shoes or the
+            // pants). In the game's texture they are all darker than 0.42; the shoes' soles (a lighter brown, 0.48 and up)
+            // are 16 blocks away
+            std::vector<bool> near_leather = leather;
+            if (gloves_t)
+                for (std::size_t k = 0; k < blocks; ++k)
+                    if (!leather[k])
+                    {
+                        const auto x = k % per_row, y = k / per_row;
+                        for (int dy = -1; dy <= 1 && !near_leather[k]; ++dy)
+                            for (int dx = -1; dx <= 1; ++dx)
+                                if (x + dx < per_row && y + dy < per_row && leather[(y + dy) * per_row + x + dx])
+                                {
+                                    near_leather[k] = true;
+                                    break;
+                                }
+                    }
             recolor_blocks(data, blocks, 8, 0, [&](std::size_t k, const double *, const Hsv &c) -> const Target * {
+                if (gloves_t && near_leather[k] && c.h <= 0.14 && c.s >= 0.3 && c.v <= 0.45)
+                    return &*gloves_t;
                 if (pants_t && c.h >= 0.5 && c.h <= 0.75 && c.s >= 0.3)
                     return &*pants_t;
                 // the shoes' dark purplish red, not the bright purple juice splashed on CrashCloth_Fruit_C
@@ -348,24 +373,31 @@ namespace crash_colors
         }
         return out;
     }
-    std::vector<unsigned char> recolor_hair(const std::vector<unsigned char> &igz, const std::optional<Rgb> &hair)
+    std::vector<unsigned char> recolor_hair(const std::vector<unsigned char> &igz, const std::optional<Rgb> &hair, const std::optional<Rgb> &eyebrows)
     {
         // CrashHair_C is BC3 (16-byte blocks, their colors at +8); CrashHair_Fruit_C is BC1 (8-byte blocks)
         const bool bc1 = image_start(igz, bc1_bytes) != 0;
         std::size_t header = 0;
         auto out = checked(igz, bc1 ? bc1_bytes : bc3_bytes, "CrashHair_C", header);
-        if (!hair)
+        if (!hair && !eyebrows)
             return out;
-        const auto hair_t = target(hair_reference, *hair);
+        const auto hair_t = hair ? std::optional<Target>(target(hair_reference, *hair)) : std::nullopt;
+        const auto eyebrows_t = eyebrows ? std::optional<Target>(target(eyebrows_reference, *eyebrows)) : std::nullopt;
         const std::size_t block_bytes = bc1 ? 8 : 16, color_at = bc1 ? 0 : 8;
         for (const auto &[at, per_row] : levels(block_bytes))
         {
-            // the dark strip along the top (the eyebrows) stays
-            const auto row = per_row, top = static_cast<std::size_t>(per_row * 0.19);
+            // the dark strip along the top is the eyebrows (V1.3.3: their own color). Their browns are all darker than
+            // 0.3; the purple space under them and the juice splashed on CrashHair_Fruit_C stay. Under the strip, down to
+            // a quarter of the way, its edge is drawn out as a dark band (v about 0.21) before the mohawk's lighter red
+            // (0.32 and up) starts; with eyebrow colors it takes theirs, so no dark rim shows at their edge from afar
+            const auto row = per_row, top = static_cast<std::size_t>(per_row * 0.19), band = static_cast<std::size_t>(per_row * 0.24);
             recolor_blocks(out.data() + header + at, row * row, block_bytes, color_at, [&](std::size_t k, const double *, const Hsv &c) -> const Target * {
+                const bool brown = (c.h <= 0.14 || c.h >= 0.95) && c.s >= 0.2;
                 if (k / row < top)
-                    return nullptr;
-                return (c.h >= 0.9 || c.h <= 0.12) && c.s >= 0.2 ? &hair_t : nullptr;
+                    return eyebrows_t && brown && c.v <= 0.45 ? &*eyebrows_t : nullptr;
+                if (eyebrows_t && k / row < band && brown && c.v <= 0.28)
+                    return &*eyebrows_t;
+                return hair_t && (c.h >= 0.9 || c.h <= 0.12) && c.s >= 0.2 ? &*hair_t : nullptr;
             });
         }
         return out;

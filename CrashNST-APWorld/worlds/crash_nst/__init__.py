@@ -1091,6 +1091,8 @@ class CrashWorld(World):
             "pants": str(self.options.crash_pants_color.current_key),
             "shoes": str(self.options.crash_shoes_color.current_key),
             "hair": str(self.options.crash_hair_color.current_key),
+            "gloves": str(self.options.crash_gloves_color.current_key),
+            "eyebrows": str(self.options.crash_eyebrows_color.current_key),
         }
         # 0 = any tier, 1 = gold or platinum, 2 = platinum only
         result["relic_requirement"] = self.options.relic_requirement.value

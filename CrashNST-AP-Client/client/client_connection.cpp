@@ -430,6 +430,12 @@ void ClientRuntime::handle_commands()
                     print_console((status.empty() ? std::string("Skin: Default Crash.") : status) + " Skins in CrashNSTAP\\skins: " +
                                   (list.empty() ? std::string("none yet") : list) + ". /skin name picks one, /skin default goes back.");
                 }
+                else if (skins::normalize(argument) == "default" && crash_colors::has_colors())
+                {
+                    // the normal Crash for this seed is the one in its colors
+                    for (const auto &line : crash_colors::wear())
+                        print_console(line);
+                }
                 else
                 {
                     const auto wanted = skins::normalize(argument);
@@ -441,7 +447,7 @@ void ClientRuntime::handle_commands()
             }
             else if (command == "/colors")
             {
-                // /colors, /colors fur blue, /colors reset: Crash's colors, from the next game start
+                // /colors: Crash's colors for this seed (from the YAML; they can't be changed during the seed)
                 for (const auto &line : crash_colors::command(argument))
                     print_console(line);
             }

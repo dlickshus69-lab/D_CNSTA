@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-// Crash colors: Crash's fur, chest (and jaw), pants, shoes and mohawk recolored in the game's own textures, keeping
+// Crash colors: Crash's fur, chest (and jaw), pants, shoes, mohawk, gloves and eyebrows recolored in the game's own textures, keeping
 // their shading. The textures are compressed in blocks of 4x4 pixels, each with two colors and a blend pattern; only
 // the two colors of each block move, so the pattern (the fur strands, the folds, the shading) stays as it was.
 // Portable: no Windows or game calls here, only bytes in and bytes out.
@@ -17,11 +17,14 @@ namespace crash_colors
         Pants,
         Shoes,
         Hair,
+        // V1.3.3
+        Gloves,
+        Eyebrows,
         PartCount
     };
-    // "fur", "chest", "pants", "shoes", "hair"
+    // "fur", "chest", "pants", "shoes", "hair", "gloves", "eyebrows"
     const char *part_name(Part part);
-    // the part by name (also "mohawk" for hair, "jaw" or "muzzle" for chest), or PartCount
+    // the part by name (also "mohawk" for hair, "jaw" or "muzzle" for chest, "glove", "eyebrow" or "brows"), or PartCount
     Part part_by_name(const std::string &name);
 
     struct Rgb
@@ -36,15 +39,17 @@ namespace crash_colors
     // the color's name as it should be written back ("light_blue", "#3366ff"), or "default"
     std::string color_text(const std::string &text);
 
-    // the five parts' colors; an empty one stays as the game has it
+    // the parts' colors; an empty one stays as the game has it
     using Colors = std::array<std::optional<Rgb>, PartCount>;
 
     // the game's textures as stored in Crash.pak (whole .igz files, 1024x1024): CrashFur_C (BC1), CrashCloth_C (BC1),
     // CrashHair_C (BC3), and their splashed variants (CrashFur_Fruit_C ..., CrashHair_Fruit_C is BC1). Each returns the recolored file, the same size, or throws when the file isn't laid out as
     // expected (another game version or a skin mod's texture)
     std::vector<unsigned char> recolor_fur(const std::vector<unsigned char> &igz, const std::optional<Rgb> &fur, const std::optional<Rgb> &chest);
-    std::vector<unsigned char> recolor_cloth(const std::vector<unsigned char> &igz, const std::optional<Rgb> &pants, const std::optional<Rgb> &shoes);
-    std::vector<unsigned char> recolor_hair(const std::vector<unsigned char> &igz, const std::optional<Rgb> &hair);
+    // CrashCloth_C also holds the gloves' brown leather; CrashHair_C has the eyebrows in the dark strip along its top
+    std::vector<unsigned char> recolor_cloth(const std::vector<unsigned char> &igz, const std::optional<Rgb> &pants, const std::optional<Rgb> &shoes,
+                                             const std::optional<Rgb> &gloves = std::nullopt);
+    std::vector<unsigned char> recolor_hair(const std::vector<unsigned char> &igz, const std::optional<Rgb> &hair, const std::optional<Rgb> &eyebrows = std::nullopt);
 
     // changes whenever the recolor or a color changes (V1.2.44: highlights ease off; V1.2.45: softer white; V1.2.48: the jaw's rim; V1.2.49: the lips; V1.2.52: the splashed variants too), so the
     // client makes each colored Crash again with the new one
