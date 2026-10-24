@@ -1191,6 +1191,10 @@ namespace ingame
         std::atomic<Address> papu_entity{0};
         std::atomic<std::uint64_t> papu_deflect_at{0}, papu_stomp_at{0}, papu_hit_at{0};
         std::atomic_uint papu_deflects{0}, papu_stomps{0}, papu_hits{0};
+        // (V1.3.29) V1.3.28's log: while he can't be hit, a stomp is bounced off by his health script itself (only its
+        // bounce for Crash, sepnt7rb, no hit): when it last did and how many times
+        std::atomic<std::uint64_t> papu_hh_bounce_at{0};
+        std::atomic_uint papu_hh_bounces{0};
         std::atomic<Address> papu_bounce_node{0}, papu_bounce_component{0}, papu_bounce_message{0};
         // research (V1.3.17) for the angel death: the death Crash's damage script plays (its 0xblwcwf's parameter,
         // ug0b8lyr) each time he dies in a boss fight, and the parameter of the hit Papu Papu's attack gives him
@@ -1580,6 +1584,9 @@ namespace ingame
                     }
                     else if (graph == "Scripts.Graph.common_BossHealthHandler" && name.find("alo0v4l5") != std::string::npos)
                         papu_hit_at = now, ++papu_hits;
+                    else if (graph == "Scripts.Graph.common_BossHealthHandler" && name.find("Crash_BounceManager") != std::string::npos &&
+                             name.find("sepnt7rb") != std::string::npos)
+                        papu_hh_bounce_at = now, ++papu_hh_bounces;
                 }
                 if (const auto papu = boss_block_actor.load(); papu && target == papu && boss_block_red.load())
                 {
@@ -5189,8 +5196,20 @@ namespace ingame
             unsigned die_steps_seen = 0;
             // V1.3.28: his stomps and deflects as seen (see papu_entity): a stomp let through is looked at 0.25 s later (did
             // his health script take it, or his deflect script bounce Crash off?); when a hit last counted
-            unsigned deflects_seen = 0, stomps_seen = 0, hits_seen = 0, stomp_lines = 0;
+            unsigned deflects_seen = 0, stomps_seen = 0, hits_seen = 0, stomp_lines = 0, hh_bounces_seen = 0;
             std::uint64_t stomp_check_at = 0, stomp_at = 0, valid_hit_at = 0;
+            // V1.3.29 (see papu_hold): his can't-be-hit flag held by us, a let-go waiting for him to sit or spin, and his
+            // flags as last seen (research)
+            bool holding = false, release_pending = false;
+            std::uint32_t flags_seen = 0, flags120_seen = 0;
+            bool flags_known = false;
+            unsigned flag_lines = 0, hold_writes = 0;
+            // V1.3.29 (see bar_count): the bar's own count of notches left (two copies), found at the fight's start and
+            // checked at his first hit
+            std::vector<std::pair<Address, unsigned>> count_places; // (object, offset)
+            std::vector<int> count_last;
+            bool count_searched = false, count_checked = false;
+            unsigned count_lines = 0;
             // V1.3.28 research (see bar_research): the blue's length as it last settled, and the bar's objects then
             float w_seen = -1, w_settling = -1;
             std::uint64_t w_since = 0;
@@ -5507,7 +5526,9 @@ namespace ingame
             const int health = t.papu && typed(t.papu, 0x1592220) && health_getter_ok() ? actor_health(t.papu) : -1;
             if (t.w_lines < 40)
                 ++t.w_lines, std::cout << "Boss bar research: the blue's length (BarParent) " << before << " -> " << w << " (his health " << health << ")\n" << std::flush;
-            if (t.snap_diffs >= 8)
+            // (V1.3.29: the diffs found the bar's count, see bar_count; only the length is logged now)
+            constexpr bool snapshots = false;
+            if (!snapshots || t.snap_diffs >= 8)
                 return;
             if (t.snap_objects.empty())
             {
@@ -5555,6 +5576,80 @@ namespace ingame
             }
             t.snap_words = std::move(words);
         }
+        // V1.3.29: the bar's own count of notches left. V1.3.28's research: two of the bar's objects (one of type
+        // +0x1623970 at +0xb4, one of type +0x1622be8 at +0x104) count down from 9, the most notches the bar draws, with each
+        // hit the game takes (a landing on red too), the blue is laid out from it, and at 0 the bar empties and goes away:
+        // with his 10 hits, one hit early (two with a landing on red that counted). So it's kept at his hits left, 9 at
+        // most: the bar lasts until his last hit, and a notch a landing on red took comes back. The places are found when
+        // the fight starts (at his full health) and used once each was seen to count one down at his first hit
+        void bar_count(BossTuning &t)
+        {
+            if (!t.papu || !t.bar_object || t.bar_hits < 1 || !typed(t.papu, 0x1592220) || !health_getter_ok())
+                return;
+            const int most = std::min(t.bar_hits, 9), health = actor_health(t.papu);
+            // (a place that's no longer what it was: the bar was made again; looked for again)
+            for (std::size_t i = 0; i < t.count_places.size(); ++i)
+            {
+                const auto [a, off] = t.count_places[i];
+                if (!typed(a, off == 0xb4 ? 0x1623970 : 0x1622be8))
+                {
+                    t.count_places.clear(), t.count_last.clear(), t.count_searched = false;
+                    break;
+                }
+            }
+            if (!t.count_searched)
+            {
+                if (health != t.bar_hits * 100)
+                    return;
+                t.count_searched = true, t.count_checked = false;
+                std::vector<std::pair<Address, unsigned>> found;
+                bar_reach(t.bar_object, 5, 3000, found);
+                for (const auto &[a, depth] : found)
+                    if (typed(a, 0x1623970) && value<int>(a + 0xb4) == most)
+                        t.count_places.emplace_back(a, 0xb4);
+                    else if (typed(a, 0x1622be8) && value<int>(a + 0x104) == most)
+                        t.count_places.emplace_back(a, 0x104);
+                t.count_last.clear();
+                for (const auto &[a, off] : t.count_places)
+                    t.count_last.push_back(value<int>(a + off));
+                if (t.count_lines < 20)
+                    ++t.count_lines, std::cout << "Boss bar: its own count of notches left found in " << t.count_places.size() << " places (" << most << ", at his full health)\n"
+                                               << std::flush;
+                return;
+            }
+            const int target = std::min(most, std::clamp((health + 99) / 100, 0, 1000));
+            for (std::size_t i = 0; i < t.count_places.size(); ++i)
+            {
+                const auto [a, off] = t.count_places[i];
+                const int v = value<int>(a + off);
+                if (!t.count_checked)
+                {
+                    // his first hit: a count goes one down (anything else: not a count, dropped)
+                    if (v == t.count_last[i])
+                        continue;
+                    t.count_checked = true;
+                    std::vector<std::pair<Address, unsigned>> kept;
+                    std::vector<int> last;
+                    for (std::size_t j = 0; j < t.count_places.size(); ++j)
+                    {
+                        const auto [b, boff] = t.count_places[j];
+                        if (value<int>(b + boff) == most - 1)
+                            kept.push_back(t.count_places[j]), last.push_back(most - 1);
+                    }
+                    if (t.count_lines < 20)
+                        ++t.count_lines, std::cout << "Boss bar: at his first hit " << kept.size() << " of the " << t.count_places.size() << " places counted one down\n" << std::flush;
+                    t.count_places = std::move(kept), t.count_last = std::move(last);
+                    return bar_count(t);
+                }
+                if (v < target && v >= 0)
+                {
+                    write(a + off, target);
+                    if (t.count_lines < 20)
+                        ++t.count_lines, std::cout << "Boss bar: its count " << v << " -> " << target << " (his health " << health << ")\n" << std::flush;
+                }
+                t.count_last[i] = value<int>(a + off);
+            }
+        }
         void stretch_bar_fill(BossTuning &t, const Shared &state, std::uint64_t now)
         {
             if (!t.bar_object)
@@ -5575,6 +5670,7 @@ namespace ingame
             if (std::isfinite(width) && width > t.fill_full && width < 5000)
                 t.fill_full = width;
             bar_research(t, now);
+            bar_count(t);
             // the bar's own HealthBar as wide as its setting's (a bar made before the setting changed gets it at its next
             // layout: his first hit, or a death); not with /bar_try none, to compare
             const float stretch = state.bar_try_target == 1 ? 1.0f : bar_stretch(t.bar_game_hits, t.bar_hits);
@@ -6536,6 +6632,56 @@ namespace ingame
                       << t.vuln_episodes[0] << " and " << t.vuln_episodes[1] << " times seen)" << out.str() << "\n" << std::flush;
             t.vuln.clear();
         }
+        // V1.3.29: his can't-be-hit time for all of his red time. V1.3.28's log: with the game's immunity after a hit (5.5 s)
+        // a stomp on him only bounced Crash off (his health script's own bounce, no hit), but his red time lasts until the
+        // end of his next spin, up to 12 s after the hit, and the landings after the immunity were hits again. And V1.3.28's
+        // research found what the immunity and his getting up both do to him: one flag of his actor (+0x7c, 0x8) is set
+        // whenever he can be hit and clear while he can't. So while he's red, sitting or spinning, that flag is kept clear
+        // (after the game's immunity it would come back on), and it's set again once he's no longer red, when he sits or
+        // spins (a fight starting over waits for that). His flags and +0x120 go to the log as they change (research)
+        constexpr unsigned papu_flags_at = 0x7c, papu_hittable = 0x8;
+        void papu_hold(BossTuning &t, bool red, int s, std::uint64_t now)
+        {
+            if (!typed(t.papu, 0x1592220))
+                return;
+            const auto at = t.papu + papu_flags_at;
+            const auto flags = value<std::uint32_t>(at), other = value<std::uint32_t>(t.papu + 0x120);
+            if ((!t.flags_known || flags != t.flags_seen || other != t.flags120_seen) && t.flag_lines < 80)
+            {
+                ++t.flag_lines;
+                std::cout << "Boss rule research: his flags " << (t.flags_known ? std::to_string(t.flags_seen) + " -> " : std::string()) << flags << ", +0x120 "
+                          << (t.flags_known ? std::to_string(t.flags120_seen) + " -> " : std::string()) << other << " (state " << s << (red ? ", red" : "")
+                          << (t.valid_hit_at ? ", " + seconds(now - t.valid_hit_at) + " after his last hit" : std::string()) << ")\n" << std::flush;
+            }
+            t.flags_known = true, t.flags_seen = flags, t.flags120_seen = other;
+            const bool hold = red && (s == 1 || s == 2);
+            if (hold)
+            {
+                t.release_pending = false;
+                if (flags & papu_hittable)
+                {
+                    write(at, flags & ~papu_hittable);
+                    t.flags_seen = flags & ~papu_hittable;
+                    if (!t.holding)
+                        std::cout << "Boss rule: Papu Papu can't be hit while he's red (his flag held, " << seconds(now - t.valid_hit_at) << " after his last hit)\n" << std::flush;
+                    t.holding = true, ++t.hold_writes;
+                }
+                return;
+            }
+            if (t.holding)
+                t.holding = false, t.release_pending = true;
+            if (t.release_pending && (s == 1 || s == 2))
+            {
+                t.release_pending = false;
+                if (!(flags & papu_hittable))
+                {
+                    write(at, flags | papu_hittable);
+                    t.flags_seen = flags | papu_hittable;
+                }
+                std::cout << "Boss rule: Papu Papu can be hit again (his flag let go; held with " << t.hold_writes << " writes)\n" << std::flush;
+                t.hold_writes = 0;
+            }
+        }
         // (V1.3.28) Crash bounced off Papu Papu the way his deflect script does it: its own node for Crash's bounce, as it
         // last sent it (it bounces Crash off after each hit too, so it's known after his first)
         bool papu_bounce()
@@ -6570,6 +6716,22 @@ namespace ingame
                 if (state.boss_rules && red && !same_stomp)
                     landing = 1;
             }
+            // (V1.3.29) his health script bouncing Crash off without a hit (V1.3.28's log: that's a stomp while he can't
+            // be hit; the bounce of a hit that counts comes right after the hit)
+            if (const auto n = papu_hh_bounces.load(); n != t.hh_bounces_seen)
+            {
+                t.hh_bounces_seen = n;
+                const auto at = papu_hh_bounce_at.load(), hit = papu_hit_at.load();
+                const bool with_hit = hit && at >= hit && at - hit < 400;
+                if (!with_hit)
+                {
+                    if (t.stomp_lines < 40)
+                        ++t.stomp_lines, std::cout << "Boss rule: his health script bounced Crash off a stomp without a hit (state " << s << (red ? ", red" : "") << ", "
+                                                   << since_hit() << (t.holding ? ", his can't-be-hit flag held by us" : "") << ")\n" << std::flush;
+                    if (state.boss_rules && red && landing == 0)
+                        landing = 3;
+                }
+            }
             if (const auto n = papu_stomps.load(); n != t.stomps_seen)
                 t.stomps_seen = n, t.stomp_at = papu_stomp_at.load(), t.stomp_check_at = now + 250;
             if (t.stomp_check_at && now >= t.stomp_check_at)
@@ -6586,7 +6748,9 @@ namespace ingame
                 return;
             std::ostringstream line;
             line << "Boss rule: Crash landed on Papu Papu while he was red (" << seconds(now - t.red_since) << " into it)";
-            if (landing == 1)
+            if (landing == 3)
+                line << "; he bounced off (the game's own bounce while Papu Papu can't be hit: no hit for him)";
+            else if (landing == 1)
                 line << "; he bounced off (the game's own bounce, with Papu Papu's immunity: no hit for him)";
             else
                 line << "; the stomp did nothing, " << (papu_bounce() ? "so he's bounced off the way the deflect script does it" : "and the deflect script's bounce isn't known yet");
@@ -6746,6 +6910,7 @@ namespace ingame
                 t.forbidden = false;
             const bool red = state.boss_rules && ((t.punished && (s == 1 || s == 2)) || (t.forbidden && s == 3));
             papu_landings(t, state, red, s, now);
+            papu_hold(t, red, s, now);
             vuln_research(t, red, s, now);
             // research (V1.3.19): Crash's damage and Aku Aku scripts' settings at the fight's start, after a death and after Papu
             // Papu's attack hits him: what holds the angel death, and what a hit with a mask does
@@ -6936,6 +7101,7 @@ namespace ingame
                 // (V1.3.28) Papu Papu's stomps from here on only
                 papu_entity = 0, papu_bounce_node = 0, papu_bounce_component = 0, papu_bounce_message = 0;
                 t.deflects_seen = papu_deflects.load(), t.stomps_seen = papu_stomps.load(), t.hits_seen = papu_hits.load();
+                t.hh_bounces_seen = papu_hh_bounces.load();
                 {
                     // (a hit kept from his spin belongs to this visit's objects)
                     std::lock_guard lock(hit_capture_mutex);
