@@ -310,8 +310,8 @@ class OneUpWeight(Range):
 
 class AkuAkuMaskWeight(Range):
     """How often a filler item is an Aku Aku Mask compared to the other fillers. When it arrives, Crash gets a mask
-    as if he had picked one up from an Aku Aku crate (in the next level, once he can move): it takes one hit, and on
-    top of a mask it gives a second one. It works with Aku Aku Sanity too, before you have found the Aku Aku item.
+    as if he had picked one up from an Aku Aku crate (in the next level, once he can move): it takes one hit, and on top of a mask it gives the next one, as a crate's does
+    (two masks make Aku gold, three give the invincibility). It works with Aku Aku Sanity too, before you have found the Aku Aku item.
     0 (the default) leaves it out."""
 
     display_name = "Aku Aku Mask Filler Weight"

@@ -601,11 +601,14 @@ def requirements(level, event):
     colors = CRATE_GEM_REQUIREMENTS.get((level.key, event), colors)
     required.extend(f"Crash {level.campaign} - {color} Gem" for color in colors)
     # main-path clears and crystals must not inherit optional box/bonus power gates
-    # keep conservative power requirements for the remaining on-foot objectives
+    # Crash 3 powers: only for relics (the time trials), as many as the original game gives by that level. Boxes, gems
+    # and secret exits need none (PowerPyx's Crash 3 guide: no level needs a power for its boxes or gems; the Fruit
+    # Bazooka only makes crates easier). Until V1.3.1 they needed them too, so every box in a later Crash 3 level showed
+    # as out of logic (Flaming Passion's checkpoint crate needed four powers).
     if (
         level.campaign == 3
         and level.key not in C3_VEHICLE_LEVELS
-        and event not in ("clear", "crystal")
+        and event == "relic"
     ):
         if level.key.startswith("B"):
             count = int(level.key[2:]) - 1

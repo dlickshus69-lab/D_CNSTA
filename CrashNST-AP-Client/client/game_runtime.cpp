@@ -4310,6 +4310,11 @@ namespace ingame
             // first: 2 = his settings as they are with the lock off and no mask (what the lock leaves otherwise keeps the
             // mask from coming out)
             int prepare = 0;
+            // a mask on top of a mask (V1.3.1): it worked once Aku's manager is in this state (2: the gold mask, 3: the
+            // invincibility), not merely once a mask is out
+            int expect_state = 0;
+            // the last resort: Aku's manager's state and the game's count set to this many masks, nothing sent
+            int set_masks = 0;
         };
         // V1.2.39's log, lock on, before /aku_give: these of Aku's manager's settings differ from the lock off with no
         // mask (V1.2.34's log). Set back to the lock-off values
@@ -4390,6 +4395,8 @@ namespace ingame
                 aku_send(component, step.node), sent = true;
             for (const auto &id : step.ids)
                 sent = (component && aku_send_message(component, id)) || sent;
+            if (component && step.set_masks)
+                aku_set_masks(component, step.set_masks), sent = true;
             const auto [state, mask] = aku_manager_state(actor);
             // Crash takes the mask only once its model is out (V1.2.38 with the lock on: no model came out, but his
             // state said 1 mask, and the next /aku_give made it 2)
@@ -4412,7 +4419,16 @@ namespace ingame
             const auto label = aku_steps[aku_step].label;
             std::cout << "Aku give: a second after " << label << ", Aku's manager is in state " << state << (mask ? ", WITH A MASK OUT" : ", no mask out")
                       << "\n" << std::flush;
-            if (mask)
+            if (const int expect = aku_steps[aku_step].expect_state; expect && mask && state >= expect)
+            {
+                // the game took it as a crate's mask: its look changed by itself; the game's mask count (what a hit
+                // checks) follows his state
+                std::cout << "Aku give: this worked: " << label << " (" << state << " masks)\n" << std::flush;
+                aku_give_count(std::min(state, 3));
+                aku_steps.clear();
+                return;
+            }
+            if (mask && !aku_steps[aku_step].expect_state)
             {
                 std::cout << "Aku give: this worked: " << label << "\n" << std::flush;
                 // the model came out after the step, not right away: Crash takes the mask now
@@ -4501,13 +4517,62 @@ namespace ingame
             const auto [state_before, model_out] = aku_manager_state(actor);
             const int masks_before = model_out ? std::clamp(state_before, 1, 3) : 0;
             const bool had_mask = model_out;
-            // a mask already out: one more, as a second crate's would (two masks take two hits). Its model is already
-            // there, so nothing new is brought out
+            const auto meta = value<Address>(component + 56);
+            const auto message = aku_message(component, "fcbn65ha").first;
+            // fcbn65ha's "yes" node: the one a pickup runs (two values: a +0x1754fe0 source, then a constant yes)
+            const auto says_yes = [&](Address node)
+            {
+                const auto sources = list(value<Address>(node + 32), 16);
+                return typed(node, 0x13bc390) && value<Address>(node + 16) == message && typed(value<Address>(node + 32), 0x1745070) && sources.size() == 2 &&
+                       typed(sources[0], 0x1754fe0) && typed(sources[1], 0x1748280) && (value<std::uint64_t>(sources[1] + 24) & 0xff) == 1;
+            };
+            Address yes_node = 0;
+            if (message)
+            {
+                // (found once per script: the search reads the memory around it)
+                static Address found_for = 0, found = 0;
+                if (const auto pickup = aku_pickup_node.load(); pickup && says_yes(pickup))
+                    yes_node = pickup;
+                else if (found_for == meta && found && says_yes(found))
+                    yes_node = found;
+                else
+                    for (const auto node : aku_send_nodes(meta, message))
+                        if (says_yes(node))
+                        {
+                            yes_node = found = node, found_for = meta;
+                            break;
+                        }
+            }
+            if (yes_node)
+                std::cout << "Aku give: fcbn65ha's yes node is at script " << (yes_node >= meta ? "+0x" : "-0x") << std::hex
+                          << (yes_node >= meta ? yes_node - meta : meta - yes_node) << std::dec << send_arguments(yes_node) << "\n" << std::flush;
+            else
+                std::cout << "Aku give: fcbn65ha's yes node wasn't found\n" << std::flush;
+            // a mask already out: one more, the way a crate's does it (V1.3.1): only the pickup's "yes", from his state as
+            // it is, and his own script does the rest: the gold mask at two, the invincibility at three. Until V1.3 the
+            // client only set the count to two (two hits, but the first mask's look, and never three: V1.3's clip)
             if (had_mask)
             {
-                const int masks = std::min(masks_before, 1) + 1;
-                std::cout << "Aku give: Crash already has a mask; now " << masks << "\n" << std::flush;
-                aku_set_masks(component, masks);
+                if (masks_before >= 3)
+                {
+                    std::cout << "Aku give: Crash already has three masks; one more adds nothing, as a crate's wouldn't\n" << std::flush;
+                    return;
+                }
+                if (yes_node)
+                {
+                    AkuGiveStep up;
+                    up.label = "a mask on top of Crash's (the pickup, as a crate's)";
+                    up.node = yes_node, up.type = value<Address>(yes_node), up.message = message;
+                    up.expect_state = masks_before + 1;
+                    aku_steps.push_back(up);
+                }
+                // if that didn't do it: the count only (two hits, the look stays)
+                AkuGiveStep count_only;
+                count_only.label = "the mask count only";
+                count_only.set_masks = masks_before + 1;
+                aku_steps.push_back(count_only);
+                aku_step = 0;
+                aku_run_step(actor);
                 return;
             }
             // no mask on screen: Aku's manager and the game's count start from no mask. V1.2.39's log: with the lock on he
@@ -4525,40 +4590,9 @@ namespace ingame
             chain.prepare = 2;
             // (sppqmskb isn't sent: tjpwzf3m's own handling sends it, as in a real pickup)
             chain.ids = {"a9nnfx8i", "9becl2sc", "tjpwzf3m", "202aweq4", "9nj5heau", "nr69k1wc"};
-            chain.count = !had_mask;
-            const auto meta = value<Address>(component + 56);
-            const auto message = aku_message(component, "fcbn65ha").first;
-            // fcbn65ha's "yes" node: the one a pickup runs (two values: a +0x1754fe0 source, then a constant yes)
-            const auto says_yes = [&](Address node)
-            {
-                const auto sources = list(value<Address>(node + 32), 16);
-                return typed(node, 0x13bc390) && value<Address>(node + 16) == message && typed(value<Address>(node + 32), 0x1745070) && sources.size() == 2 &&
-                       typed(sources[0], 0x1754fe0) && typed(sources[1], 0x1748280) && (value<std::uint64_t>(sources[1] + 24) & 0xff) == 1;
-            };
-            if (message)
-            {
-                // (found once per script: the search reads the memory around it)
-                static Address found_for = 0, found = 0;
-                if (const auto pickup = aku_pickup_node.load(); pickup && says_yes(pickup))
-                    chain.node = pickup;
-                else if (found_for == meta && found && says_yes(found))
-                    chain.node = found;
-                else
-                    for (const auto node : aku_send_nodes(meta, message))
-                        if (says_yes(node))
-                        {
-                            chain.node = found = node, found_for = meta;
-                            break;
-                        }
-            }
-            if (chain.node)
-            {
-                chain.type = value<Address>(chain.node), chain.message = message;
-                std::cout << "Aku give: fcbn65ha's yes node is at script " << (chain.node >= meta ? "+0x" : "-0x") << std::hex
-                          << (chain.node >= meta ? chain.node - meta : meta - chain.node) << std::dec << send_arguments(chain.node) << "\n" << std::flush;
-            }
-            else
-                std::cout << "Aku give: fcbn65ha's yes node wasn't found; the rest of the chain goes anyway\n" << std::flush;
+            chain.count = true;
+            if (yes_node)
+                chain.node = yes_node, chain.type = value<Address>(yes_node), chain.message = message;
             aku_steps.push_back(chain);
             // once more if the model didn't come out the first time
             auto again = chain;
