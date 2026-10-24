@@ -1196,6 +1196,46 @@ namespace ingame
         std::atomic<std::uint64_t> papu_hh_bounce_at{0};
         std::atomic_uint papu_hh_bounces{0};
         std::atomic<Address> papu_bounce_node{0}, papu_bounce_component{0}, papu_bounce_message{0};
+        // V1.3.31 research (the probe in event_sent): what each message to Papu Papu changes while the game handles it:
+        // his health, the bar's count of notches left, his immunity's timer (his health script's TimerAction), his
+        // can-be-hit flag and his AI's state. Where to read the count, the timer's pointer and the state (set by
+        // papu_rule), and how deep in other messages a message came
+        std::atomic<Address> probe_count_at{0}, probe_timer_at{0}, probe_state_at{0}, probe_damage_at{0};
+        std::atomic_uint probe_lines{0};
+        thread_local int probe_depth = 0;
+        struct PapuProbe
+        {
+            int damage = 0, count = -1, state = -1;
+            Address timer = 0;
+            std::uint32_t t48 = 0, t50 = 0, flags = 0;
+            bool operator==(const PapuProbe &o) const
+            {
+                return damage == o.damage && count == o.count && state == o.state && timer == o.timer && t48 == o.t48 && t50 == o.t50 && flags == o.flags;
+            }
+        };
+        PapuProbe papu_probe_read(Address papu)
+        {
+            PapuProbe p;
+            if (const auto at = probe_damage_at.load())
+                p.damage = value<int>(at);
+            if (const auto at = probe_count_at.load())
+                p.count = value<int>(at);
+            if (const auto at = probe_state_at.load())
+                p.state = value<int>(at);
+            if (const auto at = probe_timer_at.load())
+                if ((p.timer = value<Address>(at)))
+                    p.t48 = value<std::uint32_t>(p.timer + 0x48), p.t50 = value<std::uint32_t>(p.timer + 0x50);
+            p.flags = value<std::uint32_t>(papu + 0x7c);
+            return p;
+        }
+        std::string probe_float(std::uint32_t bits)
+        {
+            float f = 0;
+            std::memcpy(&f, &bits, 4);
+            std::ostringstream out;
+            out << f;
+            return out.str();
+        }
         // research (V1.3.17) for the angel death: the death Crash's damage script plays (its 0xblwcwf's parameter,
         // ug0b8lyr) each time he dies in a boss fight, and the parameter of the hit Papu Papu's attack gives him
         // (ha5y20l3's x9pcuxft). V1.3.16 changed the first to Papu Papu's attack's death (from his settings) for a landing
@@ -1746,6 +1786,47 @@ namespace ingame
                         ++near_crate_lines, log_event(event, component, "near an Aku Aku crate: " + event_object(target), context);
                 }
             }
+            // V1.3.31 research: what each message to Papu Papu changes while the game handles it (see PapuProbe), to
+            // find what starts his immunity (for red from the fight's start) and what steps the bar down (to keep a hit
+            // off it). A message inside another one shows inside its own line and its outer one's
+            if (const auto papu = papu_entity.load(); papu && event && context && probe_lines.load() < 240)
+                if (const auto component = value<Address>(context); component && value<Address>(component + 24) == papu && typed(papu, 0x1592220))
+                {
+                    const auto before = papu_probe_read(papu);
+                    const int depth = probe_depth++;
+                    const auto result = reinterpret_cast<Address (*)(Address, Address)>(event_hook.original)(event, context);
+                    --probe_depth;
+                    const auto after = papu_probe_read(papu);
+                    if (!(after == before) && probe_lines.load() < 240)
+                    {
+                        ++probe_lines;
+                        auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
+                        if (graph.rfind("Scripts.Graph.", 0) == 0)
+                            graph.erase(0, 14);
+                        auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                        if (const auto id = name.find("_id_"); id != std::string::npos)
+                            name = name.substr(id + 4);
+                        if (const auto def = name.find("_Definition"); def != std::string::npos)
+                            name.erase(def);
+                        std::ostringstream out;
+                        out << "Boss probe: his " << graph << " gets " << name << (depth ? " (inside " + std::to_string(depth) + ")" : std::string()) << ":";
+                        if (after.damage != before.damage)
+                            out << " his damage " << before.damage << " -> " << after.damage << ";";
+                        if (after.count != before.count)
+                            out << " bar count " << before.count << " -> " << after.count << ";";
+                        if (after.timer != before.timer)
+                            out << " timer 0x" << std::hex << before.timer << " -> 0x" << after.timer << std::dec << ";";
+                        if (after.t48 != before.t48 || after.t50 != before.t50)
+                            out << " timer +0x48 " << probe_float(before.t48) << " -> " << probe_float(after.t48) << ", +0x50 " << probe_float(before.t50) << " -> "
+                                << probe_float(after.t50) << ";";
+                        if (after.flags != before.flags)
+                            out << " flags " << before.flags << " -> " << after.flags << ";";
+                        if (after.state != before.state)
+                            out << " AI state " << before.state << " -> " << after.state << ";";
+                        std::cout << out.str() << "\n" << std::flush;
+                    }
+                    return result;
+                }
             return reinterpret_cast<Address (*)(Address, Address)>(event_hook.original)(event, context);
         }
         // research: the yes/no and number game variables' function tables, side by side, marking the yes/no getter
@@ -5203,11 +5284,26 @@ namespace ingame
             std::uint64_t immune_until = 0, immune_health_at = 0, game_hit_at = 0;
             int immune_health = -1;
             unsigned red_lines = 0;
-            // V1.3.30 research: his health script's timer (_Internal_TimerAction_id_5s6p54hm_timer): does it run for his
-            // immunity? (his health script, where the timer is, the timer as last seen, since when)
-            Address hh = 0, hh_timer = 0;
-            unsigned hh_timer_at = 0, hh_timer_lines = 0;
-            std::uint64_t hh_timer_since = 0;
+            // V1.3.30: his health script and where its immunity's timer is (_Internal_TimerAction_id_5s6p54hm_timer: V1.3.30's
+            // log, a timer of type +0x17610b8 made at his first hit, with +0x48 and +0x50 the immunity's length as it starts)
+            Address hh = 0;
+            unsigned hh_timer_at = 0;
+            // V1.3.31 (see papu_immune_watch and papu_cut): his immunity as his can-be-hit flag shows it, since when, and
+            // whether it was cut at the end of his spin (when, and whether his flag came back after); the timer's numbers as
+            // the immunity started, and the ones seen counting down (or up) with time
+            bool immune_flag = false, cut_done = false, cut_checked = false, timer_sampled = false;
+            std::uint64_t immune_since = 0, cut_at = 0, timer_start_at = 0;
+            std::array<std::uint32_t, 32> timer_start{};
+            Address timer_started = 0;
+            std::vector<unsigned> timer_down, timer_up;
+            float timer_length = 0;
+            unsigned timer_lines = 0, cut_lines = 0;
+            // V1.3.31 research (see bar_frames): the bar's objects as it last settled, and at a hit as it steps down
+            std::vector<std::uint32_t> bar_settled_frame;
+            bool bar_settled_taken = false;
+            std::vector<std::vector<std::uint32_t>> bar_frames;
+            std::vector<std::uint64_t> bar_frame_due;
+            unsigned bar_frame_hits = 0;
             // V1.3.29 (see bar_count): the bar's own count of notches left (two copies), found at the fight's start and
             // checked at his first hit
             std::vector<std::pair<Address, unsigned>> count_places; // (object, offset)
@@ -5588,6 +5684,89 @@ namespace ingame
             }
             t.snap_words = std::move(words);
         }
+        // V1.3.31 research: how the bar shows a hit. V1.3.30's clips: the blue's length written between his hits doesn't
+        // show (the bar only redraws as it's hit), so after his first hit it still showed a notch gone, and at his second
+        // it stepped down from full to that same place again. The bar's objects (as found with its count) as it last
+        // settled, as a hit's count change is seen, and 0.1, 0.2, 0.4 and 1 s later: what moves while it steps down, and
+        // what changed at the hit and stayed, go to the log (his first two hits)
+        std::vector<std::uint32_t> bar_snapshot(const BossTuning &t)
+        {
+            std::vector<std::uint32_t> words(t.snap_objects.size() * 0x80), one(0x80);
+            for (std::size_t k = 0; k < t.snap_objects.size(); ++k)
+                if (read(t.snap_objects[k], one))
+                    std::copy(one.begin(), one.end(), words.begin() + static_cast<std::ptrdiff_t>(k * 0x80));
+            return words;
+        }
+        std::string word_text(std::uint32_t w)
+        {
+            if (!w)
+                return "0";
+            float f = 0;
+            std::memcpy(&f, &w, 4);
+            const auto i = static_cast<std::int32_t>(w);
+            std::ostringstream out;
+            if (std::isfinite(f) && std::abs(f) >= 1e-4f && std::abs(f) < 1e7f && (i > 0x1000000 || i < -0x1000000))
+                out << f;
+            else if (i > -10000000 && i < 10000000)
+                out << i;
+            else
+                out << "0x" << std::hex << w;
+            return out.str();
+        }
+        void bar_frames_start(BossTuning &t, std::uint64_t now)
+        {
+            t.bar_settled_taken = false;
+            if (t.bar_frame_hits >= 2 || t.bar_settled_frame.empty() || !t.bar_frame_due.empty())
+                return;
+            ++t.bar_frame_hits;
+            t.bar_frames.clear();
+            t.bar_frames.push_back(t.bar_settled_frame);
+            t.bar_frames.push_back(bar_snapshot(t));
+            t.bar_frame_due = {now + 100, now + 200, now + 400, now + 1000};
+        }
+        void bar_frames(BossTuning &t, std::uint64_t now)
+        {
+            if (t.bar_frame_due.empty() || now < t.bar_frame_due.front())
+                return;
+            t.bar_frame_due.erase(t.bar_frame_due.begin());
+            t.bar_frames.push_back(bar_snapshot(t));
+            if (!t.bar_frame_due.empty())
+                return;
+            const auto &f = t.bar_frames;
+            const auto n = f.empty() ? 0 : f[0].size();
+            if (f.size() != 6 || std::any_of(f.begin(), f.end(), [&](const auto &frame) { return frame.size() != n; }))
+            {
+                t.bar_frames.clear();
+                return;
+            }
+            // [0] settled before, [1] at the hit, [2] 0.1 s, [3] 0.2 s, [4] 0.4 s, [5] 1 s
+            std::array<unsigned, 3> found{}, shown{};
+            constexpr std::array<unsigned, 3> most{45, 10, 40};
+            constexpr std::array<const char *, 3> what{"moved", "keeps moving", "stepped"};
+            std::ostringstream out;
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                const bool moved = f[1][i] != f[2][i] || f[2][i] != f[3][i] || f[3][i] != f[4][i];
+                const int kind = moved ? (f[4][i] == f[5][i] ? 0 : 1) : (f[0][i] != f[1][i] && f[1][i] == f[5][i] ? 2 : -1);
+                if (kind < 0)
+                    continue;
+                ++found[kind];
+                if (shown[kind] >= most[kind])
+                    continue;
+                ++shown[kind];
+                const auto k = i / 0x80;
+                const auto vt = value<Address>(t.snap_objects[k]);
+                out << "\nBoss bar frames: " << what[kind] << " #" << k << " 0x" << std::hex << t.snap_objects[k] << std::dec
+                    << (vt >= base() && vt < module_end() ? " type " + hex(static_cast<unsigned>(vt - base())) : std::string()) << " " << hex(static_cast<unsigned>((i % 0x80) * 4))
+                    << ":";
+                for (const auto &frame : f)
+                    out << " " << word_text(frame[i]);
+            }
+            std::cout << "Boss bar frames: hit " << t.bar_frame_hits << " (as it settled before, at the hit, 0.1, 0.2, 0.4 and 1 s after): " << found[0]
+                      << " numbers moved while it stepped down, " << found[1] << " kept moving, " << found[2] << " changed at the hit and stayed" << out.str() << "\n"
+                      << std::flush;
+            t.bar_frames.clear();
+        }
         // V1.3.29: the bar's own count of notches left. V1.3.28's research: two of the bar's objects (one of type
         // +0x1623970 at +0xb4, one of type +0x1622be8 at +0x104) count down from 9, the most notches the bar draws, with each
         // hit the game takes (a landing on red too), the blue is laid out from it, and at 0 the bar empties and goes away:
@@ -5635,6 +5814,10 @@ namespace ingame
                 for (const auto &[a, off] : t.count_places)
                     t.count_last.push_back(value<int>(a + off));
                 t.count_since = now;
+                t.snap_objects.clear(), t.bar_settled_frame.clear(), t.bar_settled_taken = false;
+                for (const auto &[a, depth] : found)
+                    t.snap_objects.push_back(a);
+                probe_count_at = t.count_places.empty() ? 0 : t.count_places[0].first + t.count_places[0].second;
                 if (t.count_lines < 30)
                     ++t.count_lines, std::cout << "Boss bar: its own count of notches left found in " << t.count_places.size() << " places (" << most << ", at his full health); "
                                                << t.w_targets.size() << " objects may hold the length the blue heads to (" << full << ")\n" << std::flush;
@@ -5646,6 +5829,9 @@ namespace ingame
             // settled: the blue's length the same for 0.6 s, and the count too
             const float w = value<float>(t.bar_parent + 0x98);
             const bool settled = std::isfinite(w) && std::abs(w - t.w_settling) < 0.01f && now - t.w_since >= 600 && now - t.count_since >= 600;
+            // (V1.3.31 research, see bar_frames) the bar as it last settled, before each of his first two hits
+            if (settled && !t.bar_settled_taken && t.bar_frame_hits < 2 && t.bar_frame_due.empty() && !t.snap_objects.empty())
+                t.bar_settled_frame = bar_snapshot(t), t.bar_settled_taken = true;
             if (!t.count_checked)
             {
                 // (the full length, before his first hit)
@@ -5657,6 +5843,7 @@ namespace ingame
                     changed = changed || count_at(i) != t.count_last[i];
                 if (!changed)
                     return;
+                bar_frames_start(t, now);
                 t.count_checked = true, t.count_since = now;
                 std::vector<std::pair<Address, unsigned>> kept;
                 std::vector<int> last;
@@ -5666,6 +5853,7 @@ namespace ingame
                 if (t.count_lines < 30)
                     ++t.count_lines, std::cout << "Boss bar: at his first hit " << kept.size() << " of the " << t.count_places.size() << " places counted one down\n" << std::flush;
                 t.count_places = std::move(kept), t.count_last = std::move(last);
+                probe_count_at = t.count_places.empty() ? 0 : t.count_places[0].first + t.count_places[0].second;
                 return;
             }
             if (t.count_places.empty())
@@ -5675,6 +5863,8 @@ namespace ingame
             for (std::size_t i = 0; i < t.count_places.size(); ++i)
                 if (count_at(i) != t.count_last[i])
                     t.bar_ours = false, t.w_fixes = 0, t.count_since = now, game_changed = true;
+            if (game_changed)
+                bar_frames_start(t, now);
             if (settled && !game_changed && !t.bar_ours)
             {
                 t.w_for_count.emplace(count_at(0), w);
@@ -5749,6 +5939,7 @@ namespace ingame
                 t.fill_full = width;
             bar_research(t, now);
             bar_count(t, now);
+            bar_frames(t, now);
             // the bar's own HealthBar as wide as its setting's (a bar made before the setting changed gets it at its next
             // layout: his first hit, or a death); not with /bar_try none, to compare
             const float stretch = state.bar_try_target == 1 ? 1.0f : bar_stretch(t.bar_game_hits, t.bar_hits);
@@ -5962,7 +6153,7 @@ namespace ingame
                     laps = t.laps_start + taken * (t.papu_original - 1) / (total - 1);
                 }
             }
-            return std::clamp(5.0f + 1.3f * static_cast<float>(std::clamp(laps, 1, 12)), 6.0f, 16.0f);
+            return std::clamp(5.5f + 1.4f * static_cast<float>(std::clamp(laps, 1, 12)), 7.0f, 16.0f);
         }
         std::map<std::string, float> game_immune;
         bool boss_immune_changed = false;
@@ -5973,7 +6164,7 @@ namespace ingame
                 return;
             // (for the research on his health script's timer, see papu_rule)
             if (t.hh != c)
-                t.hh = c, t.hh_timer = 0, t.hh_timer_since = 0, t.hh_timer_at = field_offset(value<Address>(c + 56), "_Internal_TimerAction_id_5s6p54hm_timer", 8);
+                t.hh = c, t.hh_timer_at = field_offset(value<Address>(c + 56), "_Internal_TimerAction_id_5s6p54hm_timer", 8);
             const auto field = field_named(value<Address>(data + 32), "OnTakeHitImmuneTime");
             if (!field || value<Address>(field) != base() + 0x17afe98 || value<std::uint16_t>(field + 22) != 4)
             {
@@ -6818,12 +7009,125 @@ namespace ingame
             std::cout << line.str() << "\n" << std::flush;
             t.blocked_told = now, t.blocked_seen = boss_blocked.load();
         }
+        std::string offsets_text(const std::vector<unsigned> &list)
+        {
+            std::string out;
+            for (const auto off : list)
+                out += (out.empty() ? "" : ", ") + hex(off);
+            return out.empty() ? std::string("none") : out;
+        }
+        // V1.3.31: his immunity's timer (his health script's TimerAction, type +0x17610b8, made at his first hit; see
+        // papu_immunity), or 0
+        Address papu_timer(const BossTuning &t)
+        {
+            if (!t.hh || !t.hh_timer_at || !typed(t.hh, 0x13bbbd0))
+                return 0;
+            const auto timer = value<Address>(t.hh + t.hh_timer_at);
+            return timer && typed(timer, 0x17610b8) ? timer : 0;
+        }
+        // V1.3.31: each immunity of his as it starts (his can-be-hit flag clears): the timer's numbers then, and a third of a
+        // second later the ones that counted the time down (or up), for papu_cut; half a second after a cut, whether his
+        // flag came back
+        void papu_immune_watch(BossTuning &t, bool immune, int s, std::uint64_t now)
+        {
+            const auto timer = papu_timer(t);
+            if (immune && !t.immune_flag)
+            {
+                t.immune_since = now, t.cut_done = false, t.cut_checked = true, t.timer_sampled = false, t.timer_start_at = 0;
+                if (timer && read(timer, t.timer_start))
+                {
+                    t.timer_start_at = now, t.timer_started = timer;
+                    float a = 0, b = 0;
+                    std::memcpy(&a, &t.timer_start[0x48 / 4], 4), std::memcpy(&b, &t.timer_start[0x50 / 4], 4);
+                    if (std::isfinite(a) && std::isfinite(b) && std::max(a, b) > 0.5f && std::max(a, b) < 60)
+                        t.timer_length = std::max(a, b);
+                }
+            }
+            else if (!immune && t.immune_flag && t.timer_lines < 60)
+                ++t.timer_lines, std::cout << "Boss rule: his immunity is over (his can-be-hit flag is back), " << seconds(now - t.immune_since) << " after it started (state " << s
+                                           << (t.cut_done ? ", " + seconds(now - t.cut_at) + " after the cut" : std::string()) << ")\n" << std::flush;
+            if (immune && t.timer_start_at && !t.timer_sampled && now - t.timer_start_at >= 300)
+            {
+                t.timer_sampled = true;
+                std::array<std::uint32_t, 32> words{};
+                if (timer && timer == t.timer_started && read(timer, words))
+                {
+                    const float dt = static_cast<float>(now - t.timer_start_at) / 1000.0f, tolerance = 0.25f * dt + 0.03f;
+                    std::vector<unsigned> down, up;
+                    std::ostringstream moved;
+                    for (unsigned i = 2; i < 32; ++i)
+                    {
+                        if (words[i] == t.timer_start[i])
+                            continue;
+                        float a = 0, b = 0;
+                        std::memcpy(&a, &t.timer_start[i], 4), std::memcpy(&b, &words[i], 4);
+                        moved << " " << hex(i * 4) << " " << a << " -> " << b;
+                        if (!std::isfinite(a) || !std::isfinite(b))
+                            continue;
+                        if (a > 0.5f && a < 60 && std::abs((a - b) - dt) < tolerance)
+                            down.push_back(i * 4);
+                        else if (std::abs(a) < 0.3f && std::abs((b - a) - dt) < tolerance)
+                            up.push_back(i * 4);
+                    }
+                    if (!down.empty() || !up.empty())
+                        t.timer_down = down, t.timer_up = up;
+                    if (t.timer_lines < 60)
+                        ++t.timer_lines, std::cout << "Boss rule research: his immunity's timer (" << t.timer_length << " s), " << dt << " s in:"
+                                                   << (moved.str().empty() ? std::string(" nothing moved") : moved.str()) << "; counting down: " << offsets_text(down)
+                                                   << ", counting up: " << offsets_text(up) << "\n" << std::flush;
+                }
+            }
+            if (t.cut_done && !t.cut_checked && now - t.cut_at >= 500)
+            {
+                t.cut_checked = true;
+                if (t.cut_lines < 40)
+                    ++t.cut_lines, std::cout << "Boss rule: " << (immune ? "half a second after the cut his can-be-hit flag isn't back: the cut didn't end his immunity (he stays red until it ends)"
+                                                                         : "the cut ended his immunity (his can-be-hit flag came back)")
+                                             << "\n" << std::flush;
+            }
+            t.immune_flag = immune;
+        }
+        // V1.3.31 (Eric: red from when he gets up "until the cycle's done", the end of his first spin after the hit). His
+        // immunity is the game's own (see papu_immunity), set to outlast that spin; as the spin ends, its timer is run to
+        // its end (its countdown to nearly 0, or its time past its length), so the game ends the immunity itself: his
+        // can-be-hit flag comes back, and his red glow goes with it (see papu_rule)
+        void papu_cut(BossTuning &t, std::uint64_t now)
+        {
+            t.cut_done = true, t.cut_at = now, t.cut_checked = false;
+            std::ostringstream line;
+            line << "Boss rule: his spin is over, " << seconds(now - t.immune_since) << " into his immunity: ";
+            const auto timer = papu_timer(t);
+            if (!timer)
+                line << "its timer isn't there (it runs to its end)", t.cut_checked = true;
+            else if (!t.timer_down.empty())
+            {
+                for (const auto off : t.timer_down)
+                    write(timer + off, 0.02f);
+                line << "its timer's countdown (" << offsets_text(t.timer_down) << ") set to its end";
+            }
+            else if (!t.timer_up.empty() && t.timer_length > 0)
+            {
+                for (const auto off : t.timer_up)
+                    write(timer + off, t.timer_length + 0.5f);
+                line << "its timer's time (" << offsets_text(t.timer_up) << ") set past its length (" << t.timer_length << " s)";
+            }
+            else
+                line << "which of its timer's numbers count the time isn't known (it runs to its end)", t.cut_checked = true;
+            if (t.cut_lines < 40)
+                ++t.cut_lines, std::cout << line.str() << "\n" << std::flush;
+        }
         void papu_rule(BossTuning &t, const Shared &state, std::uint64_t now)
         {
             if (!t.papu || !t.papu_ai || !event_owner(t.papu))
                 return;
             papu_entity = t.papu;
             const int s = value<int>(t.papu_ai + t.state_at);
+            // V1.3.31: his immunity as the game has it: his actor's can-be-hit flag (+0x7c, 0x8). V1.3.29's log: it clears at
+            // each hit the game takes and comes back exactly as long after it as the immunity was set for (OnTakeHitImmuneTime)
+            const bool immune = (value<std::uint32_t>(t.papu + 0x7c) & 0x8) == 0;
+            probe_state_at = t.papu_ai + t.state_at;
+            probe_timer_at = t.hh && t.hh_timer_at && typed(t.hh, 0x13bbbd0) ? t.hh + t.hh_timer_at : 0;
+            probe_damage_at = t.health_part && typed(t.health_part, 0x14da2c0) ? t.health_part + 0x310 : 0;
             // where he is and which way he faces, from his matrix (V1.3.4: +32 stays put; V1.3.5: he doesn't move while he
             // spins, he turns in place)
             Matrix m{};
@@ -6892,11 +7196,15 @@ namespace ingame
                 // (V1.3.30) any hit the game takes starts its immunity, as long as it's set for that hit
                 if (s == 3 || s == 4)
                 {
-                    const float immune = std::clamp(t.immune_at ? value<float>(t.immune_at) : 0.0f, 0.0f, 30.0f);
-                    t.immune_until = now + static_cast<std::uint64_t>(immune * 1000), t.game_hit_at = now;
+                    const float length = std::clamp(t.immune_at ? value<float>(t.immune_at) : 0.0f, 0.0f, 30.0f);
+                    t.immune_until = now + static_cast<std::uint64_t>(length * 1000), t.game_hit_at = now;
                     if (state.boss_rules && s == 3 && t.red_lines < 80)
-                        ++t.red_lines, std::cout << "Boss rule: his hit starts his immunity: " << immune << " s (he's red for that long once he's up)\n" << std::flush;
+                        ++t.red_lines, std::cout << "Boss rule: his hit starts his immunity: " << length << " s at most (he's red once he's up, until his next spin is over)\n"
+                                                 << std::flush;
                 }
+                // V1.3.31: his first spin since his immunity started is over: so is his immunity (see papu_cut)
+                if (t.state == 2 && s == 1 && immune && t.immune_flag && !t.cut_done && state.boss_rules)
+                    papu_cut(t, now);
                 // research: what in his health part changed since the last state began
                 if (!t.health_part || !typed(t.health_part, 0x14da2c0))
                 {
@@ -6961,44 +7269,21 @@ namespace ingame
                     }
                 }
             }
-            // V1.3.10 (the rule as asked for): after a hit he's red for about one spin cycle, from when he gets up (3 -> 1).
-            // V1.3.30: for exactly as long as the game's immunity of that hit lasts (see papu_red_time), so he can't be hit
-            // whenever he's red, and can be as soon as he isn't
             if (s == 5 || s == 6)
                 t.immune_until = 0; // the fight starts over (Crash died)
             if (s != 3)
                 t.forbidden = false;
-            const bool red = state.boss_rules && ((t.immune_until && now < t.immune_until && (s == 1 || s == 2)) || (t.forbidden && s == 3));
+            papu_immune_watch(t, immune, s, now);
+            // V1.3.10 (the rule as asked for): after a hit he's red for about one spin cycle, from when he gets up (3 -> 1).
+            // V1.3.30: for as long as the game's immunity of that hit lasts. V1.3.31: as the game has it, his can-be-hit flag
+            // (see papu_immune_watch), which papu_cut ends with his first spin after the hit (Eric: "once the cycle is
+            // done"): he can't be hit whenever he's red, and can be as soon as he isn't
+            const bool red = state.boss_rules && ((immune && (s == 1 || s == 2)) || (t.forbidden && s == 3));
             // (red's end, to see how it fits his spin: the state then, and how long he's been in it)
             if (t.red && !red && t.red_lines < 80)
                 ++t.red_lines, std::cout << "Boss rule: he's not red any more, " << (t.game_hit_at ? seconds(now - t.game_hit_at) : std::string("?")) << " after his hit ("
                                          << (s == 2 ? "spinning for " : s == 1 ? "standing for " : "state " + std::to_string(s) + " for ") << seconds(now - t.state_since) << ")\n"
                                          << std::flush;
-            // V1.3.30 research: his health script's timer (_Internal_TimerAction_id_5s6p54hm_timer): if it runs from each hit
-            // for as long as his immunity, his red time can end with his spin (the timer ended there). Its start and end
-            // go to the log, with the time since his hit, and its numbers as it starts
-            if (t.hh && t.hh_timer_at && typed(t.hh, 0x13bbbd0))
-                if (const auto timer = value<Address>(t.hh + t.hh_timer_at); timer != t.hh_timer)
-                {
-                    if (t.hh_timer_lines < 40)
-                    {
-                        ++t.hh_timer_lines;
-                        std::cout << "Boss rule research: his health script's timer " << (timer ? "started" : "ended") << " (state " << s << ", "
-                                  << (t.game_hit_at ? seconds(now - t.game_hit_at) + " after his hit" : std::string("no hit yet"))
-                                  << (!timer && t.hh_timer_since ? ", it ran " + seconds(now - t.hh_timer_since) : std::string()) << ")";
-                        std::array<float, 24> f{};
-                        if (timer && read(timer, f))
-                        {
-                            if (const auto vt = value<Address>(timer); vt >= base() && vt < module_end())
-                                std::cout << ": type " << hex(static_cast<unsigned>(vt - base()));
-                            for (std::size_t i = 2; i < f.size(); ++i)
-                                if (std::isfinite(f[i]) && std::abs(f[i]) > 1e-4f && std::abs(f[i]) < 1e5f)
-                                    std::cout << " +" << hex(static_cast<unsigned>(i * 4)) << "=" << f[i];
-                        }
-                        std::cout << "\n" << std::flush;
-                    }
-                    t.hh_timer = timer, t.hh_timer_since = timer ? now : 0;
-                }
             papu_landings(t, state, red, s, now);
             vuln_research(t, red, s, now);
             // research (V1.3.19): Crash's damage and Aku Aku scripts' settings at the fight's start, after a death and after Papu
@@ -7189,6 +7474,7 @@ namespace ingame
                 t.level = boss, t.entered = now;
                 // (V1.3.28) Papu Papu's stomps from here on only
                 papu_entity = 0, papu_bounce_node = 0, papu_bounce_component = 0, papu_bounce_message = 0;
+                probe_count_at = 0, probe_timer_at = 0, probe_state_at = 0, probe_damage_at = 0, probe_lines = 0;
                 t.deflects_seen = papu_deflects.load(), t.stomps_seen = papu_stomps.load(), t.hits_seen = papu_hits.load();
                 t.hh_bounces_seen = papu_hh_bounces.load();
                 {
