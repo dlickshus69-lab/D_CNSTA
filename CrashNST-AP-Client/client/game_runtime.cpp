@@ -4855,8 +4855,10 @@ namespace ingame
             // which way he faces (degrees), to tell how fast and which way he turns
             float yaw = 0, turn = 0, turn_most = 0, turn_least = 0;
             bool yaw_known = false;
-            // his actor's numbers when he turned red, to put back the one a hit while red takes
-            std::vector<int> red_snapshot;
+            // his actor's and his parts' numbers when he turned red, to put back the one a hit while red takes
+            std::vector<std::pair<Address, std::vector<std::uint32_t>>> red_snapshot;
+            // V1.3.10: red for one spin cycle after a hit (from his recovery to the end of his next spin)
+            bool punished = false, spun_since = false;
             // the game's hit for Crash (Papu Papu's attack's damage message to him), once found
             Address hit_message = 0, hit_target = 0, hit_args = 0, hit_sender = 0;
             bool hit_searched = false;
@@ -5153,7 +5155,24 @@ namespace ingame
             if (!t.hit_searched)
             {
                 t.hit_searched = true;
-                const auto [message, target] = crate_message(crash, "ha5y20l3");
+                // (V1.3.8 looked through Crash's first 64 scripts only, as for a crate; he has more)
+                Address message = 0, target = 0;
+                for (const auto c : list(value<Address>(crash + 24), 256))
+                {
+                    const auto meta = value<Address>(c + 56);
+                    if (message || !typed(c, 0x13bbbd0) || !typed(meta, 0x1745d78) || value<Address>(c + 24) != crash)
+                        continue;
+                    for (const auto delegator : list(value<Address>(meta + 160), 128))
+                    {
+                        const auto m = value<Address>(delegator + 24), to = value<Address>(delegator + 32);
+                        if (typed(delegator, 0x13bc268) && typed(m, 0x17b6578) && typed(to, 0x13bbcb8) &&
+                            string(value<Address>(m + 16), 120).find("_id_ha5y20l3") != std::string::npos)
+                        {
+                            message = m, target = to;
+                            break;
+                        }
+                    }
+                }
                 Address sender = 0;
                 for (const auto &[c, script] : entity_scripts(t.papu))
                     if (script == "common_BossAttackDamageHandler")
@@ -5216,12 +5235,21 @@ namespace ingame
             }
             out << (died ? "; no mask: Crash loses a life" : "; no mask, and Crash's life couldn't be taken");
         }
-        // his actor's whole numbers, +0x40 to +0x400
-        std::vector<int> actor_numbers(Address actor)
+        // his health as the game keeps it, wherever that is (V1.3.8: not a whole number on his actor): his actor's first
+        // 0x1000 bytes and each of his parts' first 0x400, as 4-byte words
+        std::vector<std::pair<Address, std::vector<std::uint32_t>>> health_places(Address actor)
         {
-            std::vector<int> numbers(0x3c0 / 4);
-            read(actor + 0x40, numbers);
-            return numbers;
+            std::vector<std::pair<Address, std::vector<std::uint32_t>>> places;
+            std::vector<std::uint32_t> words(0x1000 / 4);
+            if (read(actor, words))
+                places.emplace_back(actor, words);
+            for (const auto c : list(value<Address>(actor + 24), 128))
+            {
+                std::vector<std::uint32_t> part(0x400 / 4);
+                if (c && read(c, part))
+                    places.emplace_back(c, part);
+            }
+            return places;
         }
         void papu_rule(BossTuning &t, const Shared &state, std::uint64_t now)
         {
@@ -5284,7 +5312,7 @@ namespace ingame
                 if (state.boss_rules && t.was_red && (s == 3 || s == 4))
                 {
                     std::ostringstream line;
-                    line << "Boss rule: Crash landed on Papu Papu while he was red (" << seconds(now - t.red_since) << " into his spin)";
+                    line << "Boss rule: Crash landed on Papu Papu while he was red (" << seconds(now - t.red_since) << " into it)";
                     // the hit taken back: his health (as the game's getter sees it) went down; the one number in his actor
                     // that went down (or up) by just as much since he turned red goes back
                     if (s == 3 && t.red_health > 0 && health_getter_ok() && !t.red_snapshot.empty())
@@ -5293,22 +5321,57 @@ namespace ingame
                         line << "; his health " << t.red_health << " -> " << now_health;
                         if (drop > 0)
                         {
-                            const auto numbers = actor_numbers(t.papu);
-                            std::vector<unsigned> found;
-                            for (unsigned i = 0; i < numbers.size() && i < t.red_snapshot.size(); ++i)
-                                if (std::abs(numbers[i] - t.red_snapshot[i]) == drop)
-                                    found.push_back(i);
+                            // a whole number or a decimal that moved by just as much, on him or one of his parts
+                            struct Moved
+                            {
+                                Address place, at;
+                                std::uint32_t before, after;
+                                bool decimal;
+                            };
+                            std::vector<Moved> found;
+                            for (const auto &[place, before] : t.red_snapshot)
+                            {
+                                std::vector<std::uint32_t> after(before.size());
+                                if (!read(place, after))
+                                    continue;
+                                for (std::size_t i = 2; i < before.size(); ++i)
+                                {
+                                    if (before[i] == after[i])
+                                        continue;
+                                    const int a = static_cast<int>(before[i]), b = static_cast<int>(after[i]);
+                                    float fa = 0, fb = 0;
+                                    std::memcpy(&fa, &before[i], 4), std::memcpy(&fb, &after[i], 4);
+                                    if (std::abs(a - b) == drop)
+                                        found.push_back({place, place + i * 4, before[i], after[i], false});
+                                    else if (std::isfinite(fa) && std::isfinite(fb) && std::abs(std::abs(fa - fb) - drop) < 0.01f)
+                                        found.push_back({place, place + i * 4, before[i], after[i], true});
+                                }
+                            }
+                            // where a number is: on him, or which of his parts (its script, or its type)
+                            const auto where = [&](const Moved &f) {
+                                std::string part = "his";
+                                if (f.place != t.papu)
+                                {
+                                    part = typed(f.place, 0x13bbbd0) ? string(value<Address>(value<Address>(f.place + 56) + 16), 80) : object_brief(f.place);
+                                    if (part.rfind("Scripts.Graph.", 0) == 0)
+                                        part.erase(0, 14);
+                                }
+                                return part + " +" + hex(static_cast<unsigned>(f.at - f.place));
+                            };
                             if (found.size() == 1)
                             {
-                                write(t.papu + 0x40 + found[0] * 4, t.red_snapshot[found[0]]);
-                                line << ", +" << hex(0x40 + found[0] * 4) << " " << numbers[found[0]] << " put back to " << t.red_snapshot[found[0]] << ": "
-                                     << actor_health(t.papu);
+                                write(found[0].at, found[0].before);
+                                line << ", " << where(found[0]) << (found[0].decimal ? " (decimal)" : "") << " put back: " << actor_health(t.papu);
                             }
                             else
                             {
                                 line << ", couldn't tell where (" << found.size() << " numbers moved by " << drop << ":";
-                                for (const auto i : found)
-                                    line << " +" << hex(0x40 + i * 4) << " " << t.red_snapshot[i] << "->" << numbers[i];
+                                for (const auto &f : found)
+                                {
+                                    float fa = 0, fb = 0;
+                                    std::memcpy(&fa, &f.before, 4), std::memcpy(&fb, &f.after, 4);
+                                    line << " " << where(f) << " " << (f.decimal ? std::to_string(fa) + "->" + std::to_string(fb) : std::to_string(static_cast<int>(f.before)) + "->" + std::to_string(static_cast<int>(f.after)));
+                                }
                                 line << ")";
                             }
                         }
@@ -5319,15 +5382,24 @@ namespace ingame
                 }
                 t.state = s, t.state_since = now, t.top_speed = 0, t.turn_most = -1e9f, t.turn_least = 1e9f;
             }
-            // his spin (currState 2) is red: he can be hit between spins and while he reels from a hit
-            const bool red = state.boss_rules && s == 2;
+            // V1.3.10 (the rule as asked for): after a hit he's red for one spin cycle, from when he gets up (3 -> 1) until that spin
+            // ends (2 -> 1); then he can be hit again
+            if (s == 3 || s == 4)
+                t.punished = true, t.spun_since = false;
+            else if (s == 5 || s == 6)
+                t.punished = t.spun_since = false; // the fight starts over (Crash died)
+            else if (s == 2 && t.punished)
+                t.spun_since = true;
+            else if (s == 1 && t.punished && t.spun_since)
+                t.punished = t.spun_since = false;
+            const bool red = state.boss_rules && t.punished && (s == 1 || s == 2);
             if (red != t.red)
             {
                 if (red)
                 {
                     t.red_since = now;
                     t.red_health = health_getter_ok() && typed(t.papu, 0x1592220) ? actor_health(t.papu) : -1;
-                    t.red_snapshot = actor_numbers(t.papu);
+                    t.red_snapshot = health_places(t.papu);
                 }
                 t.red = red;
             }

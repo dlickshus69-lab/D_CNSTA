@@ -1,14 +1,10 @@
 ## Testing build
 
-This is the **Testing build**: it has what's still being worked on (Harder bosses). For playing a seed, the **Stable build** is the other release on this page.
+This is the **Testing build**: it has what's still being worked on (Harder bosses). For playing a seed, the **Stable build** is the other release on this page. Its apworld is `crash_nst_testing.apworld`, the game **Crash Bandicoot N. Sane Trilogy (Testing)** (install it next to the Stable `crash_nst.apworld`; a YAML picks one with its `game:` line). This client plays Testing seeds and regular ones.
 
 ## What's new
 
-- **Its own apworld: `crash_nst_testing.apworld`**, the game **Crash Bandicoot N. Sane Trilogy (Testing)**. Install it next to the Stable build's `crash_nst.apworld` (both can be in `custom_worlds` at once). A YAML for a Testing seed says `game: Crash Bandicoot N. Sane Trilogy (Testing)`, with its options under that same name. This client plays Testing seeds and regular ones (it connects as whichever game the room has).
-
-- **Papu Papu, round 3** (`/boss_rules on`, `/boss_speed`, `/boss_health`):
-  - Landing on him while he's red (spinning) is now **the game's own hit**, the one his spin gives: the hurt animation, Aku Aku takes it if he's there, a life if not, nothing while invincible.
-  - That hit on him **doesn't count**: his health goes back (the log says how).
-  - **Speed** now changes his real spin speed. Before, the settings changed were only read when the level loads, so nothing changed.
-  - The spin-the-other-way experiment is out for now: it stopped his spin speed from going up. The log notes how fast and which way he turns, to try it another way.
-- **Health bar** (from V1.3.7): the bar keeps the boss's own notches and starts full; with `/boss_health 200` each hit takes half a notch.
+- **Papu Papu, round 4** (`/boss_rules on`):
+  - **Red after each hit, for one spin cycle**: once he gets up from a hit, he's red until his next spin ends; then he can be hit again. Before any hit he's normal.
+  - Landing on him while he's red: the game's own hit for Crash (V1.3.8 couldn't find it: Crash has more scripts than it looked through). The hit on him doesn't count; his health is looked for wider this time (V1.3.8 didn't find where the game keeps it), and the log says where.
+- Speed: his spin speed number goes up with `/boss_speed`, but it doesn't make him look faster. Another way is next.

@@ -532,8 +532,9 @@ void ClientRuntime::handle_commands()
                 else if (argument == "seed")
                     boss_rules_test = -1;
                 print_console(std::string("Boss rules: ") + (boss_rules_test == 1 ? "on (test)" : boss_rules_test == 0 ? "off (test)" : "the seed's") +
-                              ". With them on, Papu Papu glows red while he spins and can't be hit; landing on him then is a hit for Crash "
-                              "(the game's own: Aku Aku takes it, or a life without him) and doesn't count. /boss_rules on, off, or seed.");
+                              ". With them on, Papu Papu glows red after each hit, until the end of his next spin, and can't be hit then; "
+                              "landing on him while he's red is a hit for Crash (the game's own: Aku Aku takes it, or a life without him) "
+                              "and doesn't count. /boss_rules on, off, or seed.");
             }
             else if (command == "/clear")
                 feed_history.clear();
