@@ -4850,8 +4850,16 @@ namespace ingame
             // Papu Papu
             Address papu = 0, papu_ai = 0;
             unsigned state_at = 0, laps_at = 0, spin_at = 0;
-            std::uint64_t next_flip = 0;
-            unsigned flips = 0;
+            // his spin speed (currAttackSpinSpeedMultiplier, the game's 1 + 0.075 a hit): the game's, and ours (x speed)
+            float spin_game = 0, spin_written = 0;
+            // which way he faces (degrees), to tell how fast and which way he turns
+            float yaw = 0, turn = 0, turn_most = 0, turn_least = 0;
+            bool yaw_known = false;
+            // his actor's numbers when he turned red, to put back the one a hit while red takes
+            std::vector<int> red_snapshot;
+            // the game's hit for Crash (Papu Papu's attack's damage message to him), once found
+            Address hit_message = 0, hit_target = 0, hit_args = 0, hit_sender = 0;
+            bool hit_searched = false;
             int state = -1;
             bool spun = false, red = false, was_red = false;
             int red_health = -1; // his health when he turned red
@@ -5133,8 +5141,51 @@ namespace ingame
         {
             return typed(t.papu, 0x1592220) && health_getter_ok() && actor_health(t.papu) == value<int>(t.papu + 0xf8);
         }
-        // a hit for Crash, as one from a boss would be (until the game's own hit message is found, V1.3.5): with a mask, a
-        // mask less (gold to one, one to none); with three he's invincible and nothing happens; with none it's a life
+        // a hit for Crash, the way Papu Papu's attack hits him (V1.3.5's log): his common_BossAttackDamageHandler sends
+        // Crash's damage script ha5y20l3 with seven values; Crash's damage and Aku Aku scripts do the rest (a mask, the
+        // hurt animation, or a life; nothing while he's invincible). Sent from a node of our own with the game's node's
+        // values (as the Nitro Trap's explosion is), from Papu Papu's attack script
+        bool boss_real_hit(BossTuning &t, std::ostream &out)
+        {
+            const auto crash = player();
+            if (!crash || !t.papu)
+                return false;
+            if (!t.hit_searched)
+            {
+                t.hit_searched = true;
+                const auto [message, target] = crate_message(crash, "ha5y20l3");
+                Address sender = 0;
+                for (const auto &[c, script] : entity_scripts(t.papu))
+                    if (script == "common_BossAttackDamageHandler")
+                        sender = c;
+                Address args = 0;
+                if (message && sender)
+                    for (const auto node : aku_send_nodes(value<Address>(sender + 56), message))
+                        if (typed(node, 0x13bc390) && value<Address>(node + 16) == message && typed(value<Address>(node + 32), 0x1745070) &&
+                            list(value<Address>(node + 32), 16).size() == 7)
+                        {
+                            args = value<Address>(node + 32);
+                            break;
+                        }
+                std::cout << "Boss rule: the game's hit for Crash " << (message && target && sender && args ? "found" : "not found") << " (message "
+                          << (message ? "yes" : "no") << ", Papu Papu's attack script " << (sender ? "yes" : "no") << ", its values "
+                          << (args ? "yes" : "no") << ")\n" << std::flush;
+                if (message && target && sender && args)
+                    t.hit_message = message, t.hit_target = target, t.hit_args = args, t.hit_sender = sender;
+            }
+            // (with the message hook on, the sender's first bytes are the hook's jump)
+            const bool sender_ok = event_hook.installed || code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0});
+            if (!t.hit_message || !event_owner(t.papu) || !sender_ok)
+                return false;
+            std::cout << "Boss rule: sending Crash the game's hit ...\n" << std::flush;
+            std::array<Address, 11> own{base() + 0x13bc390, 0, t.hit_message, t.hit_target, t.hit_args};
+            std::array<Address, 6> context{t.hit_sender};
+            reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(reinterpret_cast<Address>(own.data()), reinterpret_cast<Address>(context.data()));
+            out << "; Crash takes the game's hit (Aku Aku takes it if he's there)";
+            return true;
+        }
+        // without the game's hit: as one would be (a mask less, nothing while invincible, a life without a mask)
         void boss_rule_hit(std::ostream &out)
         {
             const auto crash = player();
@@ -5165,71 +5216,122 @@ namespace ingame
             }
             out << (died ? "; no mask: Crash loses a life" : "; no mask, and Crash's life couldn't be taken");
         }
+        // his actor's whole numbers, +0x40 to +0x400
+        std::vector<int> actor_numbers(Address actor)
+        {
+            std::vector<int> numbers(0x3c0 / 4);
+            read(actor + 0x40, numbers);
+            return numbers;
+        }
         void papu_rule(BossTuning &t, const Shared &state, std::uint64_t now)
         {
             if (!t.papu || !t.papu_ai || !event_owner(t.papu))
                 return;
             const int s = value<int>(t.papu_ai + t.state_at);
-            // where he is, from his matrix (V1.3.4: +32 stays put while he moves)
+            // where he is and which way he faces, from his matrix (V1.3.4: +32 stays put; V1.3.5: he doesn't move while he
+            // spins, he turns in place)
             Matrix m{};
             if (now - t.sample_at >= 100 && entity_matrix(t.papu, m))
             {
                 const std::array<float, 3> at{m[12], m[13], m[14]};
+                const float yaw = std::atan2(m[1], m[0]) * 57.29578f;
                 if (t.sample_at)
                 {
-                    t.speed = std::hypot(at[0] - t.sample[0], at[1] - t.sample[1]) / ((now - t.sample_at) / 1000.0f);
+                    const float dt = (now - t.sample_at) / 1000.0f;
+                    t.speed = std::hypot(at[0] - t.sample[0], at[1] - t.sample[1]) / dt;
                     t.top_speed = std::max(t.top_speed, t.speed);
+                    if (t.yaw_known)
+                    {
+                        float d = yaw - t.yaw;
+                        while (d > 180)
+                            d -= 360;
+                        while (d < -180)
+                            d += 360;
+                        t.turn = d / dt;
+                        t.turn_most = std::max(t.turn_most, t.turn), t.turn_least = std::min(t.turn_least, t.turn);
+                    }
                 }
-                t.sample = at, t.sample_at = now;
+                t.sample = at, t.sample_at = now, t.yaw = yaw, t.yaw_known = true;
+            }
+            // his spin speed, times /boss_speed (the game sets it as a spin starts: 1, then 0.075 more with each hit)
+            const unsigned percent = std::clamp(state.boss_speed, 100u, 200u);
+            if (t.spin_at)
+            {
+                const float v = value<float>(t.papu_ai + t.spin_at);
+                if (v > 0 && std::abs(v - t.spin_written) > 0.0001f)
+                {
+                    // the game's own new value, or the game's added to ours (then its step is added to the game's)
+                    t.spin_game = v > t.spin_written && t.spin_written > 0 ? t.spin_game + (v - t.spin_written) : v;
+                    t.spin_written = t.spin_game * percent / 100.0f;
+                    if (percent != 100)
+                    {
+                        write(t.papu_ai + t.spin_at, t.spin_written);
+                        tell_once(t, "spin" + std::to_string(t.spin_game) + "/" + std::to_string(percent),
+                                  "Boss speed: Papu Papu's spin speed " + std::to_string(t.spin_game) + " -> " + std::to_string(t.spin_written));
+                    }
+                    else
+                        t.spin_written = v;
+                }
             }
             const float spin = t.spin_at ? value<float>(t.papu_ai + t.spin_at) : 0.0f;
             if (s != t.state)
             {
                 if (t.state >= 0)
-                    std::cout << "Boss rule: Papu Papu state " << t.state << " -> " << s << " after " << seconds(now - t.state_since) << " (top speed "
-                              << static_cast<int>(t.top_speed) << "/s, laps " << value<int>(t.papu_ai + t.laps_at) << ", spin speed " << spin << ", "
-                              << t.flips << " turns)\n" << std::flush;
+                    std::cout << "Boss rule: Papu Papu state " << t.state << " -> " << s << " after " << seconds(now - t.state_since) << " (laps "
+                              << value<int>(t.papu_ai + t.laps_at) << ", spin speed " << spin << ", turning " << static_cast<int>(t.turn_least) << " to "
+                              << static_cast<int>(t.turn_most) << " degrees a second, top speed " << static_cast<int>(t.top_speed) << "/s)\n" << std::flush;
                 // a hit (3) or the last one (4) while he was red: it doesn't count, and it's a hit for Crash
                 if (state.boss_rules && t.was_red && (s == 3 || s == 4))
                 {
                     std::ostringstream line;
                     line << "Boss rule: Crash landed on Papu Papu while he was red (" << seconds(now - t.red_since) << " into his spin)";
-                    if (s == 3 && t.red_health > 0 && papu_health_here(t))
+                    // the hit taken back: his health (as the game's getter sees it) went down; the one number in his actor
+                    // that went down (or up) by just as much since he turned red goes back
+                    if (s == 3 && t.red_health > 0 && health_getter_ok() && !t.red_snapshot.empty())
                     {
-                        const int now_health = actor_health(t.papu);
+                        const int now_health = actor_health(t.papu), drop = t.red_health - now_health;
                         line << "; his health " << t.red_health << " -> " << now_health;
-                        if (now_health < t.red_health)
-                            write(t.papu + 0xf8, t.red_health), line << ", put back to " << actor_health(t.papu);
+                        if (drop > 0)
+                        {
+                            const auto numbers = actor_numbers(t.papu);
+                            std::vector<unsigned> found;
+                            for (unsigned i = 0; i < numbers.size() && i < t.red_snapshot.size(); ++i)
+                                if (std::abs(numbers[i] - t.red_snapshot[i]) == drop)
+                                    found.push_back(i);
+                            if (found.size() == 1)
+                            {
+                                write(t.papu + 0x40 + found[0] * 4, t.red_snapshot[found[0]]);
+                                line << ", +" << hex(0x40 + found[0] * 4) << " " << numbers[found[0]] << " put back to " << t.red_snapshot[found[0]] << ": "
+                                     << actor_health(t.papu);
+                            }
+                            else
+                            {
+                                line << ", couldn't tell where (" << found.size() << " numbers moved by " << drop << ":";
+                                for (const auto i : found)
+                                    line << " +" << hex(0x40 + i * 4) << " " << t.red_snapshot[i] << "->" << numbers[i];
+                                line << ")";
+                            }
+                        }
                     }
-                    boss_rule_hit(line);
+                    if (!boss_real_hit(t, line))
+                        boss_rule_hit(line);
                     std::cout << line.str() << "\n" << std::flush;
                 }
-                t.state = s, t.state_since = now, t.top_speed = 0, t.flips = 0;
-                static std::mt19937 turns{std::random_device{}()};
-                t.next_flip = now + std::uniform_int_distribution<int>(900, 1800)(turns);
+                t.state = s, t.state_since = now, t.top_speed = 0, t.turn_most = -1e9f, t.turn_least = 1e9f;
             }
             // his spin (currState 2) is red: he can be hit between spins and while he reels from a hit
             const bool red = state.boss_rules && s == 2;
             if (red != t.red)
             {
                 if (red)
-                    t.red_since = now, t.red_health = papu_health_here(t) ? actor_health(t.papu) : -1;
+                {
+                    t.red_since = now;
+                    t.red_health = health_getter_ok() && typed(t.papu, 0x1592220) ? actor_health(t.papu) : -1;
+                    t.red_snapshot = actor_numbers(t.papu);
+                }
                 t.red = red;
             }
             t.was_red = red;
-            // the spin turns the other way now and then (an experiment: his spin speed multiplier, made negative)
-            if (red && t.spin_at && now >= t.next_flip)
-            {
-                static std::mt19937 turns{std::random_device{}()};
-                t.next_flip = now + std::uniform_int_distribution<int>(1200, 2600)(turns);
-                if (std::abs(spin) > 0.01f)
-                {
-                    write(t.papu_ai + t.spin_at, -spin);
-                    if (++t.flips <= 3)
-                        std::cout << "Boss rule: Papu Papu's spin turns the other way (spin speed " << spin << " -> " << value<float>(t.papu_ai + t.spin_at)
-                                  << ")\n" << std::flush;
-                }
-            }
             if (state.boss_rules || t.tint_bundle)
                 boss_tint(t, t.papu, red);
         }
