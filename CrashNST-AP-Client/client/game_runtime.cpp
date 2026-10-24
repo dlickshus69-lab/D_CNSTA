@@ -1201,6 +1201,10 @@ namespace ingame
         // can-be-hit flag and his AI's state. Where to read the count, the timer's pointer and the state (set by
         // papu_rule), and how deep in other messages a message came
         std::atomic<Address> probe_count_at{0}, probe_timer_at{0}, probe_state_at{0}, probe_damage_at{0};
+        // V1.3.32: his slam (his AI's 3rnyv3pq: V1.3.30's clips, his club hits the ground as it's sent, a second after he
+        // stands still: after he gets up, and after each spin), when it last came and how many
+        std::atomic<std::uint64_t> papu_slam_at{0};
+        std::atomic_uint papu_slams{0};
         std::atomic_uint probe_lines{0};
         thread_local int probe_depth = 0;
         struct PapuProbe
@@ -1212,6 +1216,14 @@ namespace ingame
             {
                 return damage == o.damage && count == o.count && state == o.state && timer == o.timer && t48 == o.t48 && t50 == o.t50 && flags == o.flags;
             }
+        };
+        // V1.3.32: a message one of Papu Papu's scripts (or Crash's) takes, as another of his scripts sends it: the message
+        // and where it goes (from the taker's list), and the values the sender's own node gives it, sent from a node of our
+        // own (as the hit for Crash is: see boss_real_hit)
+        struct PapuSend
+        {
+            Address message = 0, target = 0, args = 0, sender = 0;
+            bool searched = false;
         };
         PapuProbe papu_probe_read(Address papu)
         {
@@ -1624,6 +1636,8 @@ namespace ingame
                     }
                     else if (graph == "Scripts.Graph.common_BossHealthHandler" && name.find("alo0v4l5") != std::string::npos)
                         papu_hit_at = now, ++papu_hits;
+                    else if (graph == "Scripts.Graph.BossPapuPapu_AiHandler" && name.find("3rnyv3pq") != std::string::npos)
+                        papu_slam_at = now, ++papu_slams;
                     else if (graph == "Scripts.Graph.common_BossHealthHandler" && name.find("Crash_BounceManager") != std::string::npos &&
                              name.find("sepnt7rb") != std::string::npos)
                         papu_hh_bounce_at = now, ++papu_hh_bounces;
@@ -1789,7 +1803,7 @@ namespace ingame
             // V1.3.31 research: what each message to Papu Papu changes while the game handles it (see PapuProbe), to
             // find what starts his immunity (for red from the fight's start) and what steps the bar down (to keep a hit
             // off it). A message inside another one shows inside its own line and its outer one's
-            if (const auto papu = papu_entity.load(); papu && event && context && probe_lines.load() < 240)
+            if (const auto papu = papu_entity.load(); papu && event && context && probe_lines.load() < 80)
                 if (const auto component = value<Address>(context); component && value<Address>(component + 24) == papu && typed(papu, 0x1592220))
                 {
                     const auto before = papu_probe_read(papu);
@@ -1797,7 +1811,9 @@ namespace ingame
                     const auto result = reinterpret_cast<Address (*)(Address, Address)>(event_hook.original)(event, context);
                     --probe_depth;
                     const auto after = papu_probe_read(papu);
-                    if (!(after == before) && probe_lines.load() < 240)
+                    PapuProbe moved = after;
+                    moved.state = before.state;
+                    if (!(moved == before) && probe_lines.load() < 80)
                     {
                         ++probe_lines;
                         auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
@@ -5298,25 +5314,23 @@ namespace ingame
             std::vector<unsigned> timer_down, timer_up;
             float timer_length = 0;
             unsigned timer_lines = 0, cut_lines = 0;
-            // V1.3.31 research (see bar_frames): the bar's objects as it last settled, and at a hit as it steps down
-            std::vector<std::uint32_t> bar_settled_frame;
-            bool bar_settled_taken = false;
-            std::vector<std::vector<std::uint32_t>> bar_frames;
-            std::vector<std::uint64_t> bar_frame_due;
-            unsigned bar_frame_hits = 0;
+            // V1.3.32 (see bar_refill): the bar filled back up the game's own way: when last, how often; the message for it
+            std::uint64_t refill_at = 0;
+            unsigned refills = 0;
+            PapuSend refill_send;
+            // V1.3.32 (see papu_start_red and papu_red_end): red from the fight's start; a spin over while he's red (red
+            // ends with the slam after it), waiting for that slam since when, his slams seen then; the game's immunity's
+            // timer run again for the fight's start (since when, for how long, checked to run)
+            bool start_red = false, red_spun = false, slam_wait = false, start_timer = false, start_timer_checked = false;
+            std::uint64_t slam_wait_since = 0, start_timer_at = 0;
+            unsigned slams_seen = 0;
+            float start_timer_set = 0;
             // V1.3.29 (see bar_count): the bar's own count of notches left (two copies), found at the fight's start and
             // checked at his first hit
             std::vector<std::pair<Address, unsigned>> count_places; // (object, offset)
             std::vector<int> count_last;
             bool count_searched = false, count_checked = false;
             unsigned count_lines = 0;
-            // V1.3.30: the blue's length the bar showed for each count; the objects that may hold the length it heads to
-            // (checked when the blue first moves); whether the count is ours (put back here) since the game last changed it,
-            // when it last changed, and the blue put back since
-            std::map<int, float> w_for_count;
-            std::vector<Address> w_targets;
-            bool w_checked = false, bar_ours = false;
-            unsigned w_fixes = 0;
             std::uint64_t count_since = 0;
             // V1.3.28 research (see bar_research): the blue's length as it last settled, and the bar's objects then
             float w_seen = -1, w_settling = -1;
@@ -5684,102 +5698,90 @@ namespace ingame
             }
             t.snap_words = std::move(words);
         }
-        // V1.3.31 research: how the bar shows a hit. V1.3.30's clips: the blue's length written between his hits doesn't
-        // show (the bar only redraws as it's hit), so after his first hit it still showed a notch gone, and at his second
-        // it stepped down from full to that same place again. The bar's objects (as found with its count) as it last
-        // settled, as a hit's count change is seen, and 0.1, 0.2, 0.4 and 1 s later: what moves while it steps down, and
-        // what changed at the hit and stayed, go to the log (his first two hits)
-        std::vector<std::uint32_t> bar_snapshot(const BossTuning &t)
-        {
-            std::vector<std::uint32_t> words(t.snap_objects.size() * 0x80), one(0x80);
-            for (std::size_t k = 0; k < t.snap_objects.size(); ++k)
-                if (read(t.snap_objects[k], one))
-                    std::copy(one.begin(), one.end(), words.begin() + static_cast<std::ptrdiff_t>(k * 0x80));
-            return words;
-        }
-        std::string word_text(std::uint32_t w)
-        {
-            if (!w)
-                return "0";
-            float f = 0;
-            std::memcpy(&f, &w, 4);
-            const auto i = static_cast<std::int32_t>(w);
-            std::ostringstream out;
-            if (std::isfinite(f) && std::abs(f) >= 1e-4f && std::abs(f) < 1e7f && (i > 0x1000000 || i < -0x1000000))
-                out << f;
-            else if (i > -10000000 && i < 10000000)
-                out << i;
-            else
-                out << "0x" << std::hex << w;
-            return out.str();
-        }
-        void bar_frames_start(BossTuning &t, std::uint64_t now)
-        {
-            t.bar_settled_taken = false;
-            if (t.bar_frame_hits >= 2 || t.bar_settled_frame.empty() || !t.bar_frame_due.empty())
-                return;
-            ++t.bar_frame_hits;
-            t.bar_frames.clear();
-            t.bar_frames.push_back(t.bar_settled_frame);
-            t.bar_frames.push_back(bar_snapshot(t));
-            t.bar_frame_due = {now + 100, now + 200, now + 400, now + 1000};
-        }
-        void bar_frames(BossTuning &t, std::uint64_t now)
-        {
-            if (t.bar_frame_due.empty() || now < t.bar_frame_due.front())
-                return;
-            t.bar_frame_due.erase(t.bar_frame_due.begin());
-            t.bar_frames.push_back(bar_snapshot(t));
-            if (!t.bar_frame_due.empty())
-                return;
-            const auto &f = t.bar_frames;
-            const auto n = f.empty() ? 0 : f[0].size();
-            if (f.size() != 6 || std::any_of(f.begin(), f.end(), [&](const auto &frame) { return frame.size() != n; }))
-            {
-                t.bar_frames.clear();
-                return;
-            }
-            // [0] settled before, [1] at the hit, [2] 0.1 s, [3] 0.2 s, [4] 0.4 s, [5] 1 s
-            std::array<unsigned, 3> found{}, shown{};
-            constexpr std::array<unsigned, 3> most{45, 10, 40};
-            constexpr std::array<const char *, 3> what{"moved", "keeps moving", "stepped"};
-            std::ostringstream out;
-            for (std::size_t i = 0; i < n; ++i)
-            {
-                const bool moved = f[1][i] != f[2][i] || f[2][i] != f[3][i] || f[3][i] != f[4][i];
-                const int kind = moved ? (f[4][i] == f[5][i] ? 0 : 1) : (f[0][i] != f[1][i] && f[1][i] == f[5][i] ? 2 : -1);
-                if (kind < 0)
-                    continue;
-                ++found[kind];
-                if (shown[kind] >= most[kind])
-                    continue;
-                ++shown[kind];
-                const auto k = i / 0x80;
-                const auto vt = value<Address>(t.snap_objects[k]);
-                out << "\nBoss bar frames: " << what[kind] << " #" << k << " 0x" << std::hex << t.snap_objects[k] << std::dec
-                    << (vt >= base() && vt < module_end() ? " type " + hex(static_cast<unsigned>(vt - base())) : std::string()) << " " << hex(static_cast<unsigned>((i % 0x80) * 4))
-                    << ":";
-                for (const auto &frame : f)
-                    out << " " << word_text(frame[i]);
-            }
-            std::cout << "Boss bar frames: hit " << t.bar_frame_hits << " (as it settled before, at the hit, 0.1, 0.2, 0.4 and 1 s after): " << found[0]
-                      << " numbers moved while it stepped down, " << found[1] << " kept moving, " << found[2] << " changed at the hit and stayed" << out.str() << "\n"
-                      << std::flush;
-            t.bar_frames.clear();
-        }
         // V1.3.29: the bar's own count of notches left. V1.3.28's research: two of the bar's objects (one of type
         // +0x1623970 at +0xb4, one of type +0x1622be8 at +0x104) count down from 9, the most notches the bar draws, with each
         // hit the game takes (a landing on red too), the blue is laid out from it, and at 0 the bar empties and goes away:
         // with his 10 hits, one hit early (two with a landing on red that counted). So it's kept at his hits left, 9 at
         // most: the bar lasts until his last hit, and a notch a landing on red took comes back. The places are found when
         // the fight starts (at his full health) and used once each was seen to count one down at his first hit
-        // V1.3.30: V1.3.29's clips: with the count put back up (8 -> 9 at his first hit) the bar still stepped down to 8,
-        // and at his next hit it stepped down from the count's place (full) to 8 again: it filled back up for a moment and
-        // lost "the same notch". So the blue's length goes back with the count: to the length the bar showed for that
-        // count (each count's length as the bar settled at it), in BarParent and in the object that holds the length the
-        // blue heads to (type +0x1622be8 at +0xe8, V1.3.28's research: full at the fight's start, then each hit's length).
-        // Right away (if that's what the bar heads to, it doesn't step down at all), and again once the bar has settled
-        // (if it stepped down anyway), so its next step down starts from the right place
+        bool papu_send_find(PapuSend &s, Address taker_entity, const char *taker_script, Address sender, const char *id, std::size_t values)
+        {
+            if (s.searched)
+                return s.message && s.args && s.sender == sender;
+            s.searched = true, s.sender = sender;
+            for (const auto &[c, script] : entity_scripts(taker_entity, 256))
+            {
+                if (script != taker_script || s.message)
+                    continue;
+                for (const auto delegator : list(value<Address>(value<Address>(c + 56) + 160), 128))
+                {
+                    const auto m = value<Address>(delegator + 24), to = value<Address>(delegator + 32);
+                    if (typed(delegator, 0x13bc268) && typed(m, 0x17b6578) && typed(to, 0x13bbcb8) &&
+                        string(value<Address>(m + 16), 120).find(std::string("_id_") + id) != std::string::npos)
+                    {
+                        s.message = m, s.target = to;
+                        break;
+                    }
+                }
+            }
+            if (s.message && sender)
+                for (const auto node : aku_send_nodes(value<Address>(sender + 56), s.message))
+                {
+                    const auto list_at = value<Address>(node + 32);
+                    if (typed(node, 0x13bc390) && value<Address>(node + 16) == s.message && typed(list_at, 0x1745070) && list(list_at, 16).size() == values)
+                    {
+                        s.args = list_at;
+                        break;
+                    }
+                }
+            std::cout << "Boss rule: his " << id << " (to his " << taker_script << ") " << (s.message ? "found" : "not found") << ", its values "
+                      << (s.args ? "found" : "not found") << "\n" << std::flush;
+            return s.message && s.args;
+        }
+        bool papu_send(const PapuSend &s)
+        {
+            const bool sender_ok = event_hook.installed || code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0});
+            if (!sender_ok || !s.message || !s.args || !typed(s.sender, 0x13bbbd0) || !typed(s.message, 0x17b6578) || !typed(s.args, 0x1745070))
+                return false;
+            std::array<Address, 11> own{base() + 0x13bc390, 0, s.message, s.target, s.args};
+            std::array<Address, 6> context{s.sender};
+            reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(reinterpret_cast<Address>(own.data()), reinterpret_cast<Address>(context.data()));
+            return true;
+        }
+        Address papu_timer(const BossTuning &t);
+        // V1.3.32: the bar filled back up the game's own way: the message his AI sends his health script when Crash dies and
+        // the fight starts over (hdq20ywc; V1.3.31's log: as his health script takes it, his health and the bar's count go
+        // back to full), sent from a node of our own with the values his AI's own node gives it. Then his health goes back
+        // to what it was (his health part's damage, +0x310), and his immunity too if it stopped
+        bool bar_refill(BossTuning &t, std::uint64_t now)
+        {
+            if (!t.papu_ai || !typed(t.health_part, 0x14da2c0) || !papu_send_find(t.refill_send, t.papu, "common_BossHealthHandler", t.papu_ai, "hdq20ywc", 4))
+                return false;
+            const int damage = value<int>(t.health_part + 0x310), health = actor_health(t.papu);
+            const auto timer = papu_timer(t);
+            const float countdown = timer ? value<float>(timer + 0x50) : 0.0f;
+            const auto flags = value<std::uint32_t>(t.papu + 0x7c);
+            if (!papu_send(t.refill_send))
+                return false;
+            std::ostringstream line;
+            line << "Boss bar: filled back up his health script's own way (hdq20ywc)";
+            if (value<int>(t.health_part + 0x310) != damage)
+                write(t.health_part + 0x310, damage), line << "; his damage back to " << damage;
+            line << "; his health " << health << " -> " << actor_health(t.papu);
+            if (timer && countdown > 0.1f && value<float>(timer + 0x50) < 0.05f)
+                write(timer + 0x50, countdown), line << "; his immunity had stopped: its timer back to " << countdown << " s";
+            if (const auto after = value<std::uint32_t>(t.papu + 0x7c); (after & 0x8) && !(flags & 0x8))
+                write(t.papu + 0x7c, after & ~0x8u), line << "; his can-be-hit flag clear again";
+            std::cout << line.str() << "\n" << std::flush;
+            (void)now;
+            return true;
+        }
+        // V1.3.32: V1.3.30's clips and V1.3.31's log: the bar only redraws as it's hit, so a count put back (V1.3.29) or a
+        // length written (V1.3.30) didn't show until his next hit, which then stepped down from full to the same notch.
+        // Now when the bar is short of his hits left and he has the bar's most or more left (his first hit with more hits
+        // than its 9 notches; a hit on him while he's red at the fight's start, taken back), the bar is filled back up the
+        // game's own way (see bar_refill), which redraws it full. Otherwise the count alone goes back, as in V1.3.29
         void bar_count(BossTuning &t, std::uint64_t now)
         {
             if (!t.papu || !t.bar_object || !t.bar_parent || t.bar_hits < 1 || !typed(t.papu, 0x1592220) || !health_getter_ok())
@@ -5789,8 +5791,8 @@ namespace ingame
             for (const auto &[a, off] : t.count_places)
                 if (!typed(a, off == 0xb4 ? 0x1623970 : 0x1622be8))
                 {
-                    t.count_places.clear(), t.count_last.clear(), t.w_for_count.clear(), t.w_targets.clear();
-                    t.count_searched = t.count_checked = t.w_checked = t.bar_ours = false, t.w_fixes = 0, t.count_since = now;
+                    t.count_places.clear(), t.count_last.clear();
+                    t.count_searched = t.count_checked = false, t.count_since = now;
                     break;
                 }
             if (!t.count_searched)
@@ -5800,50 +5802,34 @@ namespace ingame
                 t.count_searched = true, t.count_checked = false;
                 std::vector<std::pair<Address, unsigned>> found;
                 bar_reach(t.bar_object, 5, 3000, found);
-                const float full = value<float>(t.bar_parent + 0x98);
                 for (const auto &[a, depth] : found)
                 {
                     if (typed(a, 0x1623970) && value<int>(a + 0xb4) == most)
                         t.count_places.emplace_back(a, 0xb4);
                     else if (typed(a, 0x1622be8) && value<int>(a + 0x104) == most)
                         t.count_places.emplace_back(a, 0x104);
-                    if (typed(a, 0x1622be8) && std::abs(value<float>(a + 0xe8) - full) < 0.5f && t.w_targets.size() < 6)
-                        t.w_targets.push_back(a);
                 }
                 t.count_last.clear();
                 for (const auto &[a, off] : t.count_places)
                     t.count_last.push_back(value<int>(a + off));
                 t.count_since = now;
-                t.snap_objects.clear(), t.bar_settled_frame.clear(), t.bar_settled_taken = false;
-                for (const auto &[a, depth] : found)
-                    t.snap_objects.push_back(a);
                 probe_count_at = t.count_places.empty() ? 0 : t.count_places[0].first + t.count_places[0].second;
                 if (t.count_lines < 30)
-                    ++t.count_lines, std::cout << "Boss bar: its own count of notches left found in " << t.count_places.size() << " places (" << most << ", at his full health); "
-                                               << t.w_targets.size() << " objects may hold the length the blue heads to (" << full << ")\n" << std::flush;
+                    ++t.count_lines, std::cout << "Boss bar: its own count of notches left found in " << t.count_places.size() << " places (" << most << ", at his full health)\n"
+                                               << std::flush;
                 return;
             }
             if (t.count_places.empty())
                 return;
             const auto count_at = [&](std::size_t i) { return value<int>(t.count_places[i].first + t.count_places[i].second); };
-            // settled: the blue's length the same for 0.6 s, and the count too
-            const float w = value<float>(t.bar_parent + 0x98);
-            const bool settled = std::isfinite(w) && std::abs(w - t.w_settling) < 0.01f && now - t.w_since >= 600 && now - t.count_since >= 600;
-            // (V1.3.31 research, see bar_frames) the bar as it last settled, before each of his first two hits
-            if (settled && !t.bar_settled_taken && t.bar_frame_hits < 2 && t.bar_frame_due.empty() && !t.snap_objects.empty())
-                t.bar_settled_frame = bar_snapshot(t), t.bar_settled_taken = true;
             if (!t.count_checked)
             {
-                // (the full length, before his first hit)
-                if (settled && health == t.bar_hits * 100)
-                    t.w_for_count.emplace(most, w);
                 // his first hit: a count goes one down (anything else: not a count, dropped)
                 bool changed = false;
                 for (std::size_t i = 0; i < t.count_places.size(); ++i)
                     changed = changed || count_at(i) != t.count_last[i];
                 if (!changed)
                     return;
-                bar_frames_start(t, now);
                 t.count_checked = true, t.count_since = now;
                 std::vector<std::pair<Address, unsigned>> kept;
                 std::vector<int> last;
@@ -5858,64 +5844,30 @@ namespace ingame
             }
             if (t.count_places.empty())
                 return;
-            // a change the game made (a hit): the bar's own count again
-            bool game_changed = false;
-            for (std::size_t i = 0; i < t.count_places.size(); ++i)
-                if (count_at(i) != t.count_last[i])
-                    t.bar_ours = false, t.w_fixes = 0, t.count_since = now, game_changed = true;
-            if (game_changed)
-                bar_frames_start(t, now);
-            if (settled && !game_changed && !t.bar_ours)
-            {
-                t.w_for_count.emplace(count_at(0), w);
-                // (the object of the length the blue heads to: the one that moved with it, when it first settles away from full)
-                if (!t.w_checked && t.fill_full > 0 && std::abs(w - t.fill_full) > 50)
-                {
-                    t.w_checked = true;
-                    const auto before = t.w_targets.size();
-                    t.w_targets.erase(std::remove_if(t.w_targets.begin(), t.w_targets.end(),
-                                                     [&](Address a) { return !typed(a, 0x1622be8) || std::abs(value<float>(a + 0xe8) - w) >= 0.5f; }),
-                                      t.w_targets.end());
-                    if (t.count_lines < 30)
-                        ++t.count_lines, std::cout << "Boss bar: the length the blue heads to: " << t.w_targets.size() << " of the " << before << " objects moved with it (" << w << ")\n"
-                                                   << std::flush;
-                }
-            }
             const int target = std::min(most, std::clamp((health + 99) / 100, 0, 1000));
-            int from = -1;
+            bool short_of = false;
+            for (std::size_t i = 0; i < t.count_places.size(); ++i)
+                if (const int v = count_at(i); v < target && v >= 0)
+                    short_of = true;
+            // short of a full bar with a full bar's hits or more left: filled back up the game's way (and seen to be)
+            if (short_of && target == most && now - t.refill_at >= 1500 && t.refills < 24)
+            {
+                t.refill_at = now, ++t.refills;
+                const int before = count_at(0);
+                if (bar_refill(t, now) && t.count_lines < 30)
+                    ++t.count_lines, std::cout << "Boss bar: its count after the refill " << before << " -> " << count_at(0) << " (his health " << actor_health(t.papu) << ")\n"
+                                               << std::flush;
+            }
             for (std::size_t i = 0; i < t.count_places.size(); ++i)
             {
                 const auto [a, off] = t.count_places[i];
                 if (const int v = count_at(i); v < target && v >= 0)
-                    write(a + off, target), from = v;
+                {
+                    write(a + off, target);
+                    if (t.count_lines < 30)
+                        ++t.count_lines, std::cout << "Boss bar: its count " << v << " -> " << target << " (his health " << health << "; it shows once he's hit again)\n" << std::flush;
+                }
                 t.count_last[i] = count_at(i);
-            }
-            const auto it = t.w_for_count.find(target);
-            const bool known = it != t.w_for_count.end() && std::isfinite(it->second) && it->second > 0;
-            // the blue's length for the count (before its object is checked, only the full length, the one they all had)
-            const auto put_length = [&] {
-                write(t.bar_parent + 0x98, it->second);
-                for (const auto a : t.w_targets)
-                    if (typed(a, 0x1622be8) && (t.w_checked || std::abs(it->second - t.fill_full) < 0.5f))
-                        write(a + 0xe8, it->second);
-            };
-            if (from >= 0)
-            {
-                t.bar_ours = true, t.w_fixes = 0, t.count_since = now;
-                if (known)
-                    put_length();
-                if (t.count_lines < 30)
-                    ++t.count_lines, std::cout << "Boss bar: its count " << from << " -> " << target << " (his health " << health << ")"
-                                               << (known ? "; the blue kept at " + std::to_string(static_cast<int>(it->second)) : std::string("; that count's length isn't known yet")) << "\n"
-                                               << std::flush;
-            }
-            else if (t.bar_ours && settled && known && count_at(0) == target && std::abs(w - it->second) > 0.5f && t.w_fixes < 2)
-            {
-                ++t.w_fixes;
-                put_length();
-                t.count_since = now;
-                if (t.count_lines < 30)
-                    ++t.count_lines, std::cout << "Boss bar: the blue stepped down anyway (" << w << "); back to " << it->second << " (count " << target << ")\n" << std::flush;
             }
         }
         void stretch_bar_fill(BossTuning &t, const Shared &state, std::uint64_t now)
@@ -5939,7 +5891,6 @@ namespace ingame
                 t.fill_full = width;
             bar_research(t, now);
             bar_count(t, now);
-            bar_frames(t, now);
             // the bar's own HealthBar as wide as its setting's (a bar made before the setting changed gets it at its next
             // layout: his first hit, or a death); not with /bar_try none, to compare
             const float stretch = state.bar_try_target == 1 ? 1.0f : bar_stretch(t.bar_game_hits, t.bar_hits);
@@ -6153,7 +6104,7 @@ namespace ingame
                     laps = t.laps_start + taken * (t.papu_original - 1) / (total - 1);
                 }
             }
-            return std::clamp(5.5f + 1.4f * static_cast<float>(std::clamp(laps, 1, 12)), 7.0f, 16.0f);
+            return std::clamp(7.5f + 1.5f * static_cast<float>(std::clamp(laps, 1, 12)), 8.0f, 18.0f);
         }
         std::map<std::string, float> game_immune;
         bool boss_immune_changed = false;
@@ -7034,6 +6985,7 @@ namespace ingame
             if (immune && !t.immune_flag)
             {
                 t.immune_since = now, t.cut_done = false, t.cut_checked = true, t.timer_sampled = false, t.timer_start_at = 0;
+                t.red_spun = false, t.slam_wait = false; // (V1.3.32: red until the slam after his next spin)
                 if (timer && read(timer, t.timer_start))
                 {
                     t.timer_start_at = now, t.timer_started = timer;
@@ -7095,15 +7047,17 @@ namespace ingame
         {
             t.cut_done = true, t.cut_at = now, t.cut_checked = false;
             std::ostringstream line;
-            line << "Boss rule: his spin is over, " << seconds(now - t.immune_since) << " into his immunity: ";
+            line << "Boss rule: his immunity ends, " << seconds(now - t.immune_since) << " in: ";
             const auto timer = papu_timer(t);
             if (!timer)
                 line << "its timer isn't there (it runs to its end)", t.cut_checked = true;
-            else if (!t.timer_down.empty())
+            else if (!t.timer_down.empty() || t.timer_up.empty())
             {
-                for (const auto off : t.timer_down)
+                // (V1.3.31's log: its countdown is +0x50)
+                const auto down = t.timer_down.empty() ? std::vector<unsigned>{0x50} : t.timer_down;
+                for (const auto off : down)
                     write(timer + off, 0.02f);
-                line << "its timer's countdown (" << offsets_text(t.timer_down) << ") set to its end";
+                line << "its timer's countdown (" << offsets_text(down) << ") set to its end";
             }
             else if (!t.timer_up.empty() && t.timer_length > 0)
             {
@@ -7111,10 +7065,42 @@ namespace ingame
                     write(timer + off, t.timer_length + 0.5f);
                 line << "its timer's time (" << offsets_text(t.timer_up) << ") set past its length (" << t.timer_length << " s)";
             }
-            else
-                line << "which of its timer's numbers count the time isn't known (it runs to its end)", t.cut_checked = true;
             if (t.cut_lines < 40)
                 ++t.cut_lines, std::cout << line.str() << "\n" << std::flush;
+        }
+        // V1.3.32 (Eric: "start off red" once the fight starts: "red, you get to hit him, and then red"): from the fight's
+        // start (and its start over after Crash dies) he's red until the slam after his first spin, as after a hit. The
+        // game's immunity only runs after a hit (its timer is made at his first hit), so when its timer is there (a fight
+        // after his first hit in this visit) it's run again for that long, and a landing on him is the game's own bounce.
+        // Before that, a landing on him is a hit for the game, taken back (his health and the bar back, and Crash takes the
+        // hit, see papu_rule), and the game's immunity runs from there
+        void papu_start_red(BossTuning &t, std::uint64_t now)
+        {
+            t.start_red = true, t.red_spun = false, t.slam_wait = false, t.start_timer = false;
+            std::ostringstream line;
+            line << "Boss rule: the fight starts; he's red until the slam after his first spin";
+            if (const auto timer = papu_timer(t))
+            {
+                const float length = papu_red_time(t);
+                write(timer + 0x48, length), write(timer + 0x50, length);
+                t.start_timer = true, t.start_timer_at = now, t.start_timer_set = length, t.start_timer_checked = false;
+                line << "; his immunity's timer runs again for " << length << " s";
+            }
+            else
+                line << " (his immunity's timer isn't made yet, at his first hit: a landing on him before that is a hit for the game, taken back)";
+            std::cout << line.str() << "\n" << std::flush;
+        }
+        // V1.3.32 (Eric: red goes away "after he slams, and then you can jump on him"): his red ends with the slam after his
+        // first spin since he turned red (his AI's 3rnyv3pq), or if he starts another spin first, or 2.5 s after the spin
+        // without a slam. The game's immunity ends there too (see papu_cut)
+        void papu_red_end(BossTuning &t, bool immune, std::uint64_t now, const char *why)
+        {
+            if (t.cut_lines < 40)
+                ++t.cut_lines, std::cout << "Boss rule: his red ends: " << why << " (" << seconds(now - t.slam_wait_since) << " after his spin)\n" << std::flush;
+            t.slam_wait = false, t.start_red = false;
+            if (immune || t.start_timer)
+                papu_cut(t, now);
+            t.start_timer = false;
         }
         void papu_rule(BossTuning &t, const Shared &state, std::uint64_t now)
         {
@@ -7202,9 +7188,14 @@ namespace ingame
                         ++t.red_lines, std::cout << "Boss rule: his hit starts his immunity: " << length << " s at most (he's red once he's up, until his next spin is over)\n"
                                                  << std::flush;
                 }
-                // V1.3.31: his first spin since his immunity started is over: so is his immunity (see papu_cut)
-                if (t.state == 2 && s == 1 && immune && t.immune_flag && !t.cut_done && state.boss_rules)
-                    papu_cut(t, now);
+                // V1.3.32: the fight starts (or starts over): red from the start (see papu_start_red)
+                if (t.state == 5 && s == 1 && state.boss_rules)
+                    papu_start_red(t, now);
+                // V1.3.32: his first spin since he turned red is over: red ends with the slam after it (see papu_red_end)
+                if (t.state == 2 && s == 1 && (immune || t.start_red) && state.boss_rules && !t.red_spun)
+                    t.red_spun = true, t.slam_wait = true, t.slam_wait_since = now, t.slams_seen = papu_slams.load();
+                else if (t.state == 1 && s == 2 && t.slam_wait)
+                    papu_red_end(t, immune, now, "his next spin started before a slam");
                 // research: what in his health part changed since the last state began
                 if (!t.health_part || !typed(t.health_part, 0x14da2c0))
                 {
@@ -7274,11 +7265,30 @@ namespace ingame
             if (s != 3)
                 t.forbidden = false;
             papu_immune_watch(t, immune, s, now);
+            if (t.slam_wait && papu_slams.load() != t.slams_seen)
+                papu_red_end(t, immune, now, "his slam");
+            else if (t.slam_wait && now - t.slam_wait_since >= 2500)
+                papu_red_end(t, immune, now, "no slam 2.5 s after his spin");
+            if (t.start_timer && !t.start_timer_checked && now - t.start_timer_at >= 300)
+            {
+                t.start_timer_checked = true;
+                const auto timer = papu_timer(t);
+                const float left = timer ? value<float>(timer + 0x50) : 0.0f;
+                const bool runs = timer && std::isfinite(left) && left > 0 && left < t.start_timer_set - 0.15f;
+                if (!runs)
+                {
+                    if (timer)
+                        write(timer + 0x50, 0.0f);
+                    t.start_timer = false;
+                }
+                std::cout << "Boss rule: his immunity's timer " << (runs ? "runs again" : "didn't run again (a landing on him is a hit for the game, taken back)") << " ("
+                          << left << " of " << t.start_timer_set << " s left " << seconds(now - t.start_timer_at) << " in)\n" << std::flush;
+            }
             // V1.3.10 (the rule as asked for): after a hit he's red for about one spin cycle, from when he gets up (3 -> 1).
             // V1.3.30: for as long as the game's immunity of that hit lasts. V1.3.31: as the game has it, his can-be-hit flag
             // (see papu_immune_watch), which papu_cut ends with his first spin after the hit (Eric: "once the cycle is
             // done"): he can't be hit whenever he's red, and can be as soon as he isn't
-            const bool red = state.boss_rules && ((immune && (s == 1 || s == 2)) || (t.forbidden && s == 3));
+            const bool red = state.boss_rules && (((immune || t.start_red) && (s == 1 || s == 2)) || (t.forbidden && s == 3));
             // (red's end, to see how it fits his spin: the state then, and how long he's been in it)
             if (t.red && !red && t.red_lines < 80)
                 ++t.red_lines, std::cout << "Boss rule: he's not red any more, " << (t.game_hit_at ? seconds(now - t.game_hit_at) : std::string("?")) << " after his hit ("
