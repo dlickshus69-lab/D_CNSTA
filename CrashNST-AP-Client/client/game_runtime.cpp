@@ -4860,6 +4860,11 @@ namespace ingame
             float speed = 0, top_speed = 0;
             // the red glow: our tint on his model
             Address tint_model = 0, tint_bundle = 0, tint_handle = 0;
+            // research: the health bar's numbers
+            std::set<Address> bar_handlers;
+            std::vector<std::pair<Address, std::uint32_t>> bar_fields;
+            std::uint64_t bar_next = 0;
+            unsigned bar_lines = 0;
         } boss_tuning;
         constexpr std::array<float, 4> boss_red{1.6f, 0.12f, 0.12f, 0.6f};
         void tell_once(BossTuning &t, const std::string &key, const std::string &line)
@@ -4902,6 +4907,50 @@ namespace ingame
         // health: the boss himself (his health bar has his name), not the lions or blobs he sends; not N. Gin's mechs (both
         // only get faster), not Cortex's chase in Crash 2 (more health there can't be beaten in time), and of Brio only
         // his last form (his first phase stays)
+        // research (V1.3.6): the boss's health bar. V1.3.5 made HitCount bigger: the bar grew to 10 notches but its fill
+        // still counted 5 (half full at the start, empty a hit early). Its bar object's numbers go to the log as they change
+        void watch_boss_bar(BossTuning &t, Address c, const std::string &name)
+        {
+            if (!t.bar_handlers.insert(c).second)
+                return;
+            const auto at = field_offset(value<Address>(c + 56), "guiBossHealthbarProj", 8);
+            const auto p = at ? value<Address>(c + at) : 0;
+            const auto bar = resolve(p) ? resolve(p) : p;
+            if (!bar || !readable(bar, 0x100))
+            {
+                std::cout << "Boss bar: " << name << "'s health bar isn't there (+" << at << ")\n" << std::flush;
+                return;
+            }
+            std::cout << "Boss bar: " << name << "'s health bar is " << object_brief(bar, 0x100, 6) << "\n";
+            dump_pointees(bar, "Boss bar: " + name, 0x100);
+            std::cout << std::flush;
+            for (unsigned off = 8; off < 0x100; off += 4)
+                t.bar_fields.push_back({bar + off, value<std::uint32_t>(bar + off)});
+        }
+        void update_boss_bar(BossTuning &t, std::uint64_t now)
+        {
+            if (t.bar_fields.empty() || now < t.bar_next || t.bar_lines >= 200)
+                return;
+            t.bar_next = now + 150;
+            for (auto &[at, last] : t.bar_fields)
+            {
+                const auto v = value<std::uint32_t>(at);
+                if (v == last)
+                    continue;
+                float a = 0, b = 0;
+                std::memcpy(&a, &last, 4), std::memcpy(&b, &v, 4);
+                if (t.bar_lines++ < 200)
+                    std::cout << "Boss bar +" << seconds(now - t.entered) << ": +0x" << std::hex << (at & 0xfff) << std::dec << " " << static_cast<int>(last) << " -> "
+                              << static_cast<int>(v) << " (decimal " << a << " -> " << b << ")\n";
+                last = v;
+            }
+            std::cout << std::flush;
+        }
+        // health: the boss himself (his health bar has his name), not the lions or blobs he sends; not N. Gin's mechs (both
+        // only get faster), not Cortex's chase in Crash 2 (more health can't be beaten in time), and of Brio only his
+        // last form (his first phase stays). V1.3.6: his HitCount (the bar's notches) stays the game's; once his health
+        // script has made his health (HitCount x 100), his health and maxHealth go up together, so a hit takes part of a
+        // notch. Done again whenever the fight starts over (a death resets the boss to the game's health)
         void tune_boss_health(BossTuning &t, const std::string &boss, Address owner, const std::string &name, Address c, unsigned percent)
         {
             const auto data = value<Address>(c + 16);
@@ -4921,53 +4970,35 @@ namespace ingame
             const int original = it->second;
             if (original < 1 || original > 50)
                 return;
-            const bool eligible = value<Address>(data + name_at) && boss != "B204" && boss != "B304" && boss != "B205" &&
-                                  (boss != "B105" || name.find("Hulk") != std::string::npos);
-            const int hits = eligible ? std::max(original, static_cast<int>(std::lround(original * percent / 100.0))) : original;
-            if (value<int>(data + hit_at) != hits)
-                write(data + hit_at, hits);
-            if (t.handlers.count(c))
-                return;
+            if (value<int>(data + hit_at) != original)
+                write(data + hit_at, original);
             const int max_health = value<int>(c + max_at);
             if (max_health <= 0)
-                return; // not started yet: it takes the new HitCount when it does
-            t.handlers.insert(c);
+                return; // not started yet
+            watch_boss_bar(t, c, name);
+            const bool eligible = value<Address>(data + name_at) && boss != "B204" && boss != "B304" && boss != "B205" &&
+                                  (boss != "B105" || name.find("Hulk") != std::string::npos);
             if (!eligible)
             {
                 tell_once(t, "same" + name, "Boss health: " + name + " keeps his " + std::to_string(original) + " hits");
                 return;
             }
-            std::ostringstream line;
-            line << "Boss health: " << name << " " << original << " hits -> " << hits << " (" << percent << "%); maxHealth " << max_health;
-            if (max_health % 100 == 0 && max_health / 100 >= original && max_health / 100 <= original * 2 + 1 && max_health != hits * 100)
-                write(c + max_at, hits * 100), line << " -> " << value<int>(c + max_at);
-            // the boss's own health (the actor's, as for Crash: the getter reads it at +0xf8)
+            const int hits = std::max(original, static_cast<int>(std::lround(original * percent / 100.0)));
+            if (hits == original || max_health != original * 100)
+                return; // nothing to do, or done
             const bool actor = typed(owner, 0x1592220) && health_getter_ok();
             const int health = actor ? actor_health(owner) : -1, raw = value<int>(owner + 0xf8);
-            line << "; " << (actor ? std::string("actor") : "not an actor (" + object_brief(owner) + ")") << " health " << health << ", +0xf8 " << raw;
-            if (actor && health == raw && health == max_health && health != hits * 100)
+            if (!actor || health != raw || health != max_health)
             {
-                write(owner + 0xf8, hits * 100);
-                line << " -> " << actor_health(owner);
+                tell_once(t, "notfull" + name + std::to_string(health),
+                          "Boss health: " + name + " left as he is (" + (actor ? "health " + std::to_string(health) + ", +0xf8 " + std::to_string(raw) : std::string("not an actor")) +
+                              ", maxHealth " + std::to_string(max_health) + ")");
+                return;
             }
-            else if (actor && health != raw)
-            {
-                // where else it could be: ints in the actor that hold the same number
-                line << "; same number at";
-                for (unsigned off = 0x40; off < 0x400; off += 4)
-                    if (value<int>(owner + off) == health)
-                        line << " " << hex(off);
-            }
-            if (actor)
-            {
-                std::array<unsigned char, 64> code{};
-                read(base() + 0x4df230, code);
-                std::ostringstream bytes;
-                for (const auto b : code)
-                    bytes << std::hex << std::setw(2) << std::setfill('0') << unsigned(b);
-                tell_once(t, "getter", "Boss health: the health getter's code " + bytes.str());
-            }
-            std::cout << line.str() << "\n" << std::flush;
+            write(c + max_at, hits * 100);
+            write(owner + 0xf8, hits * 100);
+            std::cout << "Boss health: " << name << " " << original << " hits -> " << hits << " (" << percent << "%): health " << health << " -> "
+                      << actor_health(owner) << ", maxHealth " << value<int>(c + max_at) << "; his bar keeps " << original << " notches\n" << std::flush;
         }
         // speed: the settings known to set a boss's pace. A speed or speed multiplier goes up by the percent, a wait goes
         // down by it
@@ -5255,6 +5286,7 @@ namespace ingame
                 return;
             if (boss == "B101")
                 papu_rule(t, state, now);
+            update_boss_bar(t, now);
             if (now < t.next)
                 return;
             // every half second: the boss as he starts, Brio's last form as it appears, a retry
