@@ -1,4 +1,5 @@
 ## What's new
 
-- **Better box logic in Crash 3** (new seeds). Boxes, gems and secret exits in Crash 3 levels no longer expect the Crash 3 powers (Double Jump, Super Body Slam and so on). Until now, every box in a later Crash 3 level counted as out of logic until you had the powers the original game gives by then, even a checkpoint crate on the main path. No level needs a power for its boxes or gems. Relics (time trials) still expect them.
-- **Aku Aku Mask filler: the second and third masks work like a crate's.** A mask on top of a mask now makes Aku gold, and a third gives the invincibility. Before, the second mask counted as two hits but kept the first mask's look, and a third did nothing.
+- **Test build for Harder bosses.** This build doesn't change the bosses yet. It adds what's needed to study them:
+  - **`/boss name`** (test command): the next level entrance you go through loads that boss fight instead. Names: papu, ripper1, koala, pinstripe, brio, cortex1, ripper2, komodo, tiny2, ngin2, cortex2, tiny3, dingodile, tropy, ngin3, cortex3. `/boss off` turns it off. Once the fight loads, entrances go back to normal. **Use a test seed**: the game saves a boss as beaten.
+  - **Boss notes in the log**: during a boss fight, the client writes the boss's settings to the log (what counts the hits, the phases, the timers), then every change while you fight. It only reads; nothing about the fight changes.

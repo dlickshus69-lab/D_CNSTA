@@ -33,6 +33,10 @@ public:
     // starting Crash 1 from the title screen puts Crash on the map at the earliest open entrance (map order),
     // instead of wherever the save last left him. The campaign-start hook applies it as the game loads the map.
     void c1_start(const std::set<std::string> &locked);
+    // /boss (test): every entrance in the hub loads this boss fight (a level key like "B204") until it has loaded once;
+    // an empty key puts every entrance back. Throws when the boss isn't in the game's zone list
+    void boss_test(const std::string &key);
+    const std::string &boss_test_key() const { return boss_key_; }
 
 private:
     struct Entrance
@@ -46,6 +50,8 @@ private:
     HANDLE process_ = nullptr;
     DWORD pid_ = 0;
     std::uintptr_t base_ = 0, remote_ = 0, variable_ = 0, c1_start_ = 0;
+    std::uintptr_t boss_zone_ = 0;
+    std::string boss_key_;
     std::vector<ZoneRecord> zones_;
     std::array<std::array<unsigned char, 5>, 8> calls_{};
     unsigned installed_ = 0;

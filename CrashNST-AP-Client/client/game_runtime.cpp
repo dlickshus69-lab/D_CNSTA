@@ -4621,9 +4621,134 @@ namespace ingame
                     ++damage_dumps, log_graph_fields(c, "Damage manager");
             }
         }
+        // Harder bosses research (V1.3.2, test): in a boss fight, the boss's own scripts and their settings go to the log
+        // once, a few seconds in (and any that turn up later, every 5 seconds), then every change of their whole-number
+        // and on/off settings while you fight: what counts the hits, what changes the phase, what changes the pace. Only
+        // reads. (Writing ~200 lines at once can hitch the game for a moment 3 seconds into the fight.)
+        struct BossWatchField
+        {
+            Address at = 0;
+            unsigned bytes = 0;
+            std::string name;
+            int last = 0;
+        };
+        struct BossWatch
+        {
+            std::string level;
+            std::uint64_t entered = 0, next = 0, next_scan = 0;
+            std::set<Address> seen;
+            std::vector<BossWatchField> fields;
+            unsigned lines = 0;
+        } boss_watch;
+        bool boss_related(const std::string &text)
+        {
+            for (const char *word : {"Boss", "boss", "Papu", "Ripper", "Koala", "Pinstripe", "Brio", "Cortex", "Komodo", "Tiny", "Gin", "Dingodile", "Tropy"})
+                if (text.find(word) != std::string::npos)
+                    return true;
+            return false;
+        }
+        // the boss fight Crash is in ("B204"), from the zone's path (".../bosses/b204_ngin/..."), or empty. (level_key()
+        // gives "Boss" for every boss fight.)
+        std::string boss_zone_key()
+        {
+            auto zone = string(value<Address>(value<Address>(base() + 0x1a64690) + 184), 120);
+            std::transform(zone.begin(), zone.end(), zone.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            const auto at = zone.find("bosses/b");
+            if (at == std::string::npos || zone.size() < at + 11)
+                return {};
+            auto key = zone.substr(at + 7, 4);
+            if (!std::all_of(key.begin() + 1, key.end(), [](char c) { return c >= '0' && c <= '9'; }))
+                return {};
+            key[0] = 'B';
+            return key;
+        }
+        void update_boss_research(const std::string &level)
+        {
+            auto &w = boss_watch;
+            if (level.size() != 4 || level[0] != 'B')
+            {
+                if (!w.level.empty())
+                    w = {};
+                return;
+            }
+            const auto now = GetTickCount64();
+            if (w.level != level)
+            {
+                w = {};
+                w.level = level, w.entered = now, w.next_scan = now + 3000;
+                std::cout << "Boss research: " << level << "; its scripts go to the log 3 seconds in, then every change while you fight\n" << std::flush;
+                return;
+            }
+            if (now >= w.next_scan && w.seen.size() < 40)
+            {
+                w.next_scan = now + 5000;
+                for (const auto owner : event_owners())
+                {
+                    if (w.seen.size() >= 40)
+                        break;
+                    if (w.seen.count(owner))
+                        continue;
+                    const auto name = string(value<Address>(owner + 128));
+                    std::string scripts;
+                    std::vector<std::pair<Address, std::string>> own;
+                    for (const auto c : list(value<Address>(owner + 24), 64))
+                        if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78) && value<Address>(c + 24) == owner)
+                        {
+                            auto script = string(value<Address>(value<Address>(c + 56) + 16), 120);
+                            if (script.rfind("Scripts.Graph.", 0) == 0)
+                                script.erase(0, 14);
+                            scripts += (scripts.empty() ? "" : ", ") + script;
+                            own.emplace_back(c, script);
+                        }
+                    if (!boss_related(name) && !boss_related(scripts))
+                        continue;
+                    w.seen.insert(owner);
+                    std::cout << "Boss research: " << (name.empty() ? std::string("(unnamed)") : name) << " has " << (scripts.empty() ? "no scripts" : scripts)
+                              << "\n";
+                    for (const auto &[c, script] : own)
+                    {
+                        // the shared crate, camera and pickup scripts say nothing about the boss
+                        if (script.rfind("common_", 0) == 0)
+                            continue;
+                        const auto who = "Boss " + name + " " + script;
+                        log_graph_fields(c, who);
+                        if (const auto data = value<Address>(c + 16); data && typed(data, 0x13bbb10))
+                            dump_fields(data, value<Address>(data + 32), who + " data", 60);
+                        // its whole-number (4 bytes, not floating point) and on/off (1 byte) settings are watched
+                        const auto meta = value<Address>(c + 56);
+                        const unsigned size = value<std::uint16_t>(meta + 90), count = value<unsigned>(meta + 24);
+                        const auto fields = value<Address>(meta + 40);
+                        for (unsigned i = 0; fields && count <= 512 && i < count && w.fields.size() < 600; ++i)
+                        {
+                            const auto field = value<Address>(fields + i * 8);
+                            const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                            if ((bytes != 1 && bytes != 4) || offset < 0x40 || offset + bytes > size || value<Address>(field) == base() + 0x17afe98)
+                                continue;
+                            const int v = bytes == 1 ? value<unsigned char>(c + offset) : value<int>(c + offset);
+                            w.fields.push_back({c + offset, bytes, name + " " + script + " " + string(value<Address>(field + 48), 64), v});
+                        }
+                    }
+                }
+                std::cout << std::flush;
+            }
+            if (now < w.next || w.fields.empty() || w.lines >= 800)
+                return;
+            w.next = now + 150;
+            for (auto &f : w.fields)
+            {
+                const int v = f.bytes == 1 ? value<unsigned char>(f.at) : value<int>(f.at);
+                if (v == f.last)
+                    continue;
+                if (w.lines++ < 800)
+                    std::cout << "Boss watch +" << seconds(now - w.entered) << ": " << f.name << " " << f.last << " -> " << v << "\n";
+                f.last = v;
+            }
+            std::cout << std::flush;
+        }
         // requests from /nitro_spawn and the Nitro Trap; a request waits up to 5 seconds for a spot
         void update_nitro_trap(Shared &state, const std::string &level)
         {
+            update_boss_research(boss_zone_key());
             // the game's sounds from the last level may be gone with it
             static std::string sound_level;
             if (level != sound_level)

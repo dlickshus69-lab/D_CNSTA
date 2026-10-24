@@ -202,7 +202,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /boss name (test) | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -452,6 +452,44 @@ void ClientRuntime::handle_commands()
                                   (box_markers->toggle(command.substr(1), argument.empty() ? "toggle" : argument)
                                        ? "on"
                                        : "off"));
+            }
+            else if (command == "/boss")
+            {
+                // test (Harder bosses): the next level entrance loads this boss fight instead. Counts as beating it in
+                // this seed (the game saves it), so use a test seed
+                static const std::vector<std::pair<std::string, std::vector<std::string>>> bosses{
+                    {"B101", {"papu", "papupapu"}},       {"B102", {"ripper1", "ripperroo1"}}, {"B103", {"koala", "koalakong"}},
+                    {"B104", {"pinstripe"}},              {"B105", {"brio"}},                  {"B106", {"cortex1"}},
+                    {"B201", {"ripper2", "ripperroo2"}},  {"B202", {"komodo", "komodobros"}},  {"B203", {"tiny2"}},
+                    {"B204", {"ngin2"}},                  {"B205", {"cortex2"}},               {"B301", {"tiny3"}},
+                    {"B302", {"dingodile"}},              {"B303", {"tropy", "ntropy"}},       {"B304", {"ngin3"}},
+                    {"B305", {"cortex3"}}};
+                std::string wanted;
+                for (auto c : argument)
+                    if (std::isalnum(static_cast<unsigned char>(c)))
+                        wanted += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                std::string key;
+                for (const auto &[k, names] : bosses)
+                {
+                    std::string lower_key = k;
+                    std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), [](unsigned char c) { return std::tolower(c); });
+                    if (wanted == lower_key || std::find(names.begin(), names.end(), wanted) != names.end())
+                        key = k;
+                }
+                if (wanted == "off")
+                {
+                    boss_wanted.clear();
+                    print_console("Boss test off: entrances lead to their levels again.");
+                }
+                else if (key.empty())
+                    print_console("Boss test: /boss papu, ripper1, koala, pinstripe, brio, cortex1, ripper2, komodo, tiny2, ngin2, cortex2, tiny3, "
+                                  "dingodile, tropy, ngin3 or cortex3 (or a key like B204), /boss off. The next level you enter loads that boss "
+                                  "fight. Beating it counts in this seed, so use a test seed.");
+                else
+                {
+                    boss_wanted = key;
+                    print_console("Boss test: the next level you enter loads " + key + ". Beating it counts in this seed (use a test seed).");
+                }
             }
             else if (command == "/clear")
                 feed_history.clear();

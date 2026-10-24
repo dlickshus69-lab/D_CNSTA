@@ -152,6 +152,31 @@ void ClientRuntime::update_routing(ClientTick &tick)
                     locked.insert(source);
             }
             level_routing->lock_entrances(locked);
+            // /boss (test): every entrance leads to that boss fight until it has loaded once
+            {
+                const auto here = level_key(read_scene(GetCurrentProcess()).zone);
+                if (!boss_wanted.empty() && here == boss_wanted)
+                {
+                    print_console("Boss test: in " + boss_wanted + ". Entrances lead to their levels again.", true);
+                    boss_wanted.clear();
+                }
+                if (level_routing->boss_test_key() != boss_wanted)
+                    try
+                    {
+                        level_routing->boss_test(boss_wanted);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        print_console("Boss test: couldn't send the entrances to " + boss_wanted + " (" + e.what() + "). Turned off.", true);
+                        std::cerr << "Boss test: " << boss_wanted << ": " << e.what() << std::endl;
+                        boss_wanted.clear();
+                        try
+                        {
+                            level_routing->boss_test({});
+                        }
+                        catch (const std::exception &) {}
+                    }
+            }
             const auto refused = level_routing->refused_entrance();
             if (refused != routing_refused)
             {

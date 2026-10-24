@@ -1125,8 +1125,41 @@ void LevelRouting::lock_entrances(const std::set<std::string> &locked)
         if (lock == entrance.locked)
             continue;
         const auto address = state() + 264 + i * 24;
-        write(process_, address, lock ? entrance.destination : entrance.hub, lock ? entrance.hub : entrance.destination);
+        // (while /boss points every entrance at a boss, only the lock is noted; boss_test puts it in place after)
+        if (!boss_zone_)
+            write(process_, address, lock ? entrance.destination : entrance.hub, lock ? entrance.hub : entrance.destination);
         entrance.locked = lock;
+    }
+}
+void LevelRouting::boss_test(const std::string &key)
+{
+    if (!installed_ || read<unsigned char>(process_, state() + 4) != 1)
+        throw std::runtime_error("Entrance-routing dispatcher is inactive");
+    std::uintptr_t zone = 0;
+    if (!key.empty())
+    {
+        for (const auto &z : zones_)
+            if (z.key == key && z.path.find("intro") == std::string::npos)
+                zone = z.address;
+        if (!zone)
+            throw std::runtime_error("Boss fight not found in the game's zone list: " + key);
+    }
+    if (zone == boss_zone_ && !zone)
+        return;
+    // each entrance goes from what it leads to now (its level, its hub when locked, or the last boss) to the boss, or
+    // back; one the game changed itself is left alone. (Done again after a half-done try, so none is left at a boss.)
+    const auto old = boss_zone_;
+    boss_zone_ = zone;
+    boss_key_ = zone ? key : std::string();
+    for (unsigned i = 0; i < entrances_.size(); ++i)
+    {
+        const auto &entrance = entrances_[i];
+        const auto normal = entrance.locked ? entrance.hub : entrance.destination;
+        const auto target = zone ? zone : normal;
+        const auto address = state() + 264 + i * 24;
+        const auto now = read<std::uintptr_t>(process_, address);
+        if (now != target && (now == normal || (old && now == old) || now == zone || now == entrance.hub || now == entrance.destination))
+            write(process_, address, now, target);
     }
 }
 void LevelRouting::c1_start(const std::set<std::string> &locked)
