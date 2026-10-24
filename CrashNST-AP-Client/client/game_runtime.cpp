@@ -1118,6 +1118,15 @@ namespace ingame
         // fight (each kind a few times), to find the one that hurts Crash the way a boss's attack does, and the one that
         // tells a boss he was hit
         std::array<std::atomic<Address>, 4> boss_event_targets{};
+        // Papu Papu's rule (V1.3.11): while he's red, the messages his scripts send when Crash lands on him (the hit's:
+        // his deflect script's ppfqleko and his health script's alo0v4l5 start it, V1.3.5's log) are kept for a tenth of
+        // a second, so the hit doesn't happen: no hit reaction, no bounce for Crash
+        std::atomic<Address> boss_block_actor{0};
+        std::atomic_bool boss_block_red{false};
+        std::atomic<std::uint64_t> boss_block_until{0};
+        std::atomic_uint boss_blocked{0};
+        std::mutex boss_block_mutex;
+        std::vector<std::string> boss_blocked_names;
         std::atomic<std::uint64_t> boss_event_since{0};
         std::atomic_uint boss_event_lines{0};
         std::map<std::string, unsigned> boss_event_counts;
@@ -1378,6 +1387,21 @@ namespace ingame
                                 std::cout << out.str() << "\n" << std::flush;
                             }
                         }
+                    }
+                }
+                if (const auto papu = boss_block_actor.load(); papu && target == papu && boss_block_red.load())
+                {
+                    const auto now = GetTickCount64();
+                    const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                    if (name.find("ppfqleko") != std::string::npos || name.find("alo0v4l5") != std::string::npos)
+                        boss_block_until = now + 100;
+                    if (now < boss_block_until.load())
+                    {
+                        ++boss_blocked;
+                        std::lock_guard lock(boss_block_mutex);
+                        if (boss_blocked_names.size() < 24)
+                            boss_blocked_names.push_back(name);
+                        return 0;
                     }
                 }
                 if (aku_messages_blocked.load() && !own_aku_message.load() && component && target && aku_manager(component, target))
@@ -4859,6 +4883,11 @@ namespace ingame
             std::vector<std::pair<Address, std::vector<std::uint32_t>>> red_snapshot;
             // V1.3.10: red for one spin cycle after a hit (from his recovery to the end of his next spin)
             bool punished = false, spun_since = false;
+            // his spin length (spinPlayerLapCount) and hit count when he turned red: a hit while red would add to them
+            unsigned laps_total_at = 0, hit_count_at = 0;
+            int red_laps = -1, red_hits = -1;
+            unsigned blocked_seen = 0;
+            std::uint64_t blocked_told = 0;
             // the game's hit for Crash (Papu Papu's attack's damage message to him), once found
             Address hit_message = 0, hit_target = 0, hit_args = 0, hit_sender = 0;
             bool hit_searched = false;
@@ -5178,14 +5207,22 @@ namespace ingame
                     if (script == "common_BossAttackDamageHandler")
                         sender = c;
                 Address args = 0;
+                // the script sends ha5y20l3 from more than one node; the hit his attack gives (V1.3.5's log) has a damage
+                // value 4th (+0x1755c60) and an attack name 6th (+0x17483c0). V1.3.10 took another one: Crash's script
+                // didn't react
                 if (message && sender)
                     for (const auto node : aku_send_nodes(value<Address>(sender + 56), message))
-                        if (typed(node, 0x13bc390) && value<Address>(node + 16) == message && typed(value<Address>(node + 32), 0x1745070) &&
-                            list(value<Address>(node + 32), 16).size() == 7)
-                        {
-                            args = value<Address>(node + 32);
-                            break;
-                        }
+                    {
+                        const auto list_at = value<Address>(node + 32);
+                        if (!typed(node, 0x13bc390) || value<Address>(node + 16) != message || !typed(list_at, 0x1745070))
+                            continue;
+                        const auto values = list(list_at, 16);
+                        const bool hit = values.size() == 7 && typed(values[3], 0x1755c60) && typed(values[5], 0x17483c0);
+                        std::cout << "Boss rule: a sender of Crash's hit message in Papu Papu's attack script" << send_arguments(node) << (hit ? " (the hit)" : "")
+                                  << "\n";
+                        if (hit && !args)
+                            args = list_at;
+                    }
                 std::cout << "Boss rule: the game's hit for Crash " << (message && target && sender && args ? "found" : "not found") << " (message "
                           << (message ? "yes" : "no") << ", Papu Papu's attack script " << (sender ? "yes" : "no") << ", its values "
                           << (args ? "yes" : "no") << ")\n" << std::flush;
@@ -5251,6 +5288,87 @@ namespace ingame
             }
             return places;
         }
+        // a hit on him while red taken back: his health (the one number on him or his parts that went down by just as much
+        // since he turned red; V1.3.10's log: his health part's +0x310, the damage taken as a negative number), his spin
+        // length and his hit count
+        void put_back_papu(BossTuning &t, std::ostream &line)
+        {
+            // the hit taken back: his health (as the game's getter sees it) went down; the one number in his actor
+            // that went down (or up) by just as much since he turned red goes back
+            if (t.red_health > 0 && health_getter_ok() && !t.red_snapshot.empty())
+            {
+                const int now_health = actor_health(t.papu), drop = t.red_health - now_health;
+                line << "; his health " << t.red_health << " -> " << now_health;
+                if (drop > 0)
+                {
+                    // a whole number or a decimal that moved by just as much, on him or one of his parts
+                    struct Moved
+                    {
+                        Address place, at;
+                        std::uint32_t before, after;
+                        bool decimal;
+                    };
+                    std::vector<Moved> found;
+                    for (const auto &[place, before] : t.red_snapshot)
+                    {
+                        std::vector<std::uint32_t> after(before.size());
+                        if (!read(place, after))
+                            continue;
+                        for (std::size_t i = 2; i < before.size(); ++i)
+                        {
+                            if (before[i] == after[i])
+                                continue;
+                            const int a = static_cast<int>(before[i]), b = static_cast<int>(after[i]);
+                            float fa = 0, fb = 0;
+                            std::memcpy(&fa, &before[i], 4), std::memcpy(&fb, &after[i], 4);
+                            if (std::abs(a - b) == drop)
+                                found.push_back({place, place + i * 4, before[i], after[i], false});
+                            else if (std::isfinite(fa) && std::isfinite(fb) && std::abs(std::abs(fa - fb) - drop) < 0.01f)
+                                found.push_back({place, place + i * 4, before[i], after[i], true});
+                        }
+                    }
+                    // where a number is: on him, or which of his parts (its script, or its type)
+                    const auto where = [&](const Moved &f) {
+                        std::string part = "his";
+                        if (f.place != t.papu)
+                        {
+                            part = typed(f.place, 0x13bbbd0) ? string(value<Address>(value<Address>(f.place + 56) + 16), 80) : object_brief(f.place);
+                            if (part.rfind("Scripts.Graph.", 0) == 0)
+                                part.erase(0, 14);
+                        }
+                        return part + " +" + hex(static_cast<unsigned>(f.at - f.place));
+                    };
+                    // more than one: his health part (+0x14da2c0, V1.3.10's log) if it's one of them
+                    if (found.size() > 1)
+                        for (const auto &f : found)
+                            if (typed(f.place, 0x14da2c0))
+                            {
+                                found = {f};
+                                break;
+                            }
+                    if (found.size() == 1)
+                    {
+                        write(found[0].at, found[0].before);
+                        line << ", " << where(found[0]) << (found[0].decimal ? " (decimal)" : "") << " put back: " << actor_health(t.papu);
+                    }
+                    else
+                    {
+                        line << ", couldn't tell where (" << found.size() << " numbers moved by " << drop << ":";
+                        for (const auto &f : found)
+                        {
+                            float fa = 0, fb = 0;
+                            std::memcpy(&fa, &f.before, 4), std::memcpy(&fb, &f.after, 4);
+                            line << " " << where(f) << " " << (f.decimal ? std::to_string(fa) + "->" + std::to_string(fb) : std::to_string(static_cast<int>(f.before)) + "->" + std::to_string(static_cast<int>(f.after)));
+                        }
+                        line << ")";
+                    }
+                }
+            }
+            if (t.red_laps >= 0 && t.laps_total_at && value<int>(t.papu_ai + t.laps_total_at) != t.red_laps)
+                line << "; spin length " << value<int>(t.papu_ai + t.laps_total_at) << " -> " << t.red_laps, write(t.papu_ai + t.laps_total_at, t.red_laps);
+            if (t.red_hits >= 0 && t.hit_count_at && value<int>(t.papu_ai + t.hit_count_at) != t.red_hits)
+                line << "; hit count " << value<int>(t.papu_ai + t.hit_count_at) << " -> " << t.red_hits, write(t.papu_ai + t.hit_count_at, t.red_hits);
+        }
         void papu_rule(BossTuning &t, const Shared &state, std::uint64_t now)
         {
             if (!t.papu || !t.papu_ai || !event_owner(t.papu))
@@ -5309,73 +5427,11 @@ namespace ingame
                               << value<int>(t.papu_ai + t.laps_at) << ", spin speed " << spin << ", turning " << static_cast<int>(t.turn_least) << " to "
                               << static_cast<int>(t.turn_most) << " degrees a second, top speed " << static_cast<int>(t.top_speed) << "/s)\n" << std::flush;
                 // a hit (3) or the last one (4) while he was red: it doesn't count, and it's a hit for Crash
-                if (state.boss_rules && t.was_red && (s == 3 || s == 4))
+                if (state.boss_rules && t.was_red && (s == 3 || s == 4) && now - t.blocked_told > 1000)
                 {
                     std::ostringstream line;
                     line << "Boss rule: Crash landed on Papu Papu while he was red (" << seconds(now - t.red_since) << " into it)";
-                    // the hit taken back: his health (as the game's getter sees it) went down; the one number in his actor
-                    // that went down (or up) by just as much since he turned red goes back
-                    if (s == 3 && t.red_health > 0 && health_getter_ok() && !t.red_snapshot.empty())
-                    {
-                        const int now_health = actor_health(t.papu), drop = t.red_health - now_health;
-                        line << "; his health " << t.red_health << " -> " << now_health;
-                        if (drop > 0)
-                        {
-                            // a whole number or a decimal that moved by just as much, on him or one of his parts
-                            struct Moved
-                            {
-                                Address place, at;
-                                std::uint32_t before, after;
-                                bool decimal;
-                            };
-                            std::vector<Moved> found;
-                            for (const auto &[place, before] : t.red_snapshot)
-                            {
-                                std::vector<std::uint32_t> after(before.size());
-                                if (!read(place, after))
-                                    continue;
-                                for (std::size_t i = 2; i < before.size(); ++i)
-                                {
-                                    if (before[i] == after[i])
-                                        continue;
-                                    const int a = static_cast<int>(before[i]), b = static_cast<int>(after[i]);
-                                    float fa = 0, fb = 0;
-                                    std::memcpy(&fa, &before[i], 4), std::memcpy(&fb, &after[i], 4);
-                                    if (std::abs(a - b) == drop)
-                                        found.push_back({place, place + i * 4, before[i], after[i], false});
-                                    else if (std::isfinite(fa) && std::isfinite(fb) && std::abs(std::abs(fa - fb) - drop) < 0.01f)
-                                        found.push_back({place, place + i * 4, before[i], after[i], true});
-                                }
-                            }
-                            // where a number is: on him, or which of his parts (its script, or its type)
-                            const auto where = [&](const Moved &f) {
-                                std::string part = "his";
-                                if (f.place != t.papu)
-                                {
-                                    part = typed(f.place, 0x13bbbd0) ? string(value<Address>(value<Address>(f.place + 56) + 16), 80) : object_brief(f.place);
-                                    if (part.rfind("Scripts.Graph.", 0) == 0)
-                                        part.erase(0, 14);
-                                }
-                                return part + " +" + hex(static_cast<unsigned>(f.at - f.place));
-                            };
-                            if (found.size() == 1)
-                            {
-                                write(found[0].at, found[0].before);
-                                line << ", " << where(found[0]) << (found[0].decimal ? " (decimal)" : "") << " put back: " << actor_health(t.papu);
-                            }
-                            else
-                            {
-                                line << ", couldn't tell where (" << found.size() << " numbers moved by " << drop << ":";
-                                for (const auto &f : found)
-                                {
-                                    float fa = 0, fb = 0;
-                                    std::memcpy(&fa, &f.before, 4), std::memcpy(&fb, &f.after, 4);
-                                    line << " " << where(f) << " " << (f.decimal ? std::to_string(fa) + "->" + std::to_string(fb) : std::to_string(static_cast<int>(f.before)) + "->" + std::to_string(static_cast<int>(f.after)));
-                                }
-                                line << ")";
-                            }
-                        }
-                    }
+                    put_back_papu(t, line);
                     if (!boss_real_hit(t, line))
                         boss_rule_hit(line);
                     std::cout << line.str() << "\n" << std::flush;
@@ -5400,10 +5456,40 @@ namespace ingame
                     t.red_since = now;
                     t.red_health = health_getter_ok() && typed(t.papu, 0x1592220) ? actor_health(t.papu) : -1;
                     t.red_snapshot = health_places(t.papu);
+                    t.red_laps = t.laps_total_at ? value<int>(t.papu_ai + t.laps_total_at) : -1;
+                    t.red_hits = t.hit_count_at ? value<int>(t.papu_ai + t.hit_count_at) : -1;
                 }
                 t.red = red;
             }
             t.was_red = red;
+            boss_block_actor = state.boss_rules ? t.papu : 0;
+            boss_block_red = red;
+            // the hit kept from happening (its messages kept): his health and spin length put back, a hit for Crash
+            if (const auto blocked = boss_blocked.load(); blocked != t.blocked_seen)
+            {
+                t.blocked_seen = blocked;
+                if (now - t.blocked_told >= 1000)
+                {
+                    t.blocked_told = now;
+                    std::ostringstream line;
+                    line << "Boss rule: Crash landed on Papu Papu while he was red; the hit was kept from happening (";
+                    {
+                        std::lock_guard lock(boss_block_mutex);
+                        for (std::size_t i = 0; i < boss_blocked_names.size(); ++i)
+                        {
+                            const auto &n = boss_blocked_names[i];
+                            const auto id = n.find("_id_");
+                            line << (i ? " " : "") << (id == std::string::npos ? n : n.substr(id + 4, 8));
+                        }
+                        boss_blocked_names.clear();
+                    }
+                    line << ")";
+                    put_back_papu(t, line);
+                    if (!boss_real_hit(t, line))
+                        boss_rule_hit(line);
+                    std::cout << line.str() << "\n" << std::flush;
+                }
+            }
             if (state.boss_rules || t.tint_bundle)
                 boss_tint(t, t.papu, red);
         }
@@ -5446,7 +5532,8 @@ namespace ingame
                 boss_tint_off(t, true);
                 t = {};
                 t.level = boss, t.entered = now;
-                // the message research starts over with each fight
+                // the message research starts over with each fight, and Papu Papu's message keeping stops
+                boss_block_actor = 0, boss_block_red = false;
                 boss_event_since = 0;
                 for (auto &b : boss_event_targets)
                     b = 0;
@@ -5504,6 +5591,8 @@ namespace ingame
                         const auto meta = value<Address>(c + 56);
                         t.state_at = field_offset(meta, "currState", 4), t.laps_at = field_offset(meta, "currSpinPlayerLapCount", 4);
                         t.spin_at = field_offset(meta, "currAttackSpinSpeedMultiplier", 4);
+                        t.laps_total_at = field_offset(meta, "spinPlayerLapCount", 4);
+                        t.hit_count_at = field_offset(meta, "InternalStore__internalCounter_id_e24taaam", 4);
                         if (t.state_at)
                             t.papu = owner, t.papu_ai = c, t.state = -1;
                     }
@@ -8731,7 +8820,8 @@ namespace ingame
     {
         std::lock_guard lock(crate_mutex);
         restore_tints(game_thread);
-        // Papu Papu's red glow (Harder bosses test)
+        // Papu Papu's red glow and message keeping (Harder bosses test)
+        boss_block_actor = 0, boss_block_red = false;
         if (game_thread)
             boss_tint_off(boss_tuning, true);
         else if (boss_tuning.tint_bundle)
