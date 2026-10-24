@@ -1,4 +1,8 @@
-## What's new
+## Stable build
 
-- **Better box logic in Crash 3** (new seeds). Boxes, gems and secret exits in Crash 3 levels no longer expect the Crash 3 powers (Double Jump, Super Body Slam and so on). Until now, every box in a later Crash 3 level counted as out of logic until you had the powers the original game gives by then, even a checkpoint crate on the main path. No level needs a power for its boxes or gems. Relics (time trials) still expect them.
-- **Aku Aku Mask filler: the second and third masks work like a crate's.** A mask on top of a mask now makes Aku gold, and a third gives the invincibility. Before, the second mask counted as two hits but kept the first mask's look, and a third did nothing.
+This is the **Stable build**, for playing seeds: everything finished so far, plus what's in ongoing testing (levels and boxes that need a move, secret exits and seeds that always generate). What's still being worked on (Harder bosses, the glove and eyebrow colors) is only in the **Testing build**, the other release on this page.
+
+## Latest changes in this version
+
+- **Better box logic in Crash 3** (new seeds). Boxes, gems and secret exits in Crash 3 levels no longer expect the Crash 3 powers (Double Jump, Super Body Slam and so on). Relics (time trials) still expect them.
+- **Aku Aku Mask filler: the second and third masks work like a crate's.** A mask on top of a mask makes Aku gold, and a third gives the invincibility.
