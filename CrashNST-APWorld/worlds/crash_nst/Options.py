@@ -260,8 +260,7 @@ class AkuAkuSanity(Toggle):
     Lights Out and Fumbling in the Dark (Crash 1) are pitch dark without his light, so logic expects the
     Aku Aku item for everything in them.
 
-    Experimental: the client uses the game's own "no Aku Aku masks" switch. `/aku_lock on` in the client
-    tries it without this option.
+    The client uses the game's own "no Aku Aku masks" switch.
     """
 
     display_name = "Aku Aku Sanity"

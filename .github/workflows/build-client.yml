@@ -3,7 +3,7 @@
 # Every build is kept under the run's "Artifacts". Builds of main also refresh the latest release
 # on the Releases page, named "Dlickshus Crash Bandicoot N. Sane Trilogy Archipelago V<major.minor>.<build>"
 # (tag v<major.minor>.<build>): major.minor comes from the VERSION file, the last number counts builds since
-# that version started: the run number minus VERSION_FIRST_RUN, plus 1 (V1.2 started at run 74 as V1.2.1; runs 149, 151 and 152 were cancelled, so from run 153 the first number is 77, making run 153 V1.2.77).
+# that version started: the run number minus VERSION_FIRST_RUN, plus 1 (V1.2 started at run 74 as V1.2.1. V1.3 is run 154: VERSION_FIRST_RUN 155 makes it build 0, shown as just V1.3, and run 155 V1.3.1).
 # Only the newest build is kept (V1.2.77: one release on the Releases page instead of five).
 name: Build client
 
@@ -106,8 +106,9 @@ jobs:
         run: |
           $sha = "$env:GITHUB_SHA".Substring(0, 7)
           $build = [int]$env:GITHUB_RUN_NUMBER - [int]((Get-Content VERSION_FIRST_RUN -Raw).Trim()) + 1
-          if ($build -lt 1) { $build = [int]$env:GITHUB_RUN_NUMBER }
-          $version = "$((Get-Content VERSION -Raw).Trim()).$build"
+          if ($build -lt 0) { $build = [int]$env:GITHUB_RUN_NUMBER }
+          # build 0 is the version itself (V1.3), the builds after it V1.3.1, V1.3.2, ...
+          $version = if ($build -eq 0) { (Get-Content VERSION -Raw).Trim() } else { "$((Get-Content VERSION -Raw).Trim()).$build" }
           # the release text: only what's new in this build (RELEASE_NOTES.md, written with each change)
           $notes = if (Test-Path RELEASE_NOTES.md) { (Get-Content RELEASE_NOTES.md -Raw).Trim() } else { "" }
           # every build gets its own tag: GitHub may refuse to reuse a deleted release's tag

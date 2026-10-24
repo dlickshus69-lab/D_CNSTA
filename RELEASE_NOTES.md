@@ -10,4 +10,5 @@
 - **Aku Aku Mask filler.** With `aku_aku_mask_weight` (new seeds), a filler item gives Crash a mask, even with Aku Aku Sanity's lock on. It takes one hit like a crate's mask, and on top of a mask it gives a second one.
 - **Death counter.** "Deaths: N" is always on screen when you play solo or with DeathLink off. In a group with DeathLink, it shows the total and each player's deaths.
 - **Traps start once Crash can really move.** A trap now waits until Crash has been able to move for 1.5 seconds, so none starts while he's still arriving in a level or respawning.
+- The test commands used while building these (`/nitro_drop`, `/trap_test`, `/sound_find` and the like) are gone. The settings commands stay.
 - Logs are named after when the game started (`client-<date>_<time>.log`), and only the newest 10 are kept.
