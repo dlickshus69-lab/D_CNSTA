@@ -1396,6 +1396,26 @@ namespace ingame
             }
             return out.str();
         }
+        // (V1.3.26 research) which settings of the sending script a send node's values read: a field description of the
+        // script's type among each value's (or what it points to's) first words
+        std::string value_reads(Address node, Address component)
+        {
+            const auto args = value<Address>(node + 32);
+            const auto meta = component ? value<Address>(component + 56) : 0;
+            if (!args || !typed(args, 0x1745070) || !meta)
+                return {};
+            const auto values = list(args, 16);
+            const auto count = value<unsigned>(meta + 24);
+            const auto fields = value<Address>(meta + 40);
+            std::ostringstream out;
+            for (std::size_t k = 0; k < values.size(); ++k)
+                for (const auto place : {values[k], value<Address>(values[k] + 24)})
+                    for (unsigned off = 0; place && off < 0x40; off += 8)
+                        for (unsigned i = 0; fields && count <= 512 && i < count; ++i)
+                            if (const auto field = value<Address>(fields + i * 8); field && value<Address>(place + off) == field)
+                                out << " [value " << k << " reads " << string(value<Address>(field + 48), 64) << "]";
+            return out.str();
+        }
         // a send node's target (+24): the kind of value source and what it holds (V1.2.61 research: where a trap Nitro's
         // messages go when it explodes, to find the one that adds a box to the level's count)
         std::string send_target(Address node)
@@ -1477,7 +1497,7 @@ namespace ingame
                     }
                 if (blocked)
                     return 0;
-                if (const auto since = boss_event_since.load(); since && target && boss_event_lines.load() < 400)
+                if (const auto since = boss_event_since.load(); since && target && boss_event_lines.load() < 900)
                 {
                     bool boss = false;
                     for (const auto &b : boss_event_targets)
@@ -1491,17 +1511,21 @@ namespace ingame
                         {
                             const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
                             const auto who = boss ? string(value<Address>(target + 128), 64) : std::string("Crash");
+                            // (V1.3.26 research, for a landing on him that doesn't hurt him: Papu Papu's health, deflect and AI
+                            // scripts' messages, more of each, with which settings they read; not the deflect script's frequent ppfqleko)
+                            const bool papu_more = boss && name.find("ppfqleko") == std::string::npos &&
+                                                   (graph == "common_BossHealthHandler" || graph == "common_BossInvulnerableDeflectPlayerHandler" || graph == "BossPapuPapu_AiHandler");
                             bool show = false;
                             {
                                 std::lock_guard lock(event_mutex);
-                                show = ++boss_event_counts[who + "|" + graph + "|" + name] <= 4;
+                                show = ++boss_event_counts[who + "|" + graph + "|" + name] <= (papu_more ? 14u : 4u);
                             }
                             if (show)
                             {
                                 ++boss_event_lines;
                                 std::ostringstream out;
                                 out << "Boss event +" << (GetTickCount64() - since) / 100 / 10.0 << " s: " << who << " (" << graph << ") gets " << name
-                                    << " from " << event_object(value<Address>(event + 32)) << send_arguments(event);
+                                    << " from " << event_object(value<Address>(event + 32)) << send_arguments(event) << (papu_more ? value_reads(event, component) : std::string());
                                 std::cout << out.str() << "\n" << std::flush;
                             }
                         }
@@ -5097,6 +5121,8 @@ namespace ingame
             // the game's hit for Crash (Papu Papu's attack's damage message to him), once found
             Address hit_message = 0, hit_target = 0, hit_args = 0, hit_sender = 0;
             bool hit_searched = false;
+            // (V1.3.26) the settings of his attack script the hit's values read: (offset, size)
+            std::vector<std::pair<unsigned, unsigned>> hit_reads;
             int state = -1;
             bool spun = false, red = false, was_red = false;
             int red_health = -1; // his health when he turned red
@@ -5955,12 +5981,13 @@ namespace ingame
         // hurt animation, or a life; nothing while he's invincible). Sent from a node of our own with the game's node's
         // values (as the Nitro Trap's explosion is), from Papu Papu's attack script
         // (not used from V1.3.14 to V1.3.22, see punish_crash; since V1.3.24 for the angel death, see replay_real_hit)
-        bool boss_real_hit(BossTuning &t, std::ostream &out)
+        // the game's hit for Crash (once a visit): Crash's damage script's hit message (ha5y20l3) and its handler, Papu
+        // Papu's attack script, and its node that sends the hit, with which of his attack script's settings its values read
+        void find_real_hit(BossTuning &t)
         {
             const auto crash = player();
-            if (!crash || !t.papu)
-                return false;
-            if (!t.hit_searched)
+            if (!crash || !t.papu || t.hit_searched)
+                return;
             {
                 t.hit_searched = true;
                 // (V1.3.8 looked through Crash's first 64 scripts only, as for a crate; he has more)
@@ -6000,6 +6027,7 @@ namespace ingame
                         // (V1.3.25 research) which of his attack script's settings each value reads: a field description of
                         // the script's type among the value's (or what it points to's) first words
                         std::ostringstream reads;
+                        std::vector<std::pair<unsigned, unsigned>> read_fields;
                         if (hit)
                         {
                             const auto smeta = value<Address>(sender + 56);
@@ -6010,12 +6038,15 @@ namespace ingame
                                     for (unsigned off = 0; place && off < 0x40; off += 8)
                                         for (unsigned i = 0; fields && count <= 512 && i < count; ++i)
                                             if (const auto field = value<Address>(fields + i * 8); field && value<Address>(place + off) == field)
+                                            {
                                                 reads << " value " << k << " reads " << string(value<Address>(field + 48), 64);
+                                                read_fields.emplace_back(value<std::uint16_t>(field + 24), value<std::uint16_t>(field + 22));
+                                            }
                         }
                         std::cout << "Boss rule: a sender of Crash's hit message in Papu Papu's attack script" << send_arguments(node) << (hit ? " (the hit)" : "")
                                   << reads.str() << "\n";
                         if (hit && !args)
-                            args = list_at;
+                            args = list_at, t.hit_reads = read_fields;
                     }
                 std::cout << "Boss rule: the game's hit for Crash " << (message && target && sender && args ? "found" : "not found") << " (message "
                           << (message ? "yes" : "no") << ", Papu Papu's attack script " << (sender ? "yes" : "no") << ", its values "
@@ -6023,6 +6054,12 @@ namespace ingame
                 if (message && target && sender && args)
                     t.hit_message = message, t.hit_target = target, t.hit_args = args, t.hit_sender = sender;
             }
+        }
+        bool boss_real_hit(BossTuning &t, std::ostream &out)
+        {
+            if (!player() || !t.papu)
+                return false;
+            find_real_hit(t);
             // (with the message hook on, the sender's first bytes are the hook's jump)
             const bool sender_ok = event_hook.installed || code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
                                                                                                                 0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0});
@@ -6037,42 +6074,76 @@ namespace ingame
         }
         // V1.3.25: the angel death for a landing while red without a mask: the game's hit message from his attack script, with
         // the death it names (currCrashDeathBehaviorEvent) set to his attack's own (his data's CrashDeathDefaultBehaviorEvent,
-        // "Death_Common_Spin") and isCrashHit set, for the moment it's sent. V1.3.24's log: the message's values are the
-        // death's name (of the type +0x17a5098) and a yes/no, read from his attack script when it's sent; at rest the name
-        // is empty, which is why V1.3.13's message did nothing. (V1.3.24 put back everything his script held at a real hit,
-        // the damage too: that damage is made for each hit and gone right after, so it was never sent)
+        // "Death_Common_Spin"), for the moment it's sent. V1.3.24's log: the message's values are the death's name (of the
+        // type +0x17a5098) and a yes/no, read from his attack script when it's sent; at rest the name is empty, which is why
+        // V1.3.13's message did nothing. (V1.3.24 put back everything his script held at a real hit, the damage too: that
+        // damage is made for each hit and gone right after, so it was never sent)
+        // V1.3.26: V1.3.25's log: the yes/no is isCrashHit_metaField_id_lsmgndbv (V1.3.25 set isCrashHit: Crash didn't die).
+        // So every setting the hit's values read is filled in: the death's name with his death, a yes/no with yes
         std::pair<Address, Address> boss_death_behavior(Address boss);
         bool replay_real_hit(BossTuning &t, std::ostream &out)
         {
-            Address sender = 0;
-            for (const auto &[c, script] : entity_scripts(t.papu))
-                if (script == "common_BossAttackDamageHandler")
-                    sender = c;
+            find_real_hit(t);
+            const auto sender = t.hit_sender;
             const auto meta = sender ? value<Address>(sender + 56) : 0;
-            const unsigned death_at = meta ? field_offset(meta, "currCrashDeathBehaviorEvent", 8) : 0;
-            const unsigned hit_at = meta ? field_offset(meta, "isCrashHit", 1) : 0;
             const auto [death, death_type] = boss_death_behavior(t.papu);
-            if (!sender || !death_at || !death)
+            // what to fill in: what the hit reads, or (not found) the death's name and every isCrashHit yes/no by name
+            std::vector<std::pair<unsigned, unsigned>> fields = t.hit_reads;
+            if (fields.empty() && meta)
             {
-                out << "; his attack script or its death wasn't found (script " << (sender ? "yes" : "no") << ", death name " << (death_at ? "yes" : "no") << ", his death "
-                    << (death ? "yes" : "no") << ")";
+                if (const auto at = field_offset(meta, "currCrashDeathBehaviorEvent", 8))
+                    fields.emplace_back(at, 8);
+                const auto count = value<unsigned>(meta + 24);
+                const auto list_at = value<Address>(meta + 40);
+                for (unsigned i = 0; list_at && count <= 512 && i < count; ++i)
+                {
+                    const auto field = value<Address>(list_at + i * 8);
+                    if (string(value<Address>(field + 48), 64).rfind("isCrashHit", 0) == 0 && value<std::uint16_t>(field + 22) == 1)
+                        fields.emplace_back(value<std::uint16_t>(field + 24), 1);
+                }
+            }
+            const bool has_death = std::any_of(fields.begin(), fields.end(), [](const auto &f) { return f.second == 8; });
+            if (!sender || !death || !has_death)
+            {
+                out << "; his attack script or its death wasn't found (script " << (sender ? "yes" : "no") << ", his death " << (death ? "yes" : "no") << ", its name's place "
+                    << (has_death ? "yes" : "no") << ")";
                 return false;
             }
-            const auto death_before = value<Address>(sender + death_at);
-            const auto hit_before = hit_at ? value<std::uint8_t>(sender + hit_at) : std::uint8_t{0};
-            write(sender + death_at, death);
-            if (hit_at)
-                write(sender + hit_at, std::uint8_t{1});
+            struct Kept
+            {
+                unsigned at, size;
+                Address before, written;
+            };
+            std::vector<Kept> kept;
+            std::ostringstream filled;
+            for (const auto &field : fields)
+            {
+                const unsigned at = field.first, size = field.second;
+                if (at < 0x40 || (size != 8 && size != 1) || std::any_of(kept.begin(), kept.end(), [at](const Kept &k) { return k.at == at; }))
+                    continue;
+                if (size == 8)
+                {
+                    kept.push_back({at, 8, value<Address>(sender + at), death});
+                    write(sender + at, death);
+                }
+                else
+                {
+                    kept.push_back({at, 1, value<std::uint8_t>(sender + at), 1});
+                    write(sender + at, std::uint8_t{1});
+                }
+                filled << " " << hex(at) << (size == 8 ? "=his death" : "=yes");
+            }
             own_hit_send = true;
             std::ostringstream sent_note;
             const bool sent = boss_real_hit(t, sent_note);
             own_hit_send = false;
-            if (value<Address>(sender + death_at) == death)
-                write(sender + death_at, death_before);
-            if (hit_at && value<std::uint8_t>(sender + hit_at) == 1)
-                write(sender + hit_at, hit_before);
-            std::cout << "Boss rule: his attack's hit message sent with his death " << pointer_brief(death) << (hit_at ? " and isCrashHit" : "")
-                      << (sent ? "" : " (it couldn't be sent)") << "\n" << std::flush;
+            for (const auto &k : kept)
+                if (k.size == 8 && value<Address>(sender + k.at) == k.written)
+                    write(sender + k.at, k.before);
+                else if (k.size == 1 && value<std::uint8_t>(sender + k.at) == k.written)
+                    write(sender + k.at, static_cast<std::uint8_t>(k.before));
+            std::cout << "Boss rule: his attack's hit message sent with" << filled.str() << " (his death " << pointer_brief(death) << ")" << (sent ? "" : " (it couldn't be sent)")
+                      << "\n" << std::flush;
             if (!sent)
                 out << "; his hit couldn't be sent";
             return sent;
