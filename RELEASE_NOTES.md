@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Fix: the game crashed when you landed on red Papu Papu** (V1.3.16). The angel-death try changed the death inside Crash's own death message, and the game couldn't take it. That's gone: a landing on red Papu without a mask is the falling death again, for now.
-- **Research for the angel death** (read only, nothing changed): the log shows which death Crash's damage script plays each time he dies in a boss fight, and what Papu's spin hit carries. Let Papu's spin hit you once in the test so the log has the real one to compare.
-- **Research for the half-full health bar**: V1.3.16 found no 500 left anywhere in Papu or his bar's first part, so the log now watches much more of the bar (and what it points to) and shows what changes when Papu is hit.
-- From V1.3.13–16: `/skip_filler yes`, one Aku Aku Mask in boss fights, a landing while red is a real hit for Crash, his last hit always counts, his spins keep the game's length, he stays red through the flinch, and the bar has the right number of notches.
+- **Papu Papu, round 10**:
+  - **The angel death, third try.** V1.3.17's log showed what went wrong in V1.3.16: the death Crash's script plays isn't a name. It's an object that starts with the code that plays it, and the angel one is the same object every time. V1.3.16 put the name there, so the game crashed. Now, for a landing on red with no mask, the client swaps DeathLink's falling death for a real angel death object, only when both are the kind seen in the log. It finds one in Papu's attack setting or among Crash's parts, or keeps the one from his spin if his spin killed you earlier. If it finds none, you get the falling death, and the log says why.
+  - **Health bar research:** snapshots of the bar's small numbers 1.5 s after the fight starts and 1.5 s after each hit, to find the fill. V1.3.17's log hid numbers that changed often.
+- From V1.3.13–17: `/skip_filler yes`, one Aku Aku Mask in boss fights, a landing while red is a real hit for Crash, his last hit always counts, his spins keep the game's length, he stays red through the flinch, the bar has the right number of notches, and the V1.3.16 crash is fixed.
 - **Options page** (from V1.3.10): the colors are a plain list (each color, or Random), no Crash Skin option.
