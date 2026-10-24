@@ -4890,6 +4890,12 @@ namespace ingame
             std::uint64_t blocked_told = 0;
             // V1.3.13: one hit for Crash per landing (V1.3.12 sent two: one when his state changed, one for the kept messages)
             std::uint64_t crash_hit_at = 0;
+            // a mask taken for it: checked a second later (the count, and whether his mask is still on screen)
+            std::uint64_t hit_check_at = 0;
+            int hit_masks = 0;
+            // V1.3.13: a landing while red makes him flinch (the game's hit reaction); he stays red through it, so it's
+            // clear it didn't count
+            bool forbidden = false;
             // V1.3.13: his fight's pace with more health: the game's hit count (HitCount, 5) and, at the fight's start, his
             // spin length and hit count
             int papu_original = 0, laps_start = 0, hits_start = 0;
@@ -5184,7 +5190,8 @@ namespace ingame
         // Crash's damage script ha5y20l3 with seven values; Crash's damage and Aku Aku scripts do the rest (a mask, the
         // hurt animation, or a life; nothing while he's invincible). Sent from a node of our own with the game's node's
         // values (as the Nitro Trap's explosion is), from Papu Papu's attack script
-        bool boss_real_hit(BossTuning &t, std::ostream &out)
+        // (not used since V1.3.14: kept for the research, see punish_crash)
+        [[maybe_unused]] bool boss_real_hit(BossTuning &t, std::ostream &out)
         {
             const auto crash = player();
             if (!crash || !t.papu)
@@ -5249,11 +5256,13 @@ namespace ingame
             out << "; Crash takes the game's hit (Aku Aku takes it if he's there)";
             return true;
         }
-        // without the game's hit: as one would be (a mask less, nothing while invincible, a life without a mask)
+        // without the game's hit: as one would be (a mask less, nothing while invincible, a life without a mask). (His
+        // state is the mask count while a mask is out, as /aku_give reads it)
         void boss_rule_hit(std::ostream &out)
         {
             const auto crash = player();
-            const auto [masks, mask_out] = aku_manager_state(crash);
+            const auto [state, mask_out] = aku_manager_state(crash);
+            const int masks = mask_out ? std::clamp(state, 1, 3) : 0;
             if (masks >= 3)
             {
                 out << "; Crash is invincible (three masks): no hit";
@@ -5278,7 +5287,7 @@ namespace ingame
             {
                 out << " (" << e.what() << ")";
             }
-            out << (died ? "; no mask: Crash loses a life" : "; no mask, and Crash's life couldn't be taken");
+            out << (died ? "; no mask: Crash loses a life (as from his spin)" : "; no mask, and Crash's life couldn't be taken");
         }
         // his health as the game keeps it, wherever that is (V1.3.8: not a whole number on his actor): his actor's first
         // 0x1000 bytes and each of his parts' first 0x400, as 4-byte words
@@ -5395,8 +5404,15 @@ namespace ingame
                 return;
             }
             t.crash_hit_at = now;
-            if (!boss_real_hit(t, line))
-                boss_rule_hit(line);
+            // V1.3.13's log: the game's hit message sent again (ha5y20l3, with his attack's values) did nothing. It carries
+            // his attack's damage, which is only there while his attack touches Crash, and without a mask his spin's hit
+            // isn't that message at all (Crash's damage script takes his life, "Death_Common_Spin"). So the game's rule,
+            // done directly: a mask less, nothing while invincible, a life without a mask
+            const auto [state, mask_out] = aku_manager_state(player());
+            t.hit_masks = mask_out ? std::clamp(state, 1, 3) : 0;
+            boss_rule_hit(line);
+            if (t.hit_masks == 1 || t.hit_masks == 2)
+                t.hit_check_at = now + 1000;
         }
         void papu_rule(BossTuning &t, const Shared &state, std::uint64_t now)
         {
@@ -5461,7 +5477,7 @@ namespace ingame
                     std::ostringstream line;
                     line << "Boss rule: Crash landed on Papu Papu while he was red (" << seconds(now - t.red_since) << " into it)";
                     if (put_back_papu(t, line))
-                        punish_crash(t, line, now);
+                        punish_crash(t, line, now), t.forbidden = s == 3;
                     std::cout << line.str() << "\n" << std::flush;
                     // (the messages kept from him for this landing are this same landing)
                     t.blocked_told = now, t.blocked_seen = boss_blocked.load();
@@ -5504,7 +5520,17 @@ namespace ingame
                 t.spun_since = true;
             else if (s == 1 && t.punished && t.spun_since)
                 t.punished = t.spun_since = false;
-            const bool red = state.boss_rules && t.punished && (s == 1 || s == 2);
+            if (s != 3)
+                t.forbidden = false;
+            const bool red = state.boss_rules && ((t.punished && (s == 1 || s == 2)) || (t.forbidden && s == 3));
+            // the mask taken for a landing while red, a second later
+            if (t.hit_check_at && now >= t.hit_check_at)
+            {
+                t.hit_check_at = 0;
+                const auto [aku, out] = aku_manager_state(player());
+                std::cout << "Boss rule: a second after Crash's hit, Aku's manager is in state " << aku << (out ? ", his mask still on screen" : ", no mask on screen")
+                          << " (" << t.hit_masks << " masks before)\n" << std::flush;
+            }
             if (red != t.red)
             {
                 if (red)
