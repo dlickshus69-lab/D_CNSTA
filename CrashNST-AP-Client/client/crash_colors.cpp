@@ -44,8 +44,14 @@ namespace crash_colors
             for (const char c : std::string(recolor_version) + ";")
                 hash = (hash ^ static_cast<unsigned char>(c)) * 16777619u;
             for (int p = 0; p < PartCount; ++p)
+            {
+                // the gloves and eyebrows (V1.3.3) only count when they have a color, so the colored Crash made before
+                // them keeps its name and isn't made again
+                if (p >= Gloves && color_text(choice[p]) == "default")
+                    continue;
                 for (const char c : std::string(part_name(static_cast<Part>(p))) + "=" + color_text(choice[p]) + ";")
                     hash = (hash ^ static_cast<unsigned char>(c)) * 16777619u;
+            }
             char text[16];
             std::snprintf(text, sizeof(text), "%08x", hash);
             return std::string("colors_") + text;
@@ -240,14 +246,14 @@ namespace crash_colors
                         const Recolor fur = [&](const std::vector<unsigned char> &b) { return recolor_fur(b, set(Fur), set(Chest)); };
                         add(fur_texture, true, fur), add(fur_fruit_texture, false, fur), add(fur_monkey_texture, false, fur);
                     }
-                    if (set(Pants) || set(Shoes))
+                    if (set(Pants) || set(Shoes) || set(Gloves))
                     {
-                        const Recolor cloth = [&](const std::vector<unsigned char> &b) { return recolor_cloth(b, set(Pants), set(Shoes)); };
+                        const Recolor cloth = [&](const std::vector<unsigned char> &b) { return recolor_cloth(b, set(Pants), set(Shoes), set(Gloves)); };
                         add(cloth_texture, true, cloth), add(cloth_fruit_texture, false, cloth);
                     }
-                    if (set(Hair))
+                    if (set(Hair) || set(Eyebrows))
                     {
-                        const Recolor hair = [&](const std::vector<unsigned char> &b) { return recolor_hair(b, set(Hair)); };
+                        const Recolor hair = [&](const std::vector<unsigned char> &b) { return recolor_hair(b, set(Hair), set(Eyebrows)); };
                         add(hair_texture, true, hair), add(hair_fruit_texture, false, hair);
                     }
                     ingame::rewrite_archive(source, pak, replacements);
@@ -326,36 +332,16 @@ namespace crash_colors
     }
     std::vector<std::string> command(const std::string &argument)
     {
-        std::istringstream words(argument);
-        std::string first, rest;
-        words >> first;
-        std::getline(words, rest);
-        rest = trim(rest);
-        if (first.empty())
-        {
-            std::string names;
-            for (const auto &[name, rgb] : palette())
-                names += (names.empty() ? "" : ", ") + name;
-            return {"Crash colors: " + describe(chosen()) + ".",
-                    "/colors fur|chest|pants|shoes|hair <color> changes one part (default puts it back), /colors reset all of them. Colors: " + names +
-                        ", or #RRGGBB. They show from the next game start."};
-        }
-        auto choice = chosen();
-        if (first == "reset" || first == "off" || first == "default")
-            choice.fill("default");
-        else
-        {
-            const auto part = part_by_name(first);
-            if (part == PartCount)
-                return {"Crash colors: \"" + first + "\" isn't a part. Parts: fur, chest, pants, shoes, hair."};
-            const auto color = color_text(rest);
-            if (color == "default" && trim(rest) != "default")
-                return {"Crash colors: \"" + rest + "\" isn't a color. /colors lists them, or use #RRGGBB."};
-            choice[part] = color;
-        }
-        save(choice);
-        return prepare();
+        // V1.3.3: the colors come from the YAML only and stay for the whole seed, so /colors only shows them
+        std::vector<std::string> lines{"Crash colors: " + describe(chosen()) + "."};
+        lines.push_back(trim(argument).empty()
+                            ? "They come from your YAML (crash_fur_color, crash_chest_color, crash_pants_color, crash_shoes_color, crash_hair_color, "
+                              "crash_gloves_color, crash_eyebrows_color) and stay for the whole seed. Only a new seed changes them."
+                            : "Colors can't be changed during a seed: they come from your YAML and stay until a new seed.");
+        return lines;
     }
+    bool has_colors() { return !all_default(chosen()); }
+    std::vector<std::string> wear() { return prepare(); }
     std::string patch_status()
     {
         char text[1024]{};

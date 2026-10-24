@@ -4625,21 +4625,33 @@ namespace ingame
         // once, a few seconds in (and any that turn up later, every 5 seconds), then every change of their whole-number
         // and on/off settings while you fight: what counts the hits, what changes the phase, what changes the pace. Only
         // reads. (Writing ~200 lines at once can hitch the game for a moment 3 seconds into the fight.)
+        // V1.3.3: also the bosses' shared scripts (common_BossHealthHandler holds the hits; common_BossInvulnerable-
+        // DeflectPlayerHandler bounces Crash off), with their decimal settings watched too; things the boss throws or
+        // spawns (mine carts, TNT, rocks) only once per kind and not watched (V1.3.2 read them after they were gone)
         struct BossWatchField
         {
-            Address at = 0;
+            Address at = 0, owner = 0;
             unsigned bytes = 0;
+            bool decimal = false;
             std::string name;
             int last = 0;
+            float last_f = 0;
+            unsigned changes = 0; // a timer that changes all the time stops being logged after 60
         };
         struct BossWatch
         {
             std::string level;
             std::uint64_t entered = 0, next = 0, next_scan = 0;
             std::set<Address> seen;
+            std::set<std::string> kinds;
             std::vector<BossWatchField> fields;
-            unsigned lines = 0;
+            unsigned lines = 0, logged = 0;
         } boss_watch;
+        // the bosses' shared scripts worth reading (not the crates', the camera's or the spawn cleanup)
+        bool boss_common_script(const std::string &script)
+        {
+            return script.rfind("common_Boss", 0) == 0 && script != "common_BossAttackSpawnCleanup";
+        }
         bool boss_related(const std::string &text)
         {
             for (const char *word : {"Boss", "boss", "Papu", "Ripper", "Koala", "Pinstripe", "Brio", "Cortex", "Komodo", "Tiny", "Gin", "Dingodile", "Tropy"})
@@ -4679,12 +4691,18 @@ namespace ingame
                 std::cout << "Boss research: " << level << "; its scripts go to the log 3 seconds in, then every change while you fight\n" << std::flush;
                 return;
             }
-            if (now >= w.next_scan && w.seen.size() < 40)
+            if (now >= w.next_scan)
             {
                 w.next_scan = now + 5000;
-                for (const auto owner : event_owners())
+                const auto owners = event_owners();
+                // the watched things that are gone (their memory may hold something else now)
                 {
-                    if (w.seen.size() >= 40)
+                    const std::set<Address> here(owners.begin(), owners.end());
+                    w.fields.erase(std::remove_if(w.fields.begin(), w.fields.end(), [&](const BossWatchField &f) { return !here.count(f.owner); }), w.fields.end());
+                }
+                for (const auto owner : owners)
+                {
+                    if (w.logged >= 40)
                         break;
                     if (w.seen.count(owner))
                         continue;
@@ -4703,18 +4721,27 @@ namespace ingame
                     if (!boss_related(name) && !boss_related(scripts))
                         continue;
                     w.seen.insert(owner);
+                    // things the boss spawns or throws: each kind once, not watched
+                    const bool spawned = name.find("Spawned") != std::string::npos || name.find("spawned") != std::string::npos;
+                    if (spawned && !w.kinds.insert(scripts).second)
+                        continue;
+                    ++w.logged;
                     std::cout << "Boss research: " << (name.empty() ? std::string("(unnamed)") : name) << " has " << (scripts.empty() ? "no scripts" : scripts)
                               << "\n";
                     for (const auto &[c, script] : own)
                     {
-                        // the shared crate, camera and pickup scripts say nothing about the boss
-                        if (script.rfind("common_", 0) == 0)
+                        // the shared crate, camera and pickup scripts say nothing about the boss; the shared boss ones do
+                        const bool common = script.rfind("common_", 0) == 0;
+                        if (common && !boss_common_script(script))
                             continue;
                         const auto who = "Boss " + name + " " + script;
                         log_graph_fields(c, who);
                         if (const auto data = value<Address>(c + 16); data && typed(data, 0x13bbb10))
                             dump_fields(data, value<Address>(data + 32), who + " data", 60);
-                        // its whole-number (4 bytes, not floating point) and on/off (1 byte) settings are watched
+                        if (spawned)
+                            continue;
+                        // its whole-number (4 bytes) and on/off (1 byte) settings are watched; in the shared boss scripts
+                        // also the decimal ones (the health may be one)
                         const auto meta = value<Address>(c + 56);
                         const unsigned size = value<std::uint16_t>(meta + 90), count = value<unsigned>(meta + 24);
                         const auto fields = value<Address>(meta + 40);
@@ -4722,10 +4749,15 @@ namespace ingame
                         {
                             const auto field = value<Address>(fields + i * 8);
                             const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
-                            if ((bytes != 1 && bytes != 4) || offset < 0x40 || offset + bytes > size || value<Address>(field) == base() + 0x17afe98)
+                            const bool decimal = value<Address>(field) == base() + 0x17afe98;
+                            if ((bytes != 1 && bytes != 4) || offset < 0x40 || offset + bytes > size || (decimal && !common))
                                 continue;
-                            const int v = bytes == 1 ? value<unsigned char>(c + offset) : value<int>(c + offset);
-                            w.fields.push_back({c + offset, bytes, name + " " + script + " " + string(value<Address>(field + 48), 64), v});
+                            BossWatchField f;
+                            f.at = c + offset, f.owner = owner, f.bytes = bytes, f.decimal = decimal;
+                            f.name = name + " " + script + " " + string(value<Address>(field + 48), 64);
+                            f.last = bytes == 1 ? value<unsigned char>(c + offset) : value<int>(c + offset);
+                            f.last_f = value<float>(c + offset);
+                            w.fields.push_back(f);
                         }
                     }
                 }
@@ -4736,12 +4768,28 @@ namespace ingame
             w.next = now + 150;
             for (auto &f : w.fields)
             {
-                const int v = f.bytes == 1 ? value<unsigned char>(f.at) : value<int>(f.at);
-                if (v == f.last)
+                std::string change;
+                if (f.decimal)
+                {
+                    const float v = value<float>(f.at);
+                    if (v == f.last_f || (std::isnan(v) && std::isnan(f.last_f)))
+                        continue;
+                    std::ostringstream text;
+                    text << f.last_f << " -> " << v;
+                    change = text.str(), f.last_f = v;
+                }
+                else
+                {
+                    const int v = f.bytes == 1 ? value<unsigned char>(f.at) : value<int>(f.at);
+                    if (v == f.last)
+                        continue;
+                    change = std::to_string(f.last) + " -> " + std::to_string(v), f.last = v;
+                }
+                if (++f.changes > 61 || w.lines >= 800)
                     continue;
-                if (w.lines++ < 800)
-                    std::cout << "Boss watch +" << seconds(now - w.entered) << ": " << f.name << " " << f.last << " -> " << v << "\n";
-                f.last = v;
+                ++w.lines;
+                std::cout << "Boss watch +" << seconds(now - w.entered) << ": " << f.name << " " << change
+                          << (f.changes == 61 ? " (keeps changing; not logged anymore)" : "") << "\n";
             }
             std::cout << std::flush;
         }

@@ -1,5 +1,5 @@
 ## What's new
 
-- **Test build for Harder bosses.** This build doesn't change the bosses yet. It adds what's needed to study them:
-  - **`/boss name`** (test command): the next level entrance you go through loads that boss fight instead. Names: papu, ripper1, koala, pinstripe, brio, cortex1, ripper2, komodo, tiny2, ngin2, cortex2, tiny3, dingodile, tropy, ngin3, cortex3. `/boss off` turns it off. Once the fight loads, entrances go back to normal. **Use a test seed**: the game saves a boss as beaten.
-  - **Boss notes in the log**: during a boss fight, the client writes the boss's settings to the log (what counts the hits, the phases, the timers), then every change while you fight. It only reads; nothing about the fight changes.
+- **Glove and eyebrow colors** (new seeds). Two new YAML options in the Cosmetic section: `crash_gloves_color` and `crash_eyebrows_color`. They take the same colors as the others: a color name or `"#RRGGBB"`.
+- **Crash's colors stay for the whole seed.** They come only from the YAML. `/colors` shows them but can't change them; only a new seed does. `/skin default` puts Crash back in the seed's colors. Connecting to a seed puts on that seed's colors, so a seed where you changed colors with `/colors` goes back to its YAML colors.
+- **Boss test, round 2.** The log now also shows the bosses' shared scripts: the one that counts hits, and the one that bounces Crash off a boss. Things a boss throws or spawns (mine carts, TNT, rocks) are logged once instead of every time. `/boss name` works as before (use a test seed).
