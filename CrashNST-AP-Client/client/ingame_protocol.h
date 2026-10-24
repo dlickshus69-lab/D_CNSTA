@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 24, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 25, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -164,6 +164,9 @@ namespace ingame
         // set by the game thread: Crash has been able to move for 1.5 seconds without a break. Traps start only then
         // (V1.3: right after a level loads the game can already report him movable while he is still arriving)
         unsigned player_settled = 0;
+        // set by the game thread: Aku Aku Mask items wait (V1.3.13: one mask is enough in a boss fight; Crash has one
+        // there, or one was given in this fight already). They come in the next level
+        unsigned aku_hold = 0;
         // set by the client (Harder bosses, V1.3.4 test commands; later the YAML): the bosses' health and speed in
         // percent (100 is the game's own), and the rules on bosses that can be hit any time (Papu Papu glows red while
         // he can't be; landing on him then costs a life)

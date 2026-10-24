@@ -559,6 +559,13 @@ bool BoxMarkers::player_ready()
     unlock();
     return ready;
 }
+bool BoxMarkers::aku_hold()
+{
+    lock();
+    const bool hold = shared_->aku_hold != 0;
+    unlock();
+    return hold;
+}
 bool BoxMarkers::player_settled()
 {
     lock();

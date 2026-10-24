@@ -564,7 +564,7 @@ void ClientRuntime::update_ownership(ClientTick &tick)
         }
     }
     // Aku Aku Mask filler: one mask each, in a level once Crash can move, a couple of seconds apart. It goes through with
-    // Aku Aku Sanity too
+    // Aku Aku Sanity too. In a boss fight one is enough (V1.3.13): the rest wait for the next level
     if (tick.room_ready && box_markers && std::chrono::steady_clock::now() >= next_aku_mask)
         try
         {
@@ -573,7 +573,7 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                 if (tick.items[index].first != 0xCB0000 + 2204)
                     continue;
                 const auto scene = read_scene(GetCurrentProcess());
-                if (!scene.camera_active || level_key(scene.zone).empty() || !box_markers->player_ready())
+                if (!scene.camera_active || level_key(scene.zone).empty() || !box_markers->player_ready() || box_markers->aku_hold())
                     break;
                 if (session.reserve_aku(index))
                 {

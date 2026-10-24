@@ -555,6 +555,38 @@ bool Session::reserve_aku(unsigned index)
     }
     return true;
 }
+Session::SkippedFiller Session::skip_filler()
+{
+    if (!ready())
+        throw std::runtime_error("Not connected to a seed yet");
+    const unsigned size = data_["items"].size();
+    SkippedFiller skipped;
+    for (unsigned i = filler_cursor(); i < size; ++i)
+    {
+        const auto item = data_["items"][i]["item"].asInt64();
+        skipped.lives += item == 0xCB0000 + 2201;
+        skipped.wumpa += item == 0xCB0000 + 2202;
+    }
+    for (unsigned i = aku_cursor(); i < size; ++i)
+        skipped.masks += data_["items"][i]["item"].asInt64() == 0xCB0000 + 2204;
+    const Json::Value old_filler = data_["filler_cursor"];
+    const Json::Value old_aku = data_.isMember("aku_cursor") ? data_["aku_cursor"] : Json::Value(0u);
+    data_["filler_cursor"] = std::max(filler_cursor(), size);
+    data_["aku_cursor"] = std::max(aku_cursor(), size);
+    dirty_ = true;
+    try
+    {
+        flush();
+    }
+    catch (...)
+    {
+        data_["filler_cursor"] = old_filler;
+        data_["aku_cursor"] = old_aku;
+        dirty_ = true;
+        throw;
+    }
+    return skipped;
+}
 bool Session::defer_nitro(unsigned index)
 {
     if (!ready() || index >= data_["items"].size())

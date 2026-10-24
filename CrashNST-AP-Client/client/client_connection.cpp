@@ -202,7 +202,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /boss name, /boss_health, /boss_speed, /boss_rules (tests) | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /boss name, /boss_health, /boss_speed, /boss_rules (tests) | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -416,6 +416,21 @@ void ClientRuntime::handle_commands()
                     ingame::set_countdown_volume(static_cast<unsigned>(value));
                     std::ofstream(standalone::state_directory() / "nitro_volume.txt", std::ios::trunc) << value << '\n';
                     print_console("Nitro Trap countdown volume: " + std::to_string(value) + ".");
+                }
+            }
+            else if (command == "/skip_filler")
+            {
+                // every 1-Up, Wumpa Fruit and Aku Aku Mask received so far counts as given, so none of them comes (a seed
+                // whose goal is done gets all its items at once: V1.3.12's log had 57 masks on the way). Later ones come
+                // as usual
+                if (argument != "yes")
+                    print_console("/skip_filler yes: every 1-Up, Wumpa Fruit and Aku Aku Mask received so far counts as given, so none of them "
+                                  "comes (ones received after that come as usual). It can't be undone for this seed.");
+                else
+                {
+                    const auto skipped = session.skip_filler();
+                    print_console("Filler skipped: " + std::to_string(skipped.masks) + " Aku Aku Masks, " + std::to_string(skipped.lives) + " 1-Ups and " +
+                                  std::to_string(skipped.wumpa) + " Wumpa Fruit rewards count as given; none of them will come.");
                 }
             }
             else if (command == "/skin")

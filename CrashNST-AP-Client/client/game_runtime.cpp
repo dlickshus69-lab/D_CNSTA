@@ -4888,6 +4888,12 @@ namespace ingame
             int red_laps = -1, red_hits = -1;
             unsigned blocked_seen = 0;
             std::uint64_t blocked_told = 0;
+            // V1.3.13: one hit for Crash per landing (V1.3.12 sent two: one when his state changed, one for the kept messages)
+            std::uint64_t crash_hit_at = 0;
+            // V1.3.13: his fight's pace with more health: the game's hit count (HitCount, 5) and, at the fight's start, his
+            // spin length and hit count
+            int papu_original = 0, laps_start = 0, hits_start = 0;
+            bool starts_known = false;
             // the game's hit for Crash (Papu Papu's attack's damage message to him), once found
             Address hit_message = 0, hit_target = 0, hit_args = 0, hit_sender = 0;
             bool hit_searched = false;
@@ -5009,6 +5015,8 @@ namespace ingame
             const int original = it->second;
             if (original < 1 || original > 50)
                 return;
+            if (name.find("PapuPapu") != std::string::npos)
+                t.papu_original = original;
             if (value<int>(data + hit_at) != original)
                 write(data + hit_at, original);
             const int max_health = value<int>(c + max_at);
@@ -5291,8 +5299,16 @@ namespace ingame
         // a hit on him while red taken back: his health (the one number on him or his parts that went down by just as much
         // since he turned red; V1.3.10's log: his health part's +0x310, the damage taken as a negative number), his spin
         // length and his hit count
-        void put_back_papu(BossTuning &t, std::ostream &line)
+        // V1.3.13: not his last hit. V1.3.12's log: that one was taken back too, after he had already gone down (state 4):
+        // he stayed down with health left, and the fight never ended. The last one counts, so the fight ends
+        bool put_back_papu(BossTuning &t, std::ostream &line)
         {
+            const bool down = t.state_at && value<int>(t.papu_ai + t.state_at) == 4;
+            if (down || (health_getter_ok() && typed(t.papu, 0x1592220) && actor_health(t.papu) <= 0))
+            {
+                line << "; it was his last hit: it counts, so the fight ends";
+                return false;
+            }
             // the hit taken back: his health (as the game's getter sees it) went down; the one number in his actor
             // that went down (or up) by just as much since he turned red goes back
             if (t.red_health > 0 && health_getter_ok() && !t.red_snapshot.empty())
@@ -5368,6 +5384,19 @@ namespace ingame
                 line << "; spin length " << value<int>(t.papu_ai + t.laps_total_at) << " -> " << t.red_laps, write(t.papu_ai + t.laps_total_at, t.red_laps);
             if (t.red_hits >= 0 && t.hit_count_at && value<int>(t.papu_ai + t.hit_count_at) != t.red_hits)
                 line << "; hit count " << value<int>(t.papu_ai + t.hit_count_at) << " -> " << t.red_hits, write(t.papu_ai + t.hit_count_at, t.red_hits);
+            return true;
+        }
+        // Crash's hit for landing on him while red: once per landing
+        void punish_crash(BossTuning &t, std::ostream &line, std::uint64_t now)
+        {
+            if (t.crash_hit_at && now - t.crash_hit_at < 2000)
+            {
+                line << "; Crash already took the hit for this landing";
+                return;
+            }
+            t.crash_hit_at = now;
+            if (!boss_real_hit(t, line))
+                boss_rule_hit(line);
         }
         void papu_rule(BossTuning &t, const Shared &state, std::uint64_t now)
         {
@@ -5431,12 +5460,39 @@ namespace ingame
                 {
                     std::ostringstream line;
                     line << "Boss rule: Crash landed on Papu Papu while he was red (" << seconds(now - t.red_since) << " into it)";
-                    put_back_papu(t, line);
-                    if (!boss_real_hit(t, line))
-                        boss_rule_hit(line);
+                    if (put_back_papu(t, line))
+                        punish_crash(t, line, now);
                     std::cout << line.str() << "\n" << std::flush;
+                    // (the messages kept from him for this landing are this same landing)
+                    t.blocked_told = now, t.blocked_seen = boss_blocked.load();
                 }
                 t.state = s, t.state_since = now, t.top_speed = 0, t.turn_most = -1e9f, t.turn_least = 1e9f;
+            }
+            // V1.3.13: with more health his fight keeps the game's pace: his spin length (spinPlayerLapCount, a lap more with
+            // each hit) and his hit count (e24taaam) go up as over the game's 5 hits, spread over all of his, and reach the
+            // game's last step just before his last hit. V1.3.12's log, 10 hits: his spins grew to 11 laps (the game's
+            // longest is 6), and at his 6th hit his hit count went past the game's last and started over
+            if (t.laps_total_at && t.hit_count_at && t.papu_original > 1 && typed(t.papu, 0x1592220) && health_getter_ok())
+            {
+                const int max = value<int>(t.papu + 0xf8), health = actor_health(t.papu), total = max / 100;
+                if (health == max && (s == 1 || s == 2))
+                {
+                    t.laps_start = value<int>(t.papu_ai + t.laps_total_at), t.hits_start = value<int>(t.papu_ai + t.hit_count_at);
+                    t.starts_known = true;
+                }
+                else if (t.starts_known && total > t.papu_original && health > 0 && health < max && (s == 1 || s == 3) && !t.red)
+                {
+                    const int taken = std::clamp((max - health + 50) / 100, 0, total - 1);
+                    const int step = taken * (t.papu_original - 1) / (total - 1);
+                    const int laps = t.laps_start + step, hits = t.hits_start + step;
+                    const int game_laps = value<int>(t.papu_ai + t.laps_total_at), game_hits = value<int>(t.papu_ai + t.hit_count_at);
+                    if (game_laps != laps || game_hits != hits)
+                    {
+                        write(t.papu_ai + t.laps_total_at, laps), write(t.papu_ai + t.hit_count_at, hits);
+                        std::cout << "Boss pace: Papu Papu took " << taken << " of " << total << " hits: spin length " << game_laps << " -> " << laps
+                                  << ", hit count " << game_hits << " -> " << hits << " (the game's step " << step + 1 << " of " << t.papu_original << ")\n" << std::flush;
+                    }
+                }
             }
             // V1.3.10 (the rule as asked for): after a hit he's red for one spin cycle, from when he gets up (3 -> 1) until that spin
             // ends (2 -> 1); then he can be hit again
@@ -5484,9 +5540,8 @@ namespace ingame
                         boss_blocked_names.clear();
                     }
                     line << ")";
-                    put_back_papu(t, line);
-                    if (!boss_real_hit(t, line))
-                        boss_rule_hit(line);
+                    if (put_back_papu(t, line))
+                        punish_crash(t, line, now);
                     std::cout << line.str() << "\n" << std::flush;
                 }
             }
@@ -8664,6 +8719,24 @@ namespace ingame
             nitro_probe();
         }
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
+        // Aku Aku Mask items in a boss fight (V1.3.13, asked for: "one is enough"): a mask comes there only while Crash
+        // has none and none came in this fight yet; the rest wait for the next level. (V1.3.12's log: a release's 57
+        // masks came one every 3 seconds, so Crash had three, invincible, all fight long)
+        {
+            static std::string boss_given;
+            static std::uint64_t checked = 0;
+            const auto now = GetTickCount64();
+            const auto boss = boss_zone_key();
+            if (boss.empty())
+                boss_given.clear(), state.aku_hold = 0;
+            else if (now - checked >= 250)
+            {
+                checked = now;
+                state.aku_hold = boss_given == boss || aku_manager_state(player()).second ? 1u : 0u;
+            }
+            if (state.aku_give_request != state.aku_give_ack && !boss.empty())
+                boss_given = boss, state.aku_hold = 1;
+        }
         if (state.aku_give_request != state.aku_give_ack)
         {
             state.aku_give_ack = state.aku_give_request;

@@ -46,6 +46,13 @@ public:
     // Aku Aku Mask fillers handed over so far (receipts before this index are done)
     unsigned aku_cursor() const { return ready() && data_["aku_cursor"].isUInt() ? data_["aku_cursor"].asUInt() : 0; }
     bool reserve_aku(unsigned index);
+    // /skip_filler: every 1-Up, Wumpa Fruit and Aku Aku Mask received so far counts as given (none of them comes);
+    // ones received later come as usual. How many of each were skipped
+    struct SkippedFiller
+    {
+        unsigned lives = 0, wumpa = 0, masks = 0;
+    };
+    SkippedFiller skip_filler();
     bool reserve_trap(unsigned index);
     // Nitro Traps wait for a level with Nitro crates without holding up other traps
     unsigned nitro_pending() const { return ready() && data_["nitro_pending"].isUInt() ? data_["nitro_pending"].asUInt() : 0; }
