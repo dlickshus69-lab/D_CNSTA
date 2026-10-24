@@ -3,8 +3,9 @@
 # Every build is kept under the run's "Artifacts". The Releases page has two releases (V1.3.5):
 # - the Testing build, from main: "Dlickshus Crash Bandicoot N. Sane Trilogy Archipelago V<major.minor>.<build> (Testing build)"
 #   (tag v<major.minor>.<build>, a pre-release): major.minor comes from the VERSION file, the last number counts builds
-#   since that version started: the run number minus VERSION_FIRST_RUN, plus 1 (V1.3 is run 154: VERSION_FIRST_RUN 155
-#   makes it build 0, shown as just V1.3, and run 155 V1.3.1).
+#   of main since that version started: main's successful builds so far plus this one, minus VERSION_FIRST_RUN, plus 1;
+#   build 0 is shown as just the version (V1.3). Only main's successful builds count (V1.3.6), so a Stable build or a
+#   cancelled one doesn't make the Testing numbers skip; VERSION_FIRST_RUN 130 makes main's 136th successful build V1.3.6.
 # - the Stable build, from the stable branch: "... V<STABLE_VERSION> (Stable build)" (tag stable-v<STABLE_VERSION>-<run>,
 #   marked Latest): everything finished and in ongoing testing, without what's still being worked on.
 # Only the newest of each is kept, and the skins release stays.
@@ -16,6 +17,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: build-${{ github.ref }}
@@ -114,7 +116,10 @@ jobs:
             $tag = "stable-v$version-$env:GITHUB_RUN_NUMBER"
             $kind = "Stable build"
           } else {
-            $build = [int]$env:GITHUB_RUN_NUMBER - [int]((Get-Content VERSION_FIRST_RUN -Raw).Trim()) + 1
+            # main's successful builds so far, plus this one
+            $count = [int](gh api "repos/$env:GH_REPO/actions/workflows/build-client.yml/runs?branch=main&status=success&per_page=1" --jq .total_count) + 1
+            if ($LASTEXITCODE -ne 0 -or $count -lt 2) { Write-Host "::error::Could not count main's builds"; exit 1 }
+            $build = $count - [int]((Get-Content VERSION_FIRST_RUN -Raw).Trim()) + 1
             if ($build -lt 0) { $build = [int]$env:GITHUB_RUN_NUMBER }
             # build 0 is the version itself (V1.3), the builds after it V1.3.1, V1.3.2, ...
             $version = if ($build -eq 0) { (Get-Content VERSION -Raw).Trim() } else { "$((Get-Content VERSION -Raw).Trim()).$build" }
@@ -123,14 +128,15 @@ jobs:
           }
           # every build gets its own tag: GitHub may refuse to reuse a deleted release's tag
           if ([int]$env:GITHUB_RUN_ATTEMPT -gt 1) { $tag = "$tag-$env:GITHUB_RUN_ATTEMPT" }
-          # the release text: what's in this build (RELEASE_NOTES.md, written with each change)
-          $notes = if (Test-Path RELEASE_NOTES.md) { (Get-Content RELEASE_NOTES.md -Raw).Trim() } else { "" }
+          # the release text: what's in this build (RELEASE_NOTES.md, written with each change), read by gh from the file
+          # (passed as text, quotes in it split it into several arguments: the V1.3 Stable build's "#RRGGBB")
+          $notes = if (Test-Path RELEASE_NOTES.md) { @("--notes-file", "RELEASE_NOTES.md") } else { @("--notes", "") }
           $title = "Dlickshus Crash Bandicoot N. Sane Trilogy Archipelago V$version ($kind)"
           $mark = if ($stable) { @("--latest") } else { @("--prerelease", "--latest=false") }
           $created = $false
           for ($attempt = 1; $attempt -le 3 -and -not $created; $attempt++) {
             $out = (gh release create $tag CrashNST-AP-Client-x64.zip CrashNST-APWorld/dist/crash_nst.apworld `
-              --title $title --notes $notes --target $env:GITHUB_SHA @mark 2>&1) | Out-String
+              --title $title @notes --target $env:GITHUB_SHA @mark 2>&1) | Out-String
             if ($LASTEXITCODE -eq 0) { $created = $true; break }
             # an annotation, so the error can be read from the API without the full log
             Write-Host "::warning::Release attempt $attempt failed: $($out.Trim())"
