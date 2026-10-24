@@ -5131,18 +5131,18 @@ namespace ingame
             std::string bar_snap_when;
             std::map<Address, std::uint32_t> bar_snapshot;
             unsigned bar_snapshots = 0;
-            // V1.3.24: the fill for more notches than the game's (see stretch_bar_fill): the boss's notches as the game has
-            // them, the bar's parts (its own, not its setting's), BarParent's widest (the fill at full health), and the fill
-            // picture's width as the game had it and as written
+            // V1.3.25: the fill for more notches than the game's (see game_bar_width): the boss's notches as the game has them
+            // and ours, the bar's parts (its own, not its setting's), BarParent's widest (the fill at full health), and the
+            // setting's HealthBar (found once a visit, and whether its scale is ours)
             Address bar_script = 0;
             unsigned bar_proj_at = 0;
-            int bar_game_hits = 0;
+            int bar_game_hits = 0, bar_hits = 0;
             bool parts_searched = false;
             unsigned parts_searches = 0;
             std::uint64_t parts_at = 0;
-            Address bar_parent = 0, health_bar = 0, fill_image = 0;
-            bool fill_image_whole = false;
-            float fill_image_game = 0, fill_image_written = 0, fill_full = 0, fill_stretch = 0;
+            Address bar_parent = 0, health_bar = 0, setting_health_bar = 0;
+            bool setting_searched = false, setting_written = false;
+            float fill_full = 0;
             unsigned fill_logs = 0;
             // a /bar_try in effect: what it changed, the game's value there and ours
             unsigned try_target = 0;
@@ -5194,7 +5194,7 @@ namespace ingame
         // his last form (his first phase stays)
         // research (V1.3.6): the boss's health bar. V1.3.5 made HitCount bigger: the bar grew to 10 notches but its fill
         // still counted 5 (half full at the start, empty a hit early). Its bar object's numbers go to the log as they change
-        void watch_boss_bar(BossTuning &t, Address c, const std::string &name, int game_hits)
+        void watch_boss_bar(BossTuning &t, Address c, const std::string &name, int game_hits, int hits)
         {
             if (!t.bar_handlers.insert(c).second)
                 return;
@@ -5207,7 +5207,7 @@ namespace ingame
                 return;
             }
             t.bar_object = bar, t.bar_found_at = GetTickCount64();
-            t.bar_script = c, t.bar_proj_at = at, t.bar_game_hits = game_hits;
+            t.bar_script = c, t.bar_proj_at = at, t.bar_game_hits = game_hits, t.bar_hits = hits;
             if (const auto data = value<Address>(c + 16); typed(data, 0x13bbb10))
                 if (const auto off = field_offset(value<Address>(data + 32), "GuiBossHealthBar", 8))
                     t.bar_template = resolve(value<Address>(data + off)) ? resolve(value<Address>(data + off)) : value<Address>(data + off);
@@ -5447,31 +5447,88 @@ namespace ingame
             }
             std::cout << std::flush;
         }
-        // V1.3.24: the fill for more notches than the game's. V1.3.21's clip and V1.3.22's log: with Papu Papu's 10 notches
-        // the bar's layout is the 10 notches' (the frame, notches, dark track and BarParent, which the fill shows up to: 1013
-        // at full health, 91 less with each hit), but the blue ends where the game's 5 notches end (547), whatever his health
-        // above that; its colours are the same at the same place with any health (it's cut off, not squeezed). Nothing in
-        // the bar holds that 547: the fill is a picture shown at its own size up to BarParent's width, and each boss's
-        // picture is painted only as far as his own notches go (Brio's 7 reach 782). So the picture (the setting's
-        // "[Nitrus-Brio.png]", 1040 x 80, with each boss's texture) is made wider by as much as the bar grew
-        float game_bar_width(int hits) { return 547.0f + static_cast<float>(hits - 5) * 117.5f; } // N. Gin's 5: 547, Brio's 7: 782
+        // V1.3.25: the fill for more notches than the game's. V1.3.21's clip and V1.3.22's log: with Papu Papu's 10 notches
+        // the bar's layout is the 10 notches' (the frame, notches, dark track and BarParent, which the blue is shown up to:
+        // 1013 at full health, 91 less with each hit), but the blue ends where the game's 5 notches end, at any health above
+        // that (it's cut off there, not squeezed). The blue is a picture (HealthBar, as wide as the whole bar) painted only
+        // as far as the boss's own notches go (Brio's 7 reach 782). V1.3.24's tests: HealthBar made wider sideways (its
+        // scale) stretches the painted part to the bar's end, and the blue still goes down with each hit; BarParent's scale
+        // stretched the bar past its frame. The game only uses a part's scale when it lays the bar out (a fight's start, a
+        // hit, a death), so the scale goes into the bar's setting (the bar each fight's bar is copied from) as soon as the
+        // boss is there, before his bar is made, and into the bar itself once it's found. (V1.3.24 widened the setting's
+        // picture size instead: no difference)
+        float game_bar_width(int hits) { return std::min(547.0f + static_cast<float>(hits - 5) * 117.5f, 1013.0f); } // N. Gin's 5: 547, Brio's 7: 782; 9 and up: 1013
+        // how much wider the blue has to be: the bar's length with our notches over its length with the game's
+        float bar_stretch(int game_hits, int hits)
+        {
+            if (game_hits < 1 || hits <= game_hits)
+                return 1.0f;
+            const float game = game_bar_width(game_hits), ours = game_bar_width(hits);
+            return game > 1 && ours > game ? ours / game : 1.0f;
+        }
         bool bar_part_ok(Address part, Address type, unsigned name_at, const char *name)
         {
             return part && typed(part, type) && printable_text(value<Address>(part + name_at)) == name;
         }
-        float bar_image_width(const BossTuning &t)
+        // what a bar (or its setting) leads to, nearest first: (object, steps)
+        void bar_reach(Address root, unsigned depth_most, std::size_t most, std::vector<std::pair<Address, unsigned>> &found)
         {
-            return t.fill_image_whole ? static_cast<float>(value<std::int32_t>(t.fill_image + 0x34)) : value<float>(t.fill_image + 0x34);
+            std::vector<std::pair<Address, unsigned>> queue{{root, 0}};
+            std::set<Address> seen{root};
+            std::vector<std::uint32_t> words(0x200 / 4);
+            for (std::size_t q = 0; q < queue.size() && found.size() < most; ++q)
+            {
+                const auto [object, depth] = queue[q];
+                if (!read(object, words))
+                    continue;
+                found.emplace_back(object, depth);
+                if (depth >= depth_most)
+                    continue;
+                for (std::size_t i = 0; i + 1 < words.size(); i += 2)
+                {
+                    const Address p = words[i] | (static_cast<Address>(words[i + 1]) << 32);
+                    if (p >= 0x10000 && p < 0x7fffffff0000ULL && (p < base() || p >= module_end()) && !seen.count(p) && readable(p, 0x40))
+                        seen.insert(p), queue.emplace_back(p, depth + 1);
+                }
+            }
         }
-        void set_bar_image_width(const BossTuning &t, float width)
+        // the bar's setting's HealthBar wider by the bar's growth (or back to the game's): every bar made from it from now on
+        // has it. Its HealthBar is found once a visit (the one nearest the setting)
+        void stretch_bar_setting(BossTuning &t, Address data, float stretch)
         {
-            if (t.fill_image_whole)
-                write(t.fill_image + 0x34, static_cast<std::int32_t>(std::lround(width)));
-            else
-                write(t.fill_image + 0x34, width);
+            const auto off = field_offset(value<Address>(data + 32), "GuiBossHealthBar", 8);
+            const auto p = off ? value<Address>(data + off) : 0;
+            const auto setting = resolve(p) ? resolve(p) : p;
+            if (!setting || !readable(setting, 0x100))
+                return;
+            if (!bar_part_ok(t.setting_health_bar, 0x161cf98, 0x30, "HealthBar"))
+            {
+                t.setting_health_bar = 0;
+                if (t.setting_searched)
+                    return;
+                t.setting_searched = true;
+                std::vector<std::pair<Address, unsigned>> found;
+                bar_reach(setting, 5, 2500, found);
+                for (const auto &[a, depth] : found)
+                    if (bar_part_ok(a, 0x161cf98, 0x30, "HealthBar"))
+                    {
+                        t.setting_health_bar = a;
+                        break;
+                    }
+                std::cout << "Boss bar: its setting's HealthBar " << (t.setting_health_bar ? "found" : "not found") << " (" << found.size() << " objects)\n" << std::flush;
+                if (!t.setting_health_bar)
+                    return;
+            }
+            const float want = stretch, has = value<float>(t.setting_health_bar + 0x8c);
+            if (std::isfinite(has) && has > 0.3f && has < 4.0f && std::abs(has - want) > 0.0005f)
+            {
+                write(t.setting_health_bar + 0x8c, want);
+                t.setting_written = want != 1.0f;
+                std::cout << "Boss bar: the setting's HealthBar's sideways scale " << has << " -> " << want << " (bars made from it from now on)\n" << std::flush;
+            }
         }
-        // the bar's own parts: what the bar leads to (5 steps, 3000 objects) and its setting (the bar each fight copies)
-        // doesn't (4 steps); BarParent, HealthBar and the fill picture, and every named part of the bar to the log
+        // the bar's own parts: what the bar leads to (5 steps, 3000 objects) and its setting doesn't (4 steps); BarParent and
+        // HealthBar, and every named part of the bar to the log
         void find_bar_parts(BossTuning &t)
         {
             t.parts_searched = true, ++t.parts_searches;
@@ -5481,176 +5538,124 @@ namespace ingame
                 if (const auto bar = resolve(p) ? resolve(p) : p; bar && readable(bar, 0x100))
                     t.bar_object = bar;
             }
-            const auto reach = [&](Address root, unsigned depth_most, std::size_t most, std::vector<std::pair<Address, unsigned>> &found) {
-                std::vector<std::pair<Address, unsigned>> queue{{root, 0}};
-                std::set<Address> seen{root};
-                std::vector<std::uint32_t> words(0x200 / 4);
-                for (std::size_t q = 0; q < queue.size() && found.size() < most; ++q)
-                {
-                    const auto [object, depth] = queue[q];
-                    if (!read(object, words))
-                        continue;
-                    found.emplace_back(object, depth);
-                    if (depth >= depth_most)
-                        continue;
-                    for (std::size_t i = 0; i + 1 < words.size(); i += 2)
-                    {
-                        const Address p = words[i] | (static_cast<Address>(words[i + 1]) << 32);
-                        if (p >= 0x10000 && p < 0x7fffffff0000ULL && (p < base() || p >= module_end()) && !seen.count(p) && readable(p, 0x40))
-                            seen.insert(p), queue.emplace_back(p, depth + 1);
-                    }
-                }
-            };
             std::vector<std::pair<Address, unsigned>> setting_parts, bar_parts;
             if (t.bar_template)
-                reach(t.bar_template, 4, 2000, setting_parts);
+                bar_reach(t.bar_template, 4, 2000, setting_parts);
             if (t.bar_object)
-                reach(t.bar_object, 5, 3000, bar_parts);
+                bar_reach(t.bar_object, 5, 3000, bar_parts);
             std::set<Address> setting;
             for (const auto &[a, depth] : setting_parts)
                 setting.insert(a);
-            struct Found
-            {
-                Address at;
-                unsigned depth;
-                bool setting;
-            };
-            std::vector<Found> parents, healths, images;
+            std::vector<std::pair<Address, bool>> parents, healths;
             std::ostringstream parts;
             unsigned named = 0;
             for (const auto &[a, depth] : bar_parts)
             {
-                const bool in_setting = setting.count(a) != 0;
-                if (typed(a, 0x161cf98))
-                {
-                    const auto name = printable_text(value<Address>(a + 0x30));
-                    if (name.empty())
-                        continue;
-                    if (name == "BarParent")
-                        parents.push_back({a, depth, in_setting});
-                    else if (name == "HealthBar")
-                        healths.push_back({a, depth, in_setting});
-                    if (!in_setting && named++ < 80)
-                        parts << "\nBoss bar part: " << name << " (depth " << depth << ") x " << value<float>(a + 0x68) << " y " << value<float>(a + 0x6c) << " width "
-                              << value<float>(a + 0x98) << " height " << value<float>(a + 0x9c) << " scale " << value<float>(a + 0x8c) << " " << value<float>(a + 0x90);
-                }
-                else if (typed(a, 0x1622be8) && printable_text(value<Address>(a + 0x10)) == "[Nitrus-Brio.png]")
-                    images.push_back({a, depth, in_setting});
+                if (!typed(a, 0x161cf98))
+                    continue;
+                const auto name = printable_text(value<Address>(a + 0x30));
+                if (name.empty())
+                    continue;
+                const bool in_setting = setting.count(a) != 0 || a == t.setting_health_bar;
+                if (name == "BarParent")
+                    parents.emplace_back(a, in_setting);
+                else if (name == "HealthBar")
+                    healths.emplace_back(a, in_setting);
+                if (!in_setting && named++ < 30)
+                    parts << "\nBoss bar part: " << name << " (depth " << depth << ") x " << value<float>(a + 0x68) << " y " << value<float>(a + 0x6c) << " width "
+                          << value<float>(a + 0x98) << " height " << value<float>(a + 0x9c) << " scale " << value<float>(a + 0x8c) << " " << value<float>(a + 0x90);
             }
-            // the bar's own: not its setting's if that can be told, then (the setting's BarParent is the full 1040) a
-            // narrower BarParent, and the fill picture and HealthBar nearest to the BarParent chosen
-            const auto pick = [](const std::vector<Found> &list, Address close_to, const std::function<int(const Found &)> &bonus) {
-                const Found *best = nullptr;
-                long long best_score = -1, best_distance = 0;
-                for (const auto &f : list)
+            // the bar's own: not its setting's (then, as the setting's BarParent is the full 1040, a narrower BarParent)
+            const auto pick = [](const std::vector<std::pair<Address, bool>> &list, bool parent) {
+                Address best = 0;
+                int best_score = -1;
+                for (const auto &[a, in_setting] : list)
                 {
-                    const long long score = (f.setting ? 0 : 4) + bonus(f);
-                    const long long distance = close_to ? std::llabs(static_cast<long long>(f.at) - static_cast<long long>(close_to)) : 0;
-                    if (!best || score > best_score || (score == best_score && distance < best_distance))
-                        best = &f, best_score = score, best_distance = distance;
+                    const int score = (in_setting ? 0 : 2) + (parent && std::abs(value<float>(a + 0x98) - 1040.0f) > 0.5f ? 1 : 0);
+                    if (score > best_score)
+                        best = a, best_score = score;
                 }
-                return best ? best->at : Address{0};
+                return best;
             };
-            t.bar_parent = pick(parents, 0, [](const Found &f) { return std::abs(value<float>(f.at + 0x98) - 1040.0f) > 0.5f ? 1 : 0; });
-            t.health_bar = pick(healths, t.bar_parent, [](const Found &) { return 0; });
-            t.fill_image = pick(images, t.bar_parent, [](const Found &) { return 0; });
-            t.fill_image_game = 0;
-            if (t.fill_image)
-            {
-                const auto raw = value<std::uint32_t>(t.fill_image + 0x34);
-                float f = 0;
-                std::memcpy(&f, &raw, 4);
-                if (raw >= 16 && raw <= 8192)
-                    t.fill_image_whole = true, t.fill_image_game = static_cast<float>(raw);
-                else if (std::isfinite(f) && f >= 16 && f <= 8192)
-                    t.fill_image_whole = false, t.fill_image_game = f;
-                else
-                    t.fill_image = 0;
-            }
-            const auto brief = [&](const std::vector<Found> &list, Address chosen) {
+            t.bar_parent = pick(parents, true);
+            t.health_bar = pick(healths, false);
+            const auto brief = [&](const std::vector<std::pair<Address, bool>> &list, Address chosen) {
                 std::ostringstream out;
-                for (const auto &f : list)
-                    out << " 0x" << std::hex << f.at << std::dec << " (depth " << f.depth << (f.setting ? ", the setting's" : "") << (f.at == chosen ? ", this one" : "") << ")";
+                for (const auto &[a, in_setting] : list)
+                    out << " 0x" << std::hex << a << std::dec << (in_setting ? " (the setting's)" : "") << (a == chosen ? " (this one)" : "");
                 return out.str();
             };
             std::cout << "Boss bar parts: " << bar_parts.size() << " objects from the bar, " << setting_parts.size() << " from its setting; BarParent" << brief(parents, t.bar_parent)
-                      << "; HealthBar" << brief(healths, t.health_bar) << "; the fill picture" << brief(images, t.fill_image);
-            if (t.fill_image)
-                std::cout << ", " << t.fill_image_game << " x " << (t.fill_image_whole ? value<std::int32_t>(t.fill_image + 0x38) : value<float>(t.fill_image + 0x38))
-                          << (t.fill_image_whole ? " (whole numbers)" : " (decimals)");
+                      << "; HealthBar" << brief(healths, t.health_bar);
+            if (t.health_bar)
+                std::cout << ", made with sideways scale " << value<float>(t.health_bar + 0x8c);
             std::cout << parts.str() << "\n" << std::flush;
         }
-        // our values back as the game had them (the fill picture's width, a /bar_try's), while they're still ours
-        void bar_parts_back(BossTuning &t)
+        // a /bar_try's change back while it's still ours
+        void bar_parts_back_try(BossTuning &t)
         {
-            if (t.fill_image_written > 0 && bar_part_ok(t.fill_image, 0x1622be8, 0x10, "[Nitrus-Brio.png]") &&
-                std::abs(bar_image_width(t) - t.fill_image_written) < 0.5f)
-                set_bar_image_width(t, t.fill_image_game);
-            t.fill_image_written = 0;
             if (t.try_at && typed(t.try_part, 0x161cf98) && std::abs(value<float>(t.try_at) - t.try_written) < 0.0001f)
                 write(t.try_at, t.try_game);
             t.try_at = t.try_part = 0, t.try_target = 0;
+        }
+        // the setting's HealthBar back as the game had it (it's kept between levels), and a /bar_try's change while it's still ours
+        void bar_parts_back(BossTuning &t)
+        {
+            if (t.setting_written && bar_part_ok(t.setting_health_bar, 0x161cf98, 0x30, "HealthBar"))
+            {
+                write(t.setting_health_bar + 0x8c, 1.0f);
+                std::cout << "Boss bar: the setting's HealthBar's sideways scale back to 1\n" << std::flush;
+            }
+            t.setting_written = false;
+            bar_parts_back_try(t);
         }
         void stretch_bar_fill(BossTuning &t, const Shared &state, std::uint64_t now)
         {
             if (!t.bar_object)
                 return;
-            if (!t.parts_searched && t.bar_found_at && now - t.bar_found_at > 1200)
+            if (!t.parts_searched && t.bar_found_at && now - t.bar_found_at > 300)
                 find_bar_parts(t);
             if (!bar_part_ok(t.bar_parent, 0x161cf98, 0x30, "BarParent"))
             {
                 // (gone, or not found yet: looked for again every 3 seconds, a few times)
                 if (t.parts_searched && t.parts_searches < 6 && now >= t.parts_at)
                 {
-                    // (ours put back first where it's still there, so it's never taken for the game's)
-                    bar_parts_back(t);
-                    t.parts_searched = false, t.parts_at = now + 3000, t.bar_parent = t.health_bar = t.fill_image = 0;
+                    bar_parts_back_try(t);
+                    t.parts_searched = false, t.parts_at = now + 3000, t.bar_parent = t.health_bar = 0;
                 }
                 return;
             }
             const float width = value<float>(t.bar_parent + 0x98);
             if (std::isfinite(width) && width > t.fill_full && width < 5000)
                 t.fill_full = width;
-            const float game = game_bar_width(t.bar_game_hits);
-            const float stretch = t.bar_game_hits > 0 && game > 1 ? t.fill_full / game : 1.0f;
-            const bool grown = stretch > 1.05f && stretch < 3.0f;
-            // the fill picture as wide as the bar grew (not with /bar_try none, to compare)
-            if (t.fill_image && bar_part_ok(t.fill_image, 0x1622be8, 0x10, "[Nitrus-Brio.png]"))
+            // the bar's own HealthBar as wide as its setting's (a bar made before the setting changed gets it at its next
+            // layout: his first hit, or a death); not with /bar_try none, to compare
+            const float stretch = state.bar_try_target == 1 ? 1.0f : bar_stretch(t.bar_game_hits, t.bar_hits);
+            if (bar_part_ok(t.health_bar, 0x161cf98, 0x30, "HealthBar"))
             {
-                const float want = grown && state.bar_try_target != 1 ? t.fill_image_game * stretch : t.fill_image_game;
-                const float has = bar_image_width(t);
-                const bool ours_or_game = std::abs(has - t.fill_image_game) < 0.5f || (t.fill_image_written > 0 && std::abs(has - t.fill_image_written) < 0.5f);
-                if (ours_or_game && std::abs(has - want) >= 0.5f)
+                const float has = value<float>(t.health_bar + 0x8c);
+                if (std::isfinite(has) && has > 0.3f && has < 4.0f && std::abs(has - stretch) > 0.0005f)
                 {
-                    set_bar_image_width(t, want);
-                    t.fill_image_written = want == t.fill_image_game ? 0 : want;
-                    // (logged when it starts, ends, or changes by more than a little: the bar may fill up as it appears)
-                    if ((std::abs(stretch - t.fill_stretch) > 0.05f || want == t.fill_image_game) && t.fill_logs++ < 12)
-                    {
-                        t.fill_stretch = want == t.fill_image_game ? 0 : stretch;
-                        std::cout << "Boss bar: the fill picture's width " << has << " -> " << want << " (the bar's fill reaches " << t.fill_full << ", the game's "
-                                  << t.bar_game_hits << " notches " << game << (want == t.fill_image_game ? "; /bar_try none: the game's" : "") << ")\n" << std::flush;
-                    }
+                    write(t.health_bar + 0x8c, stretch);
+                    if (t.fill_logs++ < 12)
+                        std::cout << "Boss bar: HealthBar's sideways scale " << has << " -> " << stretch << " (the blue is painted for the game's " << t.bar_game_hits
+                                  << " notches; the bar has " << t.bar_hits << ", " << t.fill_full << " long)\n" << std::flush;
                 }
             }
-            // /bar_try health or scale (V1.3.24 tests): HealthBar's or BarParent's sideways scale times the factor (the
-            // bar's growth unless one is given), kept until /bar_try off
-            const unsigned target = state.bar_try_target >= 2 && state.bar_try_target <= 3 ? state.bar_try_target : 0;
+            // /bar_try scale (V1.3.24 test): BarParent's sideways scale times the factor (the bar's growth unless one is
+            // given), kept until /bar_try off
+            const unsigned target = state.bar_try_target == 3 ? 3u : 0u;
             if (target != t.try_target)
             {
-                if (t.try_at && typed(t.try_part, 0x161cf98) && std::abs(value<float>(t.try_at) - t.try_written) < 0.0001f)
-                    write(t.try_at, t.try_game);
-                t.try_at = t.try_part = 0, t.try_target = target;
-                const Address part = target == 2 ? t.health_bar : target == 3 ? t.bar_parent : 0;
-                if (part && bar_part_ok(part, 0x161cf98, 0x30, target == 2 ? "HealthBar" : "BarParent"))
+                bar_parts_back_try(t);
+                t.try_target = target;
+                if (target)
                 {
-                    const float factor = state.bar_try_factor > 0.1f ? state.bar_try_factor : grown ? stretch : 2.0f;
-                    t.try_part = part, t.try_at = part + 0x8c, t.try_game = value<float>(t.try_at), t.try_written = t.try_game * factor;
+                    const float factor = state.bar_try_factor > 0.1f ? state.bar_try_factor : std::max(bar_stretch(t.bar_game_hits, t.bar_hits), 1.5f);
+                    t.try_part = t.bar_parent, t.try_at = t.bar_parent + 0x8c, t.try_game = value<float>(t.try_at), t.try_written = t.try_game * factor;
                     write(t.try_at, t.try_written);
-                    std::cout << "Boss bar try: " << (target == 2 ? "HealthBar" : "BarParent") << "'s sideways scale " << t.try_game << " -> " << t.try_written << "\n" << std::flush;
+                    std::cout << "Boss bar try: BarParent's sideways scale " << t.try_game << " -> " << t.try_written << "\n" << std::flush;
                 }
-                else if (target)
-                    std::cout << "Boss bar try: " << (target == 2 ? "HealthBar" : "BarParent") << " wasn't found\n" << std::flush;
             }
             else if (t.try_at && typed(t.try_part, 0x161cf98) && std::abs(value<float>(t.try_at) - t.try_game) < 0.0001f && std::abs(t.try_written - t.try_game) > 0.0001f)
                 write(t.try_at, t.try_written); // (the game put its own back)
@@ -5764,9 +5769,14 @@ namespace ingame
                           << " into the level; his health script " << (max_health > 0 ? "had started (maxHealth " + std::to_string(max_health) + ")" : std::string("hadn't started"))
                           << "\n" << std::flush;
             }
+            // (V1.3.25) the bar's setting's blue as much wider as the bar grows, before his bar is made from it (see
+            // game_bar_width); back to the game's when it doesn't grow
+            // (only from the boss whose bar it is: Brio's first form keeps the game's hits)
+            if (eligible && (notches > original || t.setting_written))
+                stretch_bar_setting(t, data, bar_stretch(original, notches));
             if (max_health <= 0)
                 return; // not started yet
-            watch_boss_bar(t, c, name, original);
+            watch_boss_bar(t, c, name, original, eligible ? notches : original);
             if (!eligible)
             {
                 tell_once(t, "same" + name, "Boss health: " + name + " keeps his " + std::to_string(original) + " hits");
@@ -5944,8 +5954,7 @@ namespace ingame
         // Crash's damage script ha5y20l3 with seven values; Crash's damage and Aku Aku scripts do the rest (a mask, the
         // hurt animation, or a life; nothing while he's invincible). Sent from a node of our own with the game's node's
         // values (as the Nitro Trap's explosion is), from Papu Papu's attack script
-        // (not used from V1.3.14 to V1.3.22, see punish_crash; V1.3.24: with what his attack script held when his spin last
-        // hit Crash, replay_real_hit)
+        // (not used from V1.3.14 to V1.3.22, see punish_crash; since V1.3.24 for the angel death, see replay_real_hit)
         bool boss_real_hit(BossTuning &t, std::ostream &out)
         {
             const auto crash = player();
@@ -5988,8 +5997,23 @@ namespace ingame
                             continue;
                         const auto values = list(list_at, 16);
                         const bool hit = values.size() == 7 && typed(values[3], 0x1755c60) && typed(values[5], 0x17483c0);
+                        // (V1.3.25 research) which of his attack script's settings each value reads: a field description of
+                        // the script's type among the value's (or what it points to's) first words
+                        std::ostringstream reads;
+                        if (hit)
+                        {
+                            const auto smeta = value<Address>(sender + 56);
+                            const auto count = value<unsigned>(smeta + 24);
+                            const auto fields = value<Address>(smeta + 40);
+                            for (std::size_t k = 0; k < values.size(); ++k)
+                                for (const auto place : {values[k], value<Address>(values[k] + 24)})
+                                    for (unsigned off = 0; place && off < 0x40; off += 8)
+                                        for (unsigned i = 0; fields && count <= 512 && i < count; ++i)
+                                            if (const auto field = value<Address>(fields + i * 8); field && value<Address>(place + off) == field)
+                                                reads << " value " << k << " reads " << string(value<Address>(field + 48), 64);
+                        }
                         std::cout << "Boss rule: a sender of Crash's hit message in Papu Papu's attack script" << send_arguments(node) << (hit ? " (the hit)" : "")
-                                  << "\n";
+                                  << reads.str() << "\n";
                         if (hit && !args)
                             args = list_at;
                     }
@@ -6011,52 +6035,46 @@ namespace ingame
             out << "; Crash takes the game's hit (Aku Aku takes it if he's there)";
             return true;
         }
-        // V1.3.24: the angel death for a landing while red without a mask: his spin's own hit, as it last hit Crash in this
-        // visit (see HitCapture). What his attack script held then goes back into it for the moment the game's hit message
-        // is sent from it, and what it held before goes back right after. Not if a kept object's first word (its type)
-        // changed since
+        // V1.3.25: the angel death for a landing while red without a mask: the game's hit message from his attack script, with
+        // the death it names (currCrashDeathBehaviorEvent) set to his attack's own (his data's CrashDeathDefaultBehaviorEvent,
+        // "Death_Common_Spin") and isCrashHit set, for the moment it's sent. V1.3.24's log: the message's values are the
+        // death's name (of the type +0x17a5098) and a yes/no, read from his attack script when it's sent; at rest the name
+        // is empty, which is why V1.3.13's message did nothing. (V1.3.24 put back everything his script held at a real hit,
+        // the damage too: that damage is made for each hit and gone right after, so it was never sent)
+        std::pair<Address, Address> boss_death_behavior(Address boss);
         bool replay_real_hit(BossTuning &t, std::ostream &out)
         {
-            HitCapture capture;
-            {
-                std::lock_guard lock(hit_capture_mutex);
-                capture = hit_capture;
-            }
             Address sender = 0;
             for (const auto &[c, script] : entity_scripts(t.papu))
                 if (script == "common_BossAttackDamageHandler")
                     sender = c;
-            if (!sender || capture.fields.empty() || capture.component != sender)
+            const auto meta = sender ? value<Address>(sender + 56) : 0;
+            const unsigned death_at = meta ? field_offset(meta, "currCrashDeathBehaviorEvent", 8) : 0;
+            const unsigned hit_at = meta ? field_offset(meta, "isCrashHit", 1) : 0;
+            const auto [death, death_type] = boss_death_behavior(t.papu);
+            if (!sender || !death_at || !death)
             {
-                out << (capture.fields.empty() || capture.component != sender ? "; his spin hasn't hit Crash yet in this visit, so there's no hit of his to send again"
-                                                                                 : "; his attack script wasn't found");
+                out << "; his attack script or its death wasn't found (script " << (sender ? "yes" : "no") << ", death name " << (death_at ? "yes" : "no") << ", his death "
+                    << (death ? "yes" : "no") << ")";
                 return false;
             }
-            for (std::size_t i = 0; i < capture.fields.size(); ++i)
-                if (const auto v = capture.fields[i].second; v && (!readable(v, 16) || value<Address>(v) != capture.types[i]))
-                {
-                    out << "; the hit kept from his spin is out of date (" << hex(capture.fields[i].first) << " changed)";
-                    return false;
-                }
-            std::ostringstream fields;
-            std::vector<Address> before;
-            for (const auto &[at, v] : capture.fields)
-            {
-                before.push_back(value<Address>(sender + at));
-                write(sender + at, v);
-                fields << " " << hex(at) << "=" << pointer_brief(v);
-            }
+            const auto death_before = value<Address>(sender + death_at);
+            const auto hit_before = hit_at ? value<std::uint8_t>(sender + hit_at) : std::uint8_t{0};
+            write(sender + death_at, death);
+            if (hit_at)
+                write(sender + hit_at, std::uint8_t{1});
             own_hit_send = true;
             std::ostringstream sent_note;
             const bool sent = boss_real_hit(t, sent_note);
             own_hit_send = false;
-            for (std::size_t i = 0; i < capture.fields.size(); ++i)
-                if (value<Address>(sender + capture.fields[i].first) == capture.fields[i].second)
-                    write(sender + capture.fields[i].first, before[i]);
-            std::cout << "Boss rule: his spin's hit from " << seconds(GetTickCount64() - capture.at) << " ago, sent again with" << fields.str()
+            if (value<Address>(sender + death_at) == death)
+                write(sender + death_at, death_before);
+            if (hit_at && value<std::uint8_t>(sender + hit_at) == 1)
+                write(sender + hit_at, hit_before);
+            std::cout << "Boss rule: his attack's hit message sent with his death " << pointer_brief(death) << (hit_at ? " and isCrashHit" : "")
                       << (sent ? "" : " (it couldn't be sent)") << "\n" << std::flush;
             if (!sent)
-                out << "; his hit couldn't be sent again";
+                out << "; his hit couldn't be sent";
             return sent;
         }
         // without the game's hit: as one would be (a mask less, nothing while invincible, a life without a mask). (His
@@ -6184,14 +6202,14 @@ namespace ingame
                     out << "; Crash has a mask: no hit";
                 return;
             }
-            // V1.3.24: his spin's own hit, sent again: the death it gives is the angel's (V1.3.15 to V1.3.22 tried to make
-            // DeathLink's falling death into it: it always makes a falling death, whatever it's given)
+            // V1.3.24: his attack's own hit message, with his death in it (V1.3.25, see replay_real_hit): the death it gives is
+            // the angel's (V1.3.15 to V1.3.22 tried to make DeathLink's falling death into it: it always makes a falling death)
             std::ostringstream replay;
             if (replay_real_hit(t, replay))
             {
                 t.replay_check_at = GetTickCount64() + 600;
                 t.replay_deaths = death_values.load(), t.replay_angels = angel_deaths.load();
-                out << "; no mask: his spin's own hit for Crash (the angel death)";
+                out << "; no mask: his attack's own hit message for Crash, with his death (the angel)";
                 return;
             }
             out << replay.str();
@@ -6542,13 +6560,13 @@ namespace ingame
                           << (still_out ? " (his death message didn't come within 2.5 s; the death texts were put back now)" : "") << "\n" << std::flush;
                 red_death_until = 0;
             }
-            // (V1.3.24) his spin's hit sent again for a landing while red: Crash's death, and which kind; the falling death if
+            // (V1.3.24) his attack's hit message for a landing while red: Crash's death, and which kind; the falling death if
             // it didn't kill him
             if (t.replay_check_at && now >= t.replay_check_at)
             {
                 t.replay_check_at = 0;
                 const bool died = death_values.load() != t.replay_deaths, angel = angel_deaths.load() != t.replay_angels;
-                std::cout << "Boss rule: his spin's hit sent again: " << (died ? (angel ? "Crash died the angel's death" : "Crash died, but not the angel's death") : "Crash didn't die from it");
+                std::cout << "Boss rule: his hit message: " << (died ? (angel ? "Crash died the angel's death" : "Crash died, but not the angel's death") : "Crash didn't die from it");
                 if (!died)
                 {
                     bool falling = false;

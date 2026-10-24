@@ -174,8 +174,8 @@ namespace ingame
         // (V1.3.21 test, /boss_bar) with more health: 1 grows the bar's notches with it (its fill doesn't grow yet), 0 keeps
         // the game's notches (each hit takes part of one)
         unsigned boss_bar_grow = 0;
-        // (V1.3.24 test, /bar_try) 0 off (the fill picture stretched to a bigger bar's length), 1 none (not stretched, to
-        // compare), 2 HealthBar's or 3 BarParent's sideways scale times bar_try_factor (0: the bar's growth), kept until off
+        // (V1.3.25 test, /bar_try) 0 off (the blue, HealthBar, stretched to a bigger bar's length), 1 none (not stretched,
+        // to compare), 3 BarParent's sideways scale times bar_try_factor (0: the bar's growth), kept until off
         unsigned bar_try_target = 0;
         float bar_try_factor = 0;
         // set by the game thread every frame it runs (GetTickCount64)

@@ -562,20 +562,20 @@ void ClientRuntime::handle_commands()
             }
             else if (command == "/bar_try")
             {
-                // test (V1.3.24): the fill's stretch for a bigger bar, off to compare (none), or a part of the bar stretched
-                // sideways to look at (health, scale; by the bar's growth unless a factor is given)
+                // test (V1.3.25): the blue's stretch for a bigger bar off to compare (none), or the whole fill stretched
+                // sideways to look at (scale; by the bar's growth unless a factor is given)
                 std::istringstream in(argument);
                 std::string what;
                 float factor = 0;
                 in >> what >> factor;
-                const unsigned target = what == "none" ? 1 : what == "health" ? 2 : what == "scale" ? 3 : 0;
+                const unsigned target = what == "none" ? 1 : what == "scale" ? 3 : 0;
                 if (!(factor > 0.1f && factor < 10))
                     factor = 0;
                 if (box_markers)
                     box_markers->bar_try(target, factor);
-                print_console(target == 1   ? std::string("Bar try: none (the fill isn't stretched, as before V1.3.24). /bar_try off puts the stretch back.")
-                              : target      ? "Bar try: " + what + " stretched sideways (kept until /bar_try off). Take a screenshot of the bar."
-                                            : std::string("Bar try: off (the fill is stretched to the bar's length). Tests: /bar_try none, /bar_try health, /bar_try scale."));
+                print_console(target == 1   ? std::string("Bar try: none (the blue isn't stretched, to compare; it shows from the next hit or death). /bar_try off puts the stretch back.")
+                              : target      ? "Bar try: " + what + " (the whole fill stretched sideways, from the next hit or death; kept until /bar_try off)."
+                                            : std::string("Bar try: off (the blue is stretched to the bar's length). Tests: /bar_try none, /bar_try scale."));
             }
             else if (command == "/boss_bar")
             {
@@ -583,7 +583,7 @@ void ClientRuntime::handle_commands()
                 if (argument == "grow" || argument == "keep")
                     boss_bar_grow = argument == "grow";
                 print_console(std::string("Boss bar: ") + (boss_bar_grow ? "grow" : "keep") +
-                              " (test). grow (the default): more notches (V1.3.24 stretches the fill to the bar's length: being tested). keep: "
+                              " (test). grow (the default): more notches (V1.3.25 stretches the blue to the bar's length: being tested). keep: "
                               "the game's notches, full at the start, each hit takes part of one (works). From the next fight. /boss_bar grow or keep.");
             }
             else if (command == "/clear")
