@@ -1160,6 +1160,13 @@ namespace ingame
         std::atomic_uint boss_blocked{0};
         std::mutex boss_block_mutex;
         std::vector<std::string> boss_blocked_names;
+        // V1.3.16: the death for a landing on red Papu Papu. DeathLink's death message, with the death Crash's damage script
+        // then plays (its 0xblwcwf's parameter, ug0b8lyr) changed to the one Papu Papu's attack gives (the angel), for 2
+        // seconds. V1.3.15's log: his spin's death and DeathLink's both end with Crash's script sending 0xblwcwf, each with
+        // its own death; DeathLink's own message's parameter (V1.3.15 set it) isn't the death played
+        std::atomic<Address> red_death_behavior{0}, red_death_type{0}, red_death_was{0};
+        std::atomic<std::uint64_t> red_death_until{0};
+        std::atomic_uint red_death_changed{0}, red_death_seen{0};
         std::atomic<std::uint64_t> boss_event_since{0};
         std::atomic_uint boss_event_lines{0};
         std::map<std::string, unsigned> boss_event_counts;
@@ -1435,6 +1442,30 @@ namespace ingame
                         if (boss_blocked_names.size() < 24)
                             boss_blocked_names.push_back(name);
                         return 0;
+                    }
+                }
+                if (const auto until = red_death_until.load(); until && target && target == crash && GetTickCount64() < until)
+                {
+                    const auto meta = value<Address>(event + 16);
+                    if (string(value<Address>(meta + 16), 120).find("0xblwcwf") != std::string::npos)
+                    {
+                        ++red_death_seen;
+                        const auto count = value<unsigned>(meta + 24);
+                        const auto fields = value<Address>(meta + 40);
+                        for (unsigned i = 0; fields && count <= 64 && i < count; ++i)
+                        {
+                            const auto field = value<Address>(fields + i * 8);
+                            const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                            if (string(value<Address>(field + 48), 64).find("ug0b8lyr") == std::string::npos || bytes != 8 || offset < 32 ||
+                                value<Address>(field) != red_death_type.load())
+                                continue;
+                            red_death_was = value<Address>(event + offset);
+                            const Address behavior = red_death_behavior.load();
+                            SIZE_T done = 0;
+                            if (WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(event + offset), &behavior, sizeof(behavior), &done))
+                                ++red_death_changed;
+                        }
+                        red_death_until = 0;
                     }
                 }
                 if (aku_messages_blocked.load() && !own_aku_message.load() && component && target && aku_manager(component, target))
@@ -4929,6 +4960,9 @@ namespace ingame
             // V1.3.13: a landing while red makes him flinch (the game's hit reaction); he stays red through it, so it's
             // clear it didn't count
             bool forbidden = false;
+            // the death for it: whether Crash's script's death was changed (checked 2.5 seconds later)
+            std::uint64_t death_check_at = 0;
+            unsigned death_seen = 0, death_changed = 0;
             // research (V1.3.15): his health part (+0x14da2c0) as each state starts, to find what keeps him from being hit
             // after a hit (the game's own: Crash bounces off him then), for the red time
             Address health_part = 0;
@@ -5044,6 +5078,67 @@ namespace ingame
         // health (+0xf8, what the bar's fill and the game count) goes up to the same. V1.3.5 changed only HitCount: the bar
         // grew but his health stayed the game's, so it was half full. V1.3.6 to V1.3.14 left HitCount alone and raised
         // only his health and maxHealth: right health, the game's notches
+        // V1.3.16: his health part's own full health. V1.3.15's log and screenshot: with HitCount, maxHealth and his actor's
+        // health all at 1000, the bar had 10 notches but was only half full: the fill counts from a health of the game's
+        // (500) somewhere else. His health part (+0x14da2c0) keeps the damage taken (+0x310); the one number in it that is
+        // the game's full health goes up to ours. With more than one candidate, none is changed (they go to the log).
+        // Also research: the numbers equal to his hits or health in his actor, his health part and his bar
+        void grow_health_part(BossTuning &t, Address owner, Address bar, const std::string &name, int original, int target)
+        {
+            std::vector<std::pair<Address, std::string>> places{{owner, "his actor"}};
+            for (const auto c : list(value<Address>(owner + 24), 128))
+                if (typed(c, 0x14da2c0))
+                    places.emplace_back(c, "his health part");
+            if (bar)
+            {
+                places.emplace_back(bar, "his bar");
+                for (const unsigned off : {0x10u, 0x18u, 0x90u, 0xa0u})
+                    if (const auto p = value<Address>(bar + off); p && readable(p, 0x100))
+                        places.emplace_back(p, "his bar's +" + hex(off));
+            }
+            const int game = original * 100;
+            std::ostringstream found;
+            std::vector<std::pair<Address, unsigned>> candidates;
+            bool damaged = false;
+            for (const auto &[place, label] : places)
+            {
+                std::vector<std::uint32_t> words(0x400 / 4);
+                if (!read(place, words))
+                    continue;
+                const bool health_part = typed(place, 0x14da2c0);
+                if (health_part && words[0x310 / 4] != 0)
+                    damaged = true;
+                for (std::size_t i = 2; i < words.size(); ++i)
+                {
+                    const int v = static_cast<int>(words[i]);
+                    float f = 0;
+                    std::memcpy(&f, &words[i], 4);
+                    const bool whole = v == original || v == game || v == target || v == target / 100;
+                    const bool decimal = f == static_cast<float>(game) || f == static_cast<float>(target) || f == static_cast<float>(original) || f == static_cast<float>(target / 100);
+                    if (!whole && !decimal)
+                        continue;
+                    found << " " << label << " +" << hex(static_cast<unsigned>(i * 4)) << "=" << (whole ? std::to_string(v) : std::to_string(f));
+                    if (health_part && (v == game || f == static_cast<float>(game)))
+                        candidates.emplace_back(place, static_cast<unsigned>(i * 4));
+                }
+            }
+            tell_once(t, "numbers" + name + std::to_string(target), "Boss research: " + name + "'s numbers like his hits or health:" + found.str());
+            if (damaged)
+                return;
+            if (candidates.size() == 1)
+            {
+                const auto at = candidates[0].first + candidates[0].second;
+                const bool whole = value<int>(at) == game;
+                if (whole)
+                    write(at, target);
+                else
+                    write(at, static_cast<float>(target));
+                std::cout << "Boss health: " << name << "'s health part's full health " << game << " -> " << target << " (+" << hex(candidates[0].second)
+                          << (whole ? "" : ", decimal") << "), for his bar's fill\n" << std::flush;
+            }
+            else if (candidates.size() > 1)
+                tell_once(t, "parts" + name, "Boss health: " + name + "'s health part has " + std::to_string(candidates.size()) + " numbers at the game's health; none changed");
+        }
         std::map<std::string, int> game_hits;
         bool boss_hits_changed = false; // a HitCount was changed this game session (it's put back at 100%)
         void tune_boss_health(BossTuning &t, const std::string &boss, Address owner, const std::string &name, Address c, unsigned percent)
@@ -5086,8 +5181,19 @@ namespace ingame
             const int target = hits * 100;
             const bool actor = typed(owner, 0x1592220) && health_getter_ok();
             const int health = actor ? actor_health(owner) : -1, raw = value<int>(owner + 0xf8);
-            if (hits == original || (actor && max_health == target && raw == target))
-                return; // nothing to do, or done
+            if (hits == original)
+                return; // nothing to do
+            if (actor && max_health == target && raw == target)
+            {
+                // done (his script made them from our count); his health part's own full health too
+                if (health == raw)
+                {
+                    const auto at = field_offset(meta, "guiBossHealthbarProj", 8);
+                    const auto p = at ? value<Address>(c + at) : 0;
+                    grow_health_part(t, owner, resolve(p) ? resolve(p) : p, name, original, target);
+                }
+                return;
+            }
             // only while he's at full health (the game's, or ours): a hit taken already stays taken
             if (!actor || health != raw || (raw != original * 100 && raw != target) || (max_health != original * 100 && max_health != target))
             {
@@ -5345,16 +5451,25 @@ namespace ingame
                     return;
                 }
             }
-            // V1.3.15 (asked for): the death his spin gives, the angel flying up, not DeathLink's falling death (V1.3.14)
+            // V1.3.15 (asked for): the death his spin gives, the angel flying up, not DeathLink's falling death (V1.3.14).
+            // V1.3.16: DeathLink's death with the death Crash's script plays changed (in the message hook, see red_death_*)
             bool died = false;
             std::string how;
             try
             {
                 const auto body = controlled_actor();
                 const auto [behavior, type] = boss_death_behavior(t.papu);
-                died = body && request_scripted_death(body, behavior, type, &how);
-                if (!behavior)
+                if (behavior)
+                {
+                    red_death_behavior = behavior, red_death_type = type;
+                    red_death_until = GetTickCount64() + 2000;
+                    t.death_check_at = GetTickCount64() + 2500;
+                    t.death_seen = red_death_seen.load(), t.death_changed = red_death_changed.load();
+                    how = "his spin's death (" + pointer_brief(behavior) + ")";
+                }
+                else
                     how = "the falling death (his attack's death wasn't found)";
+                died = body && request_scripted_death(body);
             }
             catch (const std::exception &e)
             {
@@ -5632,6 +5747,18 @@ namespace ingame
             if (s != 3)
                 t.forbidden = false;
             const bool red = state.boss_rules && ((t.punished && (s == 1 || s == 2)) || (t.forbidden && s == 3));
+            // the death for a landing while red: was it his spin's?
+            if (t.death_check_at && now >= t.death_check_at)
+            {
+                t.death_check_at = 0;
+                const bool seen = red_death_seen.load() != t.death_seen, changed = red_death_changed.load() != t.death_changed;
+                std::cout << "Boss rule: Crash's death: "
+                          << (changed ? "his damage script's death " + pointer_brief(red_death_was.load()) + " became " + pointer_brief(red_death_behavior.load())
+                                      : seen ? std::string("his damage script's death message came, but its death isn't the kind expected; left as it was")
+                                             : std::string("his damage script's death message (0xblwcwf) didn't come within 2 seconds"))
+                          << "\n" << std::flush;
+                red_death_until = 0;
+            }
             // the mask taken for a landing while red, a second later
             if (t.hit_check_at && now >= t.hit_check_at)
             {

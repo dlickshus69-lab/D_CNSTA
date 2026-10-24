@@ -4,9 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Papu Papu, round 8**:
-  - **The angel death.** Landing on him while he's red with no mask now gives the death his spin gives (the angel flying up), not DeathLink's falling death. With a mask, Crash loses the mask, as before.
-  - **His health bar grows to match** (`/boss_health`). At 200% the bar has 10 notches and starts full, and each hit takes one notch. V1.3.5 grew the bar but left his health at the game's (half full). Since V1.3.6 his health was right but the bar kept 5 notches. Now both.
-  - Research for keeping a red landing from counting at all: the log shows what changes in his health part with each state.
-- From V1.3.13–14: `/skip_filler yes`, one Aku Aku Mask in boss fights, a landing while red is a real hit for Crash, his last hit always counts, his spins keep the game's length, and he stays red through the flinch.
+- **Papu Papu, round 9**:
+  - **The angel death, second try.** V1.3.15 still gave the falling death: both deaths end with Crash's damage script sending one message, and that message carries the death that plays. Now the client changes the death in that message to the one Papu Papu's spin gives (the angel). The log says whether it was changed.
+  - **His bar's fill, second try** (`/boss_health 200`). V1.3.15's bar had 10 notches but was only half full, so the fill counts from a health of 500 somewhere other than the ones already changed. His health part's own full health now goes up to match too, if exactly one number there is the game's full health. The log lists every number like his hits or health in his actor, health part and bar, so if it's still half full the next try knows where to look.
+- From V1.3.13–15: `/skip_filler yes`, one Aku Aku Mask in boss fights, a landing while red is a real hit for Crash, his last hit always counts, his spins keep the game's length, he stays red through the flinch, and the bar has the right number of notches.
 - **Options page** (from V1.3.10): the colors are a plain list (each color, or Random), no Crash Skin option.
