@@ -729,7 +729,12 @@ namespace ingame
             std::cout << "Aku Aku Mask: the filler mask is gone; Aku Aku Sanity's lock is back\n" << std::flush;
             return false;
         }
-        void update_aku_lock(bool locked)
+        // V1.3.33: a boss fight with any of the harder bosses' settings on (more health, more speed, the red rule)
+        bool hard_boss_fight(const Shared &state, const std::string &boss)
+        {
+            return !boss.empty() && (state.boss_rules != 0 || state.boss_health > 100 || state.boss_speed > 100);
+        }
+        void update_aku_lock(bool locked, bool strict = false)
         {
             static Address forced = 0;
             static Address announced = 0;
@@ -738,7 +743,8 @@ namespace ingame
             static bool ever = false;
             // with a filler mask out (or being handed over), the lock doesn't clear masks, keep them from protecting or
             // keep Aku's manager from the messages that bring a mask out (a hand-over can take a few of them)
-            const bool hold = locked && !filler_mask_out();
+            // (V1.3.33: a harder boss fight takes even a filler mask)
+            const bool hold = strict || (locked && !filler_mask_out());
             aku_messages_blocked = hold;
             watch_aku_manager(hold);
             const auto variable = no_aku_variable.load();
@@ -5321,7 +5327,7 @@ namespace ingame
             // V1.3.32 (see papu_start_red and papu_red_end): red from the fight's start; a spin over while he's red (red
             // ends with the slam after it), waiting for that slam since when, his slams seen then; the game's immunity's
             // timer run again for the fight's start (since when, for how long, checked to run)
-            bool start_red = false, red_spun = false, slam_wait = false, start_timer = false, start_timer_checked = false;
+            bool start_red = false, red_spun = false, slam_wait = false, start_timer = false, start_timer_checked = false, start_timer_ticks = false;
             std::uint64_t slam_wait_since = 0, start_timer_at = 0;
             unsigned slams_seen = 0;
             float start_timer_set = 0;
@@ -6021,7 +6027,8 @@ namespace ingame
                 t.papu_original = original;
             const bool eligible = value<Address>(data + name_at) && boss != "B204" && boss != "B304" && boss != "B205" &&
                                   (boss != "B105" || name.find("Hulk") != std::string::npos);
-            const int hits = eligible ? std::max(original, static_cast<int>(std::lround(original * percent / 100.0))) : original;
+            // (V1.3.33, Eric: "we'll just make it 9 the most for now": the bar draws 9 notches at most, so a 10th hit can't show)
+            const int hits = eligible ? std::max(original, std::min(9, static_cast<int>(std::lround(original * percent / 100.0)))) : original;
             const int notches = grow ? hits : original;
             const int max_health = value<int>(c + max_at);
             if (const int was = value<int>(data + hit_at); was != notches)
@@ -7053,11 +7060,13 @@ namespace ingame
                 line << "its timer isn't there (it runs to its end)", t.cut_checked = true;
             else if (!t.timer_down.empty() || t.timer_up.empty())
             {
-                // (V1.3.31's log: its countdown is +0x50)
+                // (V1.3.31's log: its countdown is +0x50. V1.3.33: one run again at the fight's start that doesn't count down
+                // is put below 0, as it wouldn't run out by itself)
                 const auto down = t.timer_down.empty() ? std::vector<unsigned>{0x50} : t.timer_down;
+                const bool still = t.start_timer && t.start_timer_checked && !t.start_timer_ticks;
                 for (const auto off : down)
-                    write(timer + off, 0.02f);
-                line << "its timer's countdown (" << offsets_text(down) << ") set to its end";
+                    write(timer + off, still ? -1.0f : 0.02f);
+                line << "its timer's countdown (" << offsets_text(down) << ") set to its end" << (still ? " (below 0: it doesn't count down)" : "");
             }
             else if (!t.timer_up.empty() && t.timer_length > 0)
             {
@@ -7076,7 +7085,7 @@ namespace ingame
         // hit, see papu_rule), and the game's immunity runs from there
         void papu_start_red(BossTuning &t, std::uint64_t now)
         {
-            t.start_red = true, t.red_spun = false, t.slam_wait = false, t.start_timer = false;
+            t.start_red = true, t.red_spun = false, t.slam_wait = false, t.start_timer = false, t.start_timer_ticks = false;
             std::ostringstream line;
             line << "Boss rule: the fight starts; he's red until the slam after his first spin";
             if (const auto timer = papu_timer(t))
@@ -7188,8 +7197,9 @@ namespace ingame
                         ++t.red_lines, std::cout << "Boss rule: his hit starts his immunity: " << length << " s at most (he's red once he's up, until his next spin is over)\n"
                                                  << std::flush;
                 }
-                // V1.3.32: the fight starts (or starts over): red from the start (see papu_start_red)
-                if (t.state == 5 && s == 1 && state.boss_rules)
+                // V1.3.32: the fight starts (or starts over): red from the start (see papu_start_red). V1.3.33: as he comes into
+                // the arena (state 5), not once he's there (V1.3.32's log: Crash landed on him there before red started)
+                if (s == 5 && t.state != 5 && state.boss_rules)
                     papu_start_red(t, now);
                 // V1.3.32: his first spin since he turned red is over: red ends with the slam after it (see papu_red_end)
                 if (t.state == 2 && s == 1 && (immune || t.start_red) && state.boss_rules && !t.red_spun)
@@ -7274,21 +7284,15 @@ namespace ingame
                 t.start_timer_checked = true;
                 const auto timer = papu_timer(t);
                 const float left = timer ? value<float>(timer + 0x50) : 0.0f;
-                const bool runs = timer && std::isfinite(left) && left > 0 && left < t.start_timer_set - 0.15f;
-                if (!runs)
-                {
-                    if (timer)
-                        write(timer + 0x50, 0.0f);
-                    t.start_timer = false;
-                }
-                std::cout << "Boss rule: his immunity's timer " << (runs ? "runs again" : "didn't run again (a landing on him is a hit for the game, taken back)") << " ("
-                          << left << " of " << t.start_timer_set << " s left " << seconds(now - t.start_timer_at) << " in)\n" << std::flush;
+                t.start_timer_ticks = timer && std::isfinite(left) && left > 0 && left < t.start_timer_set - 0.15f;
+                std::cout << "Boss rule: his immunity's timer " << (t.start_timer_ticks ? "runs again" : "doesn't count down (it had ended); kept set, to see if it still keeps him from being hit")
+                          << " (" << left << " of " << t.start_timer_set << " s left " << seconds(now - t.start_timer_at) << " in)\n" << std::flush;
             }
             // V1.3.10 (the rule as asked for): after a hit he's red for about one spin cycle, from when he gets up (3 -> 1).
             // V1.3.30: for as long as the game's immunity of that hit lasts. V1.3.31: as the game has it, his can-be-hit flag
             // (see papu_immune_watch), which papu_cut ends with his first spin after the hit (Eric: "once the cycle is
             // done"): he can't be hit whenever he's red, and can be as soon as he isn't
-            const bool red = state.boss_rules && (((immune || t.start_red) && (s == 1 || s == 2)) || (t.forbidden && s == 3));
+            const bool red = state.boss_rules && (((immune || t.start_red) && (s == 1 || s == 2)) || (t.start_red && s == 5) || (t.forbidden && s == 3));
             // (red's end, to see how it fits his spin: the state then, and how long he's been in it)
             if (t.red && !red && t.red_lines < 80)
                 ++t.red_lines, std::cout << "Boss rule: he's not red any more, " << (t.game_hit_at ? seconds(now - t.game_hit_at) : std::string("?")) << " after his hit ("
@@ -10640,6 +10644,8 @@ namespace ingame
             const auto boss = boss_zone_key();
             if (boss.empty())
                 boss_given.clear(), state.aku_hold = 0;
+            else if (hard_boss_fight(state, boss))
+                state.aku_hold = 1; // (V1.3.33: none at all)
             else if (now - checked >= 250)
             {
                 checked = now;
@@ -10655,7 +10661,20 @@ namespace ingame
         }
         aku_give_followup();
         if (!level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))).empty())
-            update_aku_lock(state.aku_lock != 0);
+        {
+            // V1.3.33 (Eric: "get rid of Aku Aku Mask when we have hard bosses"): in a harder boss fight Crash has no mask:
+            // the Aku Aku lock takes his (even a filler one) and keeps the fight's crates and items from giving one
+            const bool hard = hard_boss_fight(state, boss_zone_key());
+            static bool hard_told = false;
+            if (hard != hard_told)
+            {
+                hard_told = hard;
+                std::cout << (hard ? "Boss fight: harder bosses are on, so Crash has no Aku Aku mask here (mask items wait for the next level)\n"
+                                   : "Boss fight over: Aku Aku masks as the seed has them again\n")
+                          << std::flush;
+            }
+            update_aku_lock(state.aku_lock != 0 || hard, hard);
+        }
         // Crash's colors (research), in levels and hubs
         update_crash_tint(state);
         if (state.crash_probe_request != state.crash_probe_ack)
