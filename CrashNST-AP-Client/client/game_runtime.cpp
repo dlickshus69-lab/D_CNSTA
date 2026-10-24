@@ -1114,6 +1114,13 @@ namespace ingame
         std::array<std::set<std::string>, 4> trap_event_seen;
         std::mutex event_mutex;
         std::set<std::string> events_seen;
+        // Harder bosses research (V1.3.5): the messages the boss and Crash's damage and Aku Aku scripts get during a boss
+        // fight (each kind a few times), to find the one that hurts Crash the way a boss's attack does, and the one that
+        // tells a boss he was hit
+        std::array<std::atomic<Address>, 4> boss_event_targets{};
+        std::atomic<std::uint64_t> boss_event_since{0};
+        std::atomic_uint boss_event_lines{0};
+        std::map<std::string, unsigned> boss_event_counts;
         // Aku Aku lock: the game's NoAkuAkuMasks switch stops masks from protecting Crash and crates from giving them,
         // but the game still shows the mask it brings back at a level's start (a mask carried in from the last level)
         // and when Crash respawns. While the lock is on, Crash's Aku Aku manager doesn't get the messages that hand him
@@ -1343,6 +1350,36 @@ namespace ingame
                     }
                 if (blocked)
                     return 0;
+                if (const auto since = boss_event_since.load(); since && target && boss_event_lines.load() < 400)
+                {
+                    bool boss = false;
+                    for (const auto &b : boss_event_targets)
+                        boss = boss || b.load() == target;
+                    if (boss || target == crash)
+                    {
+                        auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
+                        if (graph.rfind("Scripts.Graph.", 0) == 0)
+                            graph.erase(0, 14);
+                        if (boss || graph == "Crash_DamageManager" || graph == "Crash_AkuAkuManager")
+                        {
+                            const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                            const auto who = boss ? string(value<Address>(target + 128), 64) : std::string("Crash");
+                            bool show = false;
+                            {
+                                std::lock_guard lock(event_mutex);
+                                show = ++boss_event_counts[who + "|" + graph + "|" + name] <= 4;
+                            }
+                            if (show)
+                            {
+                                ++boss_event_lines;
+                                std::ostringstream out;
+                                out << "Boss event +" << (GetTickCount64() - since) / 100 / 10.0 << " s: " << who << " (" << graph << ") gets " << name
+                                    << " from " << event_object(value<Address>(event + 32)) << send_arguments(event);
+                                std::cout << out.str() << "\n" << std::flush;
+                            }
+                        }
+                    }
+                }
                 if (aku_messages_blocked.load() && !own_aku_message.load() && component && target && aku_manager(component, target))
                 {
                     const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
@@ -4796,7 +4833,9 @@ namespace ingame
         // Harder bosses (V1.3.4, test: /boss_health, /boss_speed, /boss_rules). Every boss's hits are a setting of his
         // common_BossHealthHandler (HitCount; the game makes it his health at 100 a hit, maxHealth), and the pace of a
         // few bosses is in their own settings. Both are set as the fight starts. Papu Papu's rule: he glows red while he
-        // can't be hit (his slam and his spin); landing on him then costs Crash a life and the hit doesn't count.
+        // can't be hit (V1.3.5: his spin, currState 2); landing on him then is a hit for Crash and doesn't count.
+        // V1.3.4's log: a death resets the whole fight (the boss back to full health), and Papu Papu's position at +32
+        // stays put while he spins.
         struct BossTuning
         {
             std::string level;
@@ -4805,11 +4844,14 @@ namespace ingame
             // always worked out from the game's own value, never from an already changed one)
             std::map<Address, int> hits;
             std::map<Address, float> timings;
-            std::set<Address> handlers, timed;
+            std::set<Address> handlers;
+            std::map<Address, unsigned> timed; // speed settings set, at which percent
             std::set<std::string> told;
             // Papu Papu
             Address papu = 0, papu_ai = 0;
-            unsigned state_at = 0, laps_at = 0;
+            unsigned state_at = 0, laps_at = 0, spin_at = 0;
+            std::uint64_t next_flip = 0;
+            unsigned flips = 0;
             int state = -1;
             bool spun = false, red = false, was_red = false;
             int red_health = -1; // his health when he turned red
@@ -4949,7 +4991,9 @@ namespace ingame
                 {"BossNBrio_IdleTimeOut", "TimeOutRangeMax", false},
             };
             const auto data = value<Address>(c + 16);
-            if (!typed(data, 0x13bbb10) || t.timed.count(c))
+            if (!typed(data, 0x13bbb10))
+                return;
+            if (const auto done = t.timed.find(c); done != t.timed.end() && done->second == percent)
                 return;
             const auto dmeta = value<Address>(data + 32);
             bool any = false;
@@ -4973,11 +5017,11 @@ namespace ingame
                     continue;
                 write(at, now);
                 any = true;
-                tell_once(t, std::string("pace") + script + p.field + std::to_string(original),
+                tell_once(t, std::string("pace") + script + p.field + std::to_string(original) + "/" + std::to_string(percent),
                           "Boss speed: " + name + " " + script + " " + p.field + " " + std::to_string(original) + " -> " + std::to_string(now));
             }
             if (any)
-                t.timed.insert(c);
+                t.timed[c] = percent;
         }
         // the red glow on Papu Papu: our own tint on his model (like the box tint), red while it's on
         void boss_tint_off(BossTuning &t, bool remove)
@@ -4997,16 +5041,40 @@ namespace ingame
             else
                 write(t.tint_bundle + 48, default_blend);
         }
+        // a character's render model: as a crate's (+176, then +40), or (V1.3.4's log: Papu Papu's model part is another
+        // kind, +0x150df30) the first render model the model part points to, directly or through a handle
+        Address boss_model(BossTuning &t, Address entity)
+        {
+            if (const auto model = crate_model(entity))
+                return model;
+            const auto part = value<Address>(entity + 176);
+            if (!part || value<Address>(part + 32) != entity)
+                return 0;
+            for (unsigned off = 8; off < 0x200; off += 8)
+            {
+                const auto p = value<Address>(part + off);
+                for (const auto m : {p, resolve(p)})
+                    if (m && typed(m, 0x1676cb8))
+                    {
+                        tell_once(t, "modelat", "Boss rule: Papu Papu's model is at +" + hex(off) + " of his model part");
+                        return m;
+                    }
+            }
+            if (t.told.insert("nomodel").second)
+            {
+                std::cout << "Boss rule: no render model found in Papu Papu's model part (" << object_brief(part) << ")\n";
+                dump_pointees(part, "Boss rule: model part", 0x200);
+                std::cout << std::flush;
+            }
+            return 0;
+        }
         void boss_tint(BossTuning &t, Address entity, bool red)
         {
             if (!tint_api())
                 return;
-            const auto model = crate_model(entity);
+            const auto model = boss_model(t, entity);
             if (!model)
-            {
-                tell_once(t, "tintmodel", "Boss rule: no model found to tint on Papu Papu (" + object_brief(value<Address>(entity + 176)) + ")");
                 return;
-            }
             if (t.tint_bundle && (t.tint_model != model || resolve(t.tint_handle) != model))
                 boss_tint_off(t, true);
             if (!t.tint_bundle)
@@ -5034,75 +5102,135 @@ namespace ingame
         {
             return typed(t.papu, 0x1592220) && health_getter_ok() && actor_health(t.papu) == value<int>(t.papu + 0xf8);
         }
+        // a hit for Crash, as one from a boss would be (until the game's own hit message is found, V1.3.5): with a mask, a
+        // mask less (gold to one, one to none); with three he's invincible and nothing happens; with none it's a life
+        void boss_rule_hit(std::ostream &out)
+        {
+            const auto crash = player();
+            const auto [masks, mask_out] = aku_manager_state(crash);
+            if (masks >= 3)
+            {
+                out << "; Crash is invincible (three masks): no hit";
+                return;
+            }
+            if (masks >= 1)
+            {
+                if (const auto manager = aku_manager_component(crash))
+                {
+                    aku_set_masks(manager, masks - 1);
+                    out << "; Crash loses a mask (" << masks << " -> " << masks - 1 << ")";
+                    return;
+                }
+            }
+            bool died = false;
+            try
+            {
+                const auto body = controlled_actor();
+                died = body && request_scripted_death(body);
+            }
+            catch (const std::exception &e)
+            {
+                out << " (" << e.what() << ")";
+            }
+            out << (died ? "; no mask: Crash loses a life" : "; no mask, and Crash's life couldn't be taken");
+        }
         void papu_rule(BossTuning &t, const Shared &state, std::uint64_t now)
         {
             if (!t.papu || !t.papu_ai || !event_owner(t.papu))
                 return;
             const int s = value<int>(t.papu_ai + t.state_at);
-            std::array<float, 3> at{};
-            read(t.papu + 32, at);
-            if (now - t.sample_at >= 100)
+            // where he is, from his matrix (V1.3.4: +32 stays put while he moves)
+            Matrix m{};
+            if (now - t.sample_at >= 100 && entity_matrix(t.papu, m))
             {
+                const std::array<float, 3> at{m[12], m[13], m[14]};
                 if (t.sample_at)
                 {
-                    const float seconds = (now - t.sample_at) / 1000.0f;
-                    t.speed = std::hypot(at[0] - t.sample[0], at[1] - t.sample[1]) / seconds;
+                    t.speed = std::hypot(at[0] - t.sample[0], at[1] - t.sample[1]) / ((now - t.sample_at) / 1000.0f);
                     t.top_speed = std::max(t.top_speed, t.speed);
                 }
                 t.sample = at, t.sample_at = now;
             }
+            const float spin = t.spin_at ? value<float>(t.papu_ai + t.spin_at) : 0.0f;
             if (s != t.state)
             {
                 if (t.state >= 0)
                     std::cout << "Boss rule: Papu Papu state " << t.state << " -> " << s << " after " << seconds(now - t.state_since) << " (top speed "
-                              << static_cast<int>(t.top_speed) << "/s, laps " << value<int>(t.papu_ai + t.laps_at) << ")\n" << std::flush;
-                // a hit (3) or the last one (4) while he was red: Crash loses a life, and the hit is taken back
+                              << static_cast<int>(t.top_speed) << "/s, laps " << value<int>(t.papu_ai + t.laps_at) << ", spin speed " << spin << ", "
+                              << t.flips << " turns)\n" << std::flush;
+                // a hit (3) or the last one (4) while he was red: it doesn't count, and it's a hit for Crash
                 if (state.boss_rules && t.was_red && (s == 3 || s == 4))
                 {
-                    std::cout << "Boss rule: Crash landed on Papu Papu while he was red (" << seconds(now - t.red_since) << " into it)";
+                    std::ostringstream line;
+                    line << "Boss rule: Crash landed on Papu Papu while he was red (" << seconds(now - t.red_since) << " into his spin)";
                     if (s == 3 && t.red_health > 0 && papu_health_here(t))
                     {
                         const int now_health = actor_health(t.papu);
-                        std::cout << "; his health " << t.red_health << " -> " << now_health;
+                        line << "; his health " << t.red_health << " -> " << now_health;
                         if (now_health < t.red_health)
-                            write(t.papu + 0xf8, t.red_health), std::cout << ", put back to " << actor_health(t.papu);
+                            write(t.papu + 0xf8, t.red_health), line << ", put back to " << actor_health(t.papu);
                     }
-                    const auto crash = controlled_actor();
-                    bool died = false;
-                    try
-                    {
-                        died = crash && request_scripted_death(crash);
-                    }
-                    catch (const std::exception &e)
-                    {
-                        std::cout << " (" << e.what() << ")";
-                    }
-                    std::cout << (died ? "; Crash loses a life" : "; couldn't take Crash's life") << "\n" << std::flush;
+                    boss_rule_hit(line);
+                    std::cout << line.str() << "\n" << std::flush;
                 }
-                t.state = s, t.state_since = now, t.spun = false, t.still_since = 0, t.top_speed = 0;
+                t.state = s, t.state_since = now, t.top_speed = 0, t.flips = 0;
+                static std::mt19937 turns{std::random_device{}()};
+                t.next_flip = now + std::uniform_int_distribution<int>(900, 1800)(turns);
             }
-            // in his spin: once he has moved and then stood still for a quarter second, he's dizzy and can be hit
-            if (s == 2)
-            {
-                if (t.speed > 150)
-                    t.spun = true, t.still_since = 0;
-                else if (t.spun && t.speed < 40 && !t.still_since)
-                    t.still_since = now;
-            }
-            const bool dizzy = s == 2 && t.spun && t.still_since && now - t.still_since >= 250;
-            const bool red = state.boss_rules && (s == 1 || (s == 2 && !dizzy));
+            // his spin (currState 2) is red: he can be hit between spins and while he reels from a hit
+            const bool red = state.boss_rules && s == 2;
             if (red != t.red)
             {
                 if (red)
                     t.red_since = now, t.red_health = papu_health_here(t) ? actor_health(t.papu) : -1;
-                else if (s == 2)
-                    std::cout << "Boss rule: Papu Papu is dizzy " << seconds(now - t.state_since) << " into his spin (speed " << static_cast<int>(t.speed)
-                              << "/s): he can be hit\n" << std::flush;
                 t.red = red;
             }
             t.was_red = red;
+            // the spin turns the other way now and then (an experiment: his spin speed multiplier, made negative)
+            if (red && t.spin_at && now >= t.next_flip)
+            {
+                static std::mt19937 turns{std::random_device{}()};
+                t.next_flip = now + std::uniform_int_distribution<int>(1200, 2600)(turns);
+                if (std::abs(spin) > 0.01f)
+                {
+                    write(t.papu_ai + t.spin_at, -spin);
+                    if (++t.flips <= 3)
+                        std::cout << "Boss rule: Papu Papu's spin turns the other way (spin speed " << spin << " -> " << value<float>(t.papu_ai + t.spin_at)
+                                  << ")\n" << std::flush;
+                }
+            }
             if (state.boss_rules || t.tint_bundle)
                 boss_tint(t, t.papu, red);
+        }
+        // research: the messages a script takes (its type's list of them), with their fields; once per kind per fight
+        void log_script_messages(BossTuning &t, Address component, const std::string &who)
+        {
+            const auto meta = value<Address>(component + 56);
+            if (!t.told.insert("messages" + who).second)
+                return;
+            std::ostringstream out;
+            out << "Boss messages: " << who << " takes";
+            unsigned shown = 0;
+            for (const auto delegator : list(value<Address>(meta + 160), 128))
+            {
+                const auto message = value<Address>(delegator + 24);
+                if (!typed(delegator, 0x13bc268) || !typed(message, 0x17b6578))
+                    continue;
+                out << "\n  " << string(value<Address>(message + 16), 120) << ":";
+                const auto count = value<unsigned>(message + 24);
+                const auto fields = value<Address>(message + 40);
+                for (unsigned i = 0; fields && count <= 64 && i < count; ++i)
+                {
+                    const auto field = value<Address>(fields + i * 8);
+                    const auto name = string(value<Address>(field + 48), 64);
+                    if (name.empty() || name[0] == '_')
+                        continue;
+                    out << " " << name << "@" << value<std::uint16_t>(field + 24) << "/" << value<std::uint16_t>(field + 22);
+                }
+                if (++shown >= 60)
+                    break;
+            }
+            std::cout << out.str() << "\n" << std::flush;
         }
         void update_boss_tuning(const Shared &state, const std::string &boss)
         {
@@ -5113,6 +5241,15 @@ namespace ingame
                 boss_tint_off(t, true);
                 t = {};
                 t.level = boss, t.entered = now;
+                // the message research starts over with each fight
+                boss_event_since = 0;
+                for (auto &b : boss_event_targets)
+                    b = 0;
+                {
+                    std::lock_guard lock(event_mutex);
+                    boss_event_counts.clear();
+                }
+                boss_event_lines = 0;
             }
             if (boss.empty())
                 return;
@@ -5123,13 +5260,35 @@ namespace ingame
             // every half second: the boss as he starts, Brio's last form as it appears, a retry
             t.next = now + 500;
             const unsigned health = std::clamp(state.boss_health, 100u, 200u), speed = std::clamp(state.boss_speed, 100u, 200u);
-            if (health == 100 && speed == 100 && !state.boss_rules)
+            // (research: until the boss is found, also with the game's own settings)
+            if (health == 100 && speed == 100 && !state.boss_rules && boss_event_since.load())
                 return;
             for (const auto owner : event_owners())
             {
                 const auto name = string(value<Address>(owner + 128));
                 for (const auto &[c, script] : entity_scripts(owner))
                 {
+                    // research: the messages this boss gets (and Crash's damage and Aku Aku scripts) go to the log, and once,
+                    // the messages his health and attack scripts and Crash's damage script take
+                    if (script == "common_BossHealthHandler" && std::none_of(boss_event_targets.begin(), boss_event_targets.end(), [&](const auto &b) { return b.load() == owner; }))
+                    {
+                        for (auto &b : boss_event_targets)
+                            if (!b.load())
+                            {
+                                b = owner;
+                                break;
+                            }
+                        if (!boss_event_since.load())
+                            boss_event_since = now;
+                        for (const auto &[other, other_script] : entity_scripts(owner))
+                            if (other_script == "common_BossHealthHandler" || other_script == "common_BossAttackDamageHandler" ||
+                                other_script == "common_BossInvulnerableDeflectPlayerHandler")
+                                log_script_messages(t, other, name + " " + other_script);
+                        if (const auto crash = player())
+                            for (const auto &[mine, mine_script] : entity_scripts(crash))
+                                if (mine_script == "Crash_DamageManager")
+                                    log_script_messages(t, mine, "Crash " + mine_script);
+                    }
                     if (script == "common_BossHealthHandler" && health != 100)
                         tune_boss_health(t, boss, owner, name, c, health);
                     else if (speed != 100)
@@ -5138,6 +5297,7 @@ namespace ingame
                     {
                         const auto meta = value<Address>(c + 56);
                         t.state_at = field_offset(meta, "currState", 4), t.laps_at = field_offset(meta, "currSpinPlayerLapCount", 4);
+                        t.spin_at = field_offset(meta, "currAttackSpinSpeedMultiplier", 4);
                         if (t.state_at)
                             t.papu = owner, t.papu_ai = c, t.state = -1;
                     }

@@ -518,7 +518,7 @@ void ClientRuntime::handle_commands()
                 if (value == -1)
                     test = -1, print_console(what + " test off: the seed's setting again.");
                 else if (value >= 100 && value <= 200)
-                    test = value, print_console(what + " test: " + std::to_string(value) + "% from the next boss fight" +
+                    test = value, print_console(what + " test: " + std::to_string(value) + "%, from now" +
                                                 (health ? " (not N. Gin, Cortex in Crash 2, or Brio's first phase)." : " (so far Papu Papu, N. Gin in Crash 3 and Brio)."));
                 else
                     print_console(what + ": " + (test >= 0 ? std::to_string(test) + "% (test)" : std::string("the seed's")) + ". " + command +
@@ -532,8 +532,9 @@ void ClientRuntime::handle_commands()
                 else if (argument == "seed")
                     boss_rules_test = -1;
                 print_console(std::string("Boss rules: ") + (boss_rules_test == 1 ? "on (test)" : boss_rules_test == 0 ? "off (test)" : "the seed's") +
-                              ". With them on, Papu Papu glows red while he can't be hit (his slam and his spin); landing on him then costs "
-                              "Crash a life and the hit doesn't count. /boss_rules on, off, or seed.");
+                              ". With them on, Papu Papu glows red while he spins and can't be hit; landing on him then is a hit for Crash "
+                              "(a mask, or a life without one) and doesn't count. His spin also turns the other way now and then. "
+                              "/boss_rules on, off, or seed.");
             }
             else if (command == "/clear")
                 feed_history.clear();

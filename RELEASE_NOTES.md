@@ -1,7 +1,11 @@
+## Testing build
+
+This is the **Testing build**: it has what's still being worked on (Harder bosses, and the glove and eyebrow colors). For playing a seed, the **Stable build** is the other release on this page.
+
 ## What's new
 
-- **Harder bosses, first try (test commands only; your seeds play as before).**
-  - **`/boss_health 100` to `200`**: the bosses' hits in percent, from the next boss fight (`200` is double). It doesn't change either N. Gin, Cortex in Crash 2, or Brio's first phase; Brio's last form does get it. `/boss_health off` goes back.
-  - **`/boss_speed 100` to `200`**: the bosses' pace in percent (`125` is a quarter faster). So far it affects Papu Papu (his spin and the waits before it), N. Gin in Crash 3 (the waits between his attacks) and Brio (the waits before his potions).
-  - **`/boss_rules on`**: Papu Papu glows red while he can't be hit (his slam and his spin). Landing on him while he's red costs Crash a life, and the hit doesn't count. When he stops spinning and is dizzy, the red goes away and he can be hit. `/boss_rules off` turns it off.
-  - The log notes what each one did, to tune them before they become YAML settings.
+- **Harder bosses, round 2 (test commands).**
+  - `/boss_speed` takes effect right away, also in a fight that's already going. Before, changing it in a fight did nothing until the next one.
+  - `/boss_rules on`: Papu Papu glows red while he spins (the glow is on his model now). Landing on him then is a hit for Crash, the way a boss hit is: a mask with Aku Aku (none if he's invincible), a life without one. It no longer takes a life straight away. The hit on Papu Papu doesn't count.
+  - Experiment: with `/boss_rules on`, his spin turns the other way now and then.
+  - The log notes the messages the boss and Crash get in a boss fight, to find the game's own hit (with its hurt animation) for the next round.
