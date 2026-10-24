@@ -4,8 +4,9 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Papu Papu, round 10**:
-  - **The angel death, third try.** V1.3.17's log showed what went wrong in V1.3.16: the death Crash's script plays isn't a name. It's an object that starts with the code that plays it, and the angel one is the same object every time. V1.3.16 put the name there, so the game crashed. Now, for a landing on red with no mask, the client swaps DeathLink's falling death for a real angel death object, only when both are the kind seen in the log. It finds one in Papu's attack setting or among Crash's parts, or keeps the one from his spin if his spin killed you earlier. If it finds none, you get the falling death, and the log says why.
-  - **Health bar research:** snapshots of the bar's small numbers 1.5 s after the fight starts and 1.5 s after each hit, to find the fill. V1.3.17's log hid numbers that changed often.
-- From V1.3.13–17: `/skip_filler yes`, one Aku Aku Mask in boss fights, a landing while red is a real hit for Crash, his last hit always counts, his spins keep the game's length, he stays red through the flinch, the bar has the right number of notches, and the V1.3.16 crash is fixed.
+- **Fix: Crash standing on Papu Papu or going through him** after landing on him while he's red. Since V1.3.11 the client held back the messages Papu's scripts send when he's hit while red. That never stopped the hit (his health is put back instead), and it also held back Crash's bounce. It's off now.
+- **Landing on red with a mask: no hit for now.** V1.3.14–18 set Crash's mask count one lower. The mask stayed on screen and Crash didn't flinch, and the next hit killed him. That's off until the game's own way of taking a mask is known. Without a mask it's still the falling death.
+- **Research for the angel death and the masked hit:** Crash's damage and Aku Aku scripts' settings go to the log at the fight's start, after each death, and after each hit from Papu's spin. V1.3.18's log showed the angel death object is only there during a real death, so it can't be borrowed later.
+- **Health bar research:** the bar snapshots now show whole numbers correctly (V1.3.18 showed them as 0.000000).
+- From V1.3.13–18: `/skip_filler yes`, one Aku Aku Mask in boss fights, a landing while red without a mask is a death for Crash, his last hit always counts, his spins keep the game's length, he stays red through the flinch, and the bar has the right number of notches.
 - **Options page** (from V1.3.10): the colors are a plain list (each color, or Random), no Crash Skin option.

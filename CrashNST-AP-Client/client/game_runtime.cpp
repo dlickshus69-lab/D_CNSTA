@@ -4985,7 +4985,8 @@ namespace ingame
             bool forbidden = false;
             // the death for it: whether Crash's script's death was changed (checked 2.5 seconds later)
             std::uint64_t death_check_at = 0;
-            unsigned death_seen = 0, death_changed = 0, death_count = 0;
+            unsigned death_seen = 0, death_changed = 0, death_count = 0, crash_dumps = 0;
+            bool crash_dumped_start = false;
             // research (V1.3.15): his health part (+0x14da2c0) as each state starts, to find what keeps him from being hit
             // after a hit (the game's own: Crash bounces off him then), for the red time
             Address health_part = 0;
@@ -5119,6 +5120,18 @@ namespace ingame
             std::ostringstream out;
             unsigned shown = 0;
             const bool first = t.bar_snapshot.empty();
+            // (V1.3.18 printed small whole numbers as decimals: 0.000000)
+            const auto fraction = [](std::uint32_t w) {
+                float f = 0;
+                std::memcpy(&f, &w, 4);
+                return std::isfinite(f) && f >= 1e-6f && f <= 1.0f;
+            };
+            const auto small = [&](std::uint32_t w) { return fraction(w) || (w >= 1 && w <= 20); };
+            const auto shown_as = [&](std::uint32_t w) {
+                float f = 0;
+                std::memcpy(&f, &w, 4);
+                return fraction(w) ? std::to_string(f) : std::to_string(static_cast<int>(w));
+            };
             for (const auto &[place, label] : places)
             {
                 std::vector<std::uint32_t> words((place == t.bar_object ? 0x800 : 0x200) / 4);
@@ -5126,25 +5139,12 @@ namespace ingame
                     continue;
                 for (std::size_t i = 2; i < words.size(); ++i)
                 {
-                    float f = 0;
-                    std::memcpy(&f, &words[i], 4);
-                    const int v = static_cast<int>(words[i]);
-                    const bool small = (std::isfinite(f) && f > 0.0f && f <= 1.0f) || (v >= 1 && v <= 20);
                     const auto at = place + i * 4;
                     const auto old = t.bar_snapshot.find(at);
                     const bool changed = old != t.bar_snapshot.end() && old->second != words[i];
-                    if ((first && small) || (!first && changed && (small || old->second <= 20 || (std::isfinite(f) && std::abs(f) <= 1.0f))))
+                    if ((first && small(words[i])) || (!first && changed && (small(words[i]) || small(old->second))))
                         if (shown++ < 150)
-                        {
-                            out << " " << label << " +" << hex(static_cast<unsigned>(i * 4)) << "=";
-                            if (!first)
-                            {
-                                float g = 0;
-                                std::memcpy(&g, &old->second, 4);
-                                out << (std::isfinite(g) && std::abs(g) <= 1.0f && g != 0.0f ? std::to_string(g) : std::to_string(static_cast<int>(old->second))) << "->";
-                            }
-                            out << (std::isfinite(f) && f > 0.0f && f <= 1.0f ? std::to_string(f) : std::to_string(v));
-                        }
+                            out << " " << label << " +" << hex(static_cast<unsigned>(i * 4)) << "=" << (first ? "" : shown_as(old->second) + "->") << shown_as(words[i]);
                     t.bar_snapshot[at] = words[i];
                 }
             }
@@ -5594,12 +5594,10 @@ namespace ingame
             }
             if (masks >= 1)
             {
-                if (const auto manager = aku_manager_component(crash))
-                {
-                    aku_set_masks(manager, masks - 1);
-                    out << "; Crash loses a mask (" << masks << " -> " << masks - 1 << ")";
-                    return;
-                }
+                // (V1.3.14 to V1.3.18 set the mask count one lower: his mask stayed on screen and Crash didn't flinch, but
+                // the next hit then killed him. Off until the game's own masked hit is known: research below)
+                out << "; Crash has a mask: no hit yet (the game's way of taking a mask isn't known yet)";
+                return;
             }
             // (V1.3.15 and V1.3.16 tried for the death his spin gives, the angel, asked for: see death_value. DeathLink's
             // falling death until it's found)
@@ -5897,6 +5895,27 @@ namespace ingame
             if (s != 3)
                 t.forbidden = false;
             const bool red = state.boss_rules && ((t.punished && (s == 1 || s == 2)) || (t.forbidden && s == 3));
+            // research (V1.3.19): Crash's damage and Aku Aku scripts' settings at the fight's start, after a death and after Papu
+            // Papu's attack hits him: what holds the angel death, and what a hit with a mask does
+            const auto crash_scripts = [&](const std::string &when) {
+                if (t.crash_dumps >= 8)
+                    return;
+                ++t.crash_dumps;
+                if (const auto crash = player())
+                {
+                    for (const auto &[c, script] : entity_scripts(crash, 256))
+                        if (script == "Crash_DamageManager")
+                            log_graph_fields(c, "Crash's damage script (" + when + ")");
+                    if (const auto aku = aku_manager_component(crash))
+                        log_graph_fields(aku, "Aku Aku's script (" + when + ")");
+                }
+            };
+            if (t.state == 1 && !t.crash_dumped_start)
+                t.crash_dumped_start = true, crash_scripts("the fight starts");
+            if (death_values.load() != t.death_seen)
+                crash_scripts("Crash's death message came");
+            else if (hit_values.load() != t.death_changed)
+                crash_scripts("Papu Papu's hit came");
             // research: the death Crash's script played, and the hit Papu Papu's attack gave him
             if (const auto n = death_values.load(); n != t.death_seen)
             {
@@ -5945,8 +5964,11 @@ namespace ingame
                 t.red = red;
             }
             t.was_red = red;
-            boss_block_actor = state.boss_rules ? t.papu : 0;
-            boss_block_red = red;
+            // (V1.3.11 to V1.3.18 also held back the messages his scripts send when he's hit while red. That never kept the
+            // hit from happening (his health is put back instead), and it held back Crash's bounce too: V1.3.18's clip has
+            // Crash standing on him and going through him. Off since V1.3.19)
+            boss_block_actor = 0;
+            boss_block_red = false;
             // the hit kept from happening (its messages kept): his health and spin length put back, a hit for Crash
             if (const auto blocked = boss_blocked.load(); blocked != t.blocked_seen)
             {
