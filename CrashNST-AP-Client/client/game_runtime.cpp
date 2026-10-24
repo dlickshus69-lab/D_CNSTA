@@ -5601,8 +5601,11 @@ namespace ingame
             {
                 // (gone, or not found yet: looked for again every 3 seconds, a few times)
                 if (t.parts_searched && t.parts_searches < 6 && now >= t.parts_at)
-                    t.parts_searched = false, t.parts_at = now + 3000, t.bar_parent = t.health_bar = t.fill_image = 0, t.fill_image_written = 0, t.try_at = t.try_part = 0,
-                    t.try_target = 0;
+                {
+                    // (ours put back first where it's still there, so it's never taken for the game's)
+                    bar_parts_back(t);
+                    t.parts_searched = false, t.parts_at = now + 3000, t.bar_parent = t.health_bar = t.fill_image = 0;
+                }
                 return;
             }
             const float width = value<float>(t.bar_parent + 0x98);
