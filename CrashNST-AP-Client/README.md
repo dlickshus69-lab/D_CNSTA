@@ -6,6 +6,8 @@
 1. Install `crash_nst.apworld` in Archipelago's `custom_worlds` folder. 
 2. Use `Generate Template Options` in the launcher to get a yaml that you can put in your `Players` folder.
 
+The Releases page has two builds. The **Stable build** (marked Latest) is for playing seeds: its apworld is `crash_nst.apworld`, the game `Crash Bandicoot N. Sane Trilogy`. The **Testing build** (a pre-release) has what's still being worked on: its apworld is `crash_nst_testing.apworld`, the game `Crash Bandicoot N. Sane Trilogy (Testing)`. Both apworlds can be installed at once; a YAML picks one with its `game:` line (and the options section under that same name). The Testing client plays Testing seeds and regular ones; the Stable client plays regular ones.
+
 ### Client
 1. In Steam, right-click **Crash Bandicoot N. Sane Trilogy → Manage → Browse local files**. Find `CrashBandicootNSaneTrilogy.exe`.
 2. Extract **`CrashNST-AP-Client-x64.zip`** into that folder, or copy **`dinput8.dll` and the entire `CrashNSTAP` folder** from the extracted ZIP.

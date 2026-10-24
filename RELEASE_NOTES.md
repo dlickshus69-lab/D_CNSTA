@@ -4,6 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
+- **Its own apworld: `crash_nst_testing.apworld`**, the game **Crash Bandicoot N. Sane Trilogy (Testing)**. Install it next to the Stable build's `crash_nst.apworld` (both can be in `custom_worlds` at once). A YAML for a Testing seed says `game: Crash Bandicoot N. Sane Trilogy (Testing)`, with its options under that same name. This client plays Testing seeds and regular ones (it connects as whichever game the room has).
+
 - **Papu Papu, round 3** (`/boss_rules on`, `/boss_speed`, `/boss_health`):
   - Landing on him while he's red (spinning) is now **the game's own hit**, the one his spin gives: the hurt animation, Aku Aku takes it if he's there, a life if not, nothing while invincible.
   - That hit on him **doesn't count**: his health goes back (the log says how).

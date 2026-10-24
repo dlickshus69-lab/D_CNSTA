@@ -43,6 +43,16 @@ string(REPLACE "std::string const datapkg_cache_path = \"APCpp_datapkg.cache\";"
 string(REPLACE "datapkg_cache_path" "nst_cache_path()" NST_APCPP_SOURCE "${NST_APCPP_SOURCE}")
 string(REPLACE "command != \"RoomInfo\" &&" "command != \"InvalidPacket\" && command != \"RoomInfo\" &&"
     NST_APCPP_SOURCE "${NST_APCPP_SOURCE}")
+# Testing build (V1.3.8): its apworld's game is "Crash Bandicoot N. Sane Trilogy (Testing)". The client connects as
+# whichever of the two the room has, so it plays Testing seeds and regular ones
+set(NST_ROOM_TIME "lib_room_info.time = root[i][\"time\"].asFloat();")
+string(FIND "${NST_APCPP_SOURCE}" "${NST_ROOM_TIME}" NST_ROOM_TIME_OFFSET)
+if(NST_ROOM_TIME_OFFSET EQUAL -1)
+    message(FATAL_ERROR "APCpp RoomInfo handling differs from the supported revision")
+endif()
+string(REPLACE "${NST_ROOM_TIME}"
+    "${NST_ROOM_TIME}\n            {\n                const std::string nst_testing = \" (Testing)\";\n                std::string nst_base = ap_game;\n                if (nst_base.size() > nst_testing.size() && nst_base.compare(nst_base.size() - nst_testing.size(), nst_testing.size(), nst_testing) == 0)\n                    nst_base.erase(nst_base.size() - nst_testing.size());\n                for (auto nst_game : root[i][\"games\"]) {\n                    if (nst_game.asString() == nst_base + nst_testing) { ap_game = nst_base + nst_testing; break; }\n                    if (nst_game.asString() == nst_base) ap_game = nst_base;\n                }\n            }"
+    NST_APCPP_SOURCE "${NST_APCPP_SOURCE}")
 string(REPLACE "printf(" "nst_ap_printf(" NST_APCPP_SOURCE "${NST_APCPP_SOURCE}")
 string(PREPEND NST_APCPP_SOURCE "int nst_ap_printf(const char*, ...);\n")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/nst_archipelago.cpp" "${NST_APCPP_SOURCE}")
