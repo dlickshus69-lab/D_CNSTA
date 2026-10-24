@@ -3,9 +3,9 @@
 # Every build is kept under the run's "Artifacts". The Releases page has two releases (V1.3.5):
 # - the Testing build, from main: "Dlickshus Crash Bandicoot N. Sane Trilogy Archipelago V<major.minor>.<build> (Testing build)"
 #   (tag v<major.minor>.<build>, a pre-release): major.minor comes from the VERSION file, the last number counts builds
-#   of main since that version started: main's number of builds so far (this one included) minus VERSION_FIRST_RUN,
-#   plus 1; build 0 is shown as just the version (V1.3). Only main's builds count (V1.3.6), so a Stable build doesn't
-#   make the Testing numbers skip; VERSION_FIRST_RUN 144 makes main's 149th build V1.3.6.
+#   of main since that version started: main's successful builds so far plus this one, minus VERSION_FIRST_RUN, plus 1;
+#   build 0 is shown as just the version (V1.3). Only main's successful builds count (V1.3.6), so a Stable build or a
+#   cancelled one doesn't make the Testing numbers skip; VERSION_FIRST_RUN 130 makes main's 136th successful build V1.3.6.
 # - the Stable build, from the stable branch: "... V<STABLE_VERSION> (Stable build)" (tag stable-v<STABLE_VERSION>-<run>,
 #   marked Latest): everything finished and in ongoing testing, without what's still being worked on.
 # Only the newest of each is kept, and the skins release stays.
@@ -116,9 +116,9 @@ jobs:
             $tag = "stable-v$version-$env:GITHUB_RUN_NUMBER"
             $kind = "Stable build"
           } else {
-            # main's builds so far, this one included (cancelled ones too)
-            $count = [int](gh api "repos/$env:GH_REPO/actions/workflows/build-client.yml/runs?branch=main&per_page=1" --jq .total_count)
-            if ($LASTEXITCODE -ne 0 -or $count -lt 1) { Write-Host "::error::Could not count main's builds"; exit 1 }
+            # main's successful builds so far, plus this one
+            $count = [int](gh api "repos/$env:GH_REPO/actions/workflows/build-client.yml/runs?branch=main&status=success&per_page=1" --jq .total_count) + 1
+            if ($LASTEXITCODE -ne 0 -or $count -lt 2) { Write-Host "::error::Could not count main's builds"; exit 1 }
             $build = $count - [int]((Get-Content VERSION_FIRST_RUN -Raw).Trim()) + 1
             if ($build -lt 0) { $build = [int]$env:GITHUB_RUN_NUMBER }
             # build 0 is the version itself (V1.3), the builds after it V1.3.1, V1.3.2, ...
