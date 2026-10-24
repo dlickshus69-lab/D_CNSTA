@@ -25,6 +25,7 @@
 #include <string_view>
 #include <cctype>
 #include <map>
+#include <functional>
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
@@ -690,6 +691,8 @@ namespace ingame
             last_state = state, last_mask = mask;
         }
         std::pair<int, bool> aku_manager_state(Address actor);
+        std::string hex(unsigned offset);
+        std::string pointer_brief(Address v);
         // a filler mask is out: from the hand-over until Aku's manager shows no mask (after a 2 s grace for it to appear)
         bool filler_mask_out()
         {
@@ -1192,6 +1195,26 @@ namespace ingame
         // text as a constant (+0x1755b20) in the message itself. So the texts themselves: every "Death..." text constant
         // around Crash's damage script says Papu Papu's death while DeathLink's death runs, and goes back right after (at
         // 0xblwcwf, or 2.5 seconds later)
+        // V1.3.24: the angel death, seventh try. V1.3.22's log: the death texts made no difference: the falling death makes
+        // a death of its own kind (+0xca31a0), whatever its text, and his spin's death is another kind (+0xca4180), made
+        // from his attack's damage. So the real hit: when Papu Papu's attack hits Crash for real (his attack script sends
+        // Crash ha5y20l3), what that script holds then (the damage, Crash, the attack's name and death) is kept; for a
+        // landing on red without a mask, those go back into his attack script for a moment and the game's own hit message
+        // is sent from it (V1.3.13 sent it with them empty: Crash's script ignored it). Each kept object's first word
+        // (its type) is kept too, and checked before use
+        struct HitCapture
+        {
+            Address component = 0;                            // his attack script
+            std::vector<std::pair<unsigned, Address>> fields; // (offset in it, value)
+            std::vector<Address> types;                       // each value's first word then
+            std::uint64_t at = 0;
+        };
+        std::mutex hit_capture_mutex;
+        HitCapture hit_capture;
+        std::atomic_uint hit_captures{0};
+        std::atomic_bool own_hit_send{false};
+        // deaths of the angel's kind (the death object 0xblwcwf carries starts with angel_death_code)
+        std::atomic_uint angel_deaths{0};
         std::mutex red_constant_mutex;
         std::vector<std::pair<Address, Address>> red_constants; // (where, the text it held)
         std::atomic_uint red_constants_out{0};
@@ -1509,7 +1532,12 @@ namespace ingame
                         {
                             const auto v = value<Address>(event + at);
                             death_value = v, ++death_values;
-                            if (red_constants_out.load() && v && value<Address>(v) == base() + angel_death_code)
+                            // (V1.3.24: it's a handle to the death object, as the logs show it: "-> [type +0xca4180]")
+                            const auto death = resolve(v) ? resolve(v) : v;
+                            const bool angel = death && value<Address>(death) == base() + angel_death_code;
+                            if (angel)
+                                ++angel_deaths;
+                            if (red_constants_out.load() && angel)
                                 ++red_death_angel;
                         }
                         // the death texts back as they were
@@ -1517,8 +1545,46 @@ namespace ingame
                             restore_death_constants(), red_death_until = 0;
                     }
                     if (name.find("ha5y20l3") != std::string::npos)
+                    {
                         if (const auto at = event_field(meta, "x9pcuxft"))
                             hit_value = value<Address>(event + at), ++hit_values;
+                        // (V1.3.24) the attack script's state as it hits Crash for real (not our own send)
+                        const auto script = component ? value<Address>(component + 56) : 0;
+                        if (!own_hit_send.load() && script && string(value<Address>(script + 16), 120) == "Scripts.Graph.common_BossAttackDamageHandler")
+                        {
+                            HitCapture capture;
+                            capture.component = component, capture.at = GetTickCount64();
+                            const auto count = value<unsigned>(script + 24);
+                            const auto fields = value<Address>(script + 40);
+                            for (unsigned i = 0; fields && count <= 512 && i < count; ++i)
+                            {
+                                const auto field = value<Address>(fields + i * 8);
+                                const auto field_name = string(value<Address>(field + 48), 64);
+                                const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                                const bool wanted = field_name == "localDamage" || field_name == "localCrash" || field_name == "localAttackIdentifier" ||
+                                                    field_name == "currCrashDeathBehaviorEvent" || field_name.rfind("Damage_Instance_id_", 0) == 0;
+                                if (!wanted || bytes != 8 || offset < 0x40)
+                                    continue;
+                                const auto v = value<Address>(component + offset);
+                                capture.fields.emplace_back(offset, v);
+                                capture.types.push_back(v ? value<Address>(v) : 0);
+                            }
+                            if (!capture.fields.empty())
+                            {
+                                // (the first few go to the log: what his attack script holds as it hits Crash)
+                                if (hit_captures.load() < 3)
+                                {
+                                    std::ostringstream kept;
+                                    for (std::size_t i = 0; i < capture.fields.size(); ++i)
+                                        kept << " " << hex(capture.fields[i].first) << "=" << pointer_brief(capture.fields[i].second);
+                                    std::cout << "Boss rule: his attack's hit on Crash kept:" << kept.str() << "\n" << std::flush;
+                                }
+                                std::lock_guard lock(hit_capture_mutex);
+                                hit_capture = std::move(capture);
+                                ++hit_captures;
+                            }
+                        }
+                    }
                 }
                 if (aku_messages_blocked.load() && !own_aku_message.load() && component && target && aku_manager(component, target))
                 {
@@ -5014,6 +5080,9 @@ namespace ingame
             bool forbidden = false;
             // the death for it: whether Crash's script's death was changed (checked 2.5 seconds later)
             std::uint64_t death_check_at = 0;
+            // V1.3.24: his spin's hit sent again for it: whether Crash died, and the angel's death (checked 0.6 seconds later)
+            std::uint64_t replay_check_at = 0;
+            unsigned replay_deaths = 0, replay_angels = 0;
             unsigned death_seen = 0, death_changed = 0, death_count = 0, death_angels = 0, death_skips = 0, crash_dumps = 0;
             bool crash_dumped_start = false;
             // research (V1.3.15): his health part (+0x14da2c0) as each state starts, to find what keeps him from being hit
@@ -5062,6 +5131,23 @@ namespace ingame
             std::string bar_snap_when;
             std::map<Address, std::uint32_t> bar_snapshot;
             unsigned bar_snapshots = 0;
+            // V1.3.24: the fill for more notches than the game's (see stretch_bar_fill): the boss's notches as the game has
+            // them, the bar's parts (its own, not its setting's), BarParent's widest (the fill at full health), and the fill
+            // picture's width as the game had it and as written
+            Address bar_script = 0;
+            unsigned bar_proj_at = 0;
+            int bar_game_hits = 0;
+            bool parts_searched = false;
+            unsigned parts_searches = 0;
+            std::uint64_t parts_at = 0;
+            Address bar_parent = 0, health_bar = 0, fill_image = 0;
+            bool fill_image_whole = false;
+            float fill_image_game = 0, fill_image_written = 0, fill_full = 0, fill_stretch = 0;
+            unsigned fill_logs = 0;
+            // a /bar_try in effect: what it changed, the game's value there and ours
+            unsigned try_target = 0;
+            Address try_part = 0, try_at = 0;
+            float try_game = 0, try_written = 0;
             std::uint64_t bar_next = 0;
             unsigned bar_lines = 0;
         } boss_tuning;
@@ -5108,7 +5194,7 @@ namespace ingame
         // his last form (his first phase stays)
         // research (V1.3.6): the boss's health bar. V1.3.5 made HitCount bigger: the bar grew to 10 notches but its fill
         // still counted 5 (half full at the start, empty a hit early). Its bar object's numbers go to the log as they change
-        void watch_boss_bar(BossTuning &t, Address c, const std::string &name)
+        void watch_boss_bar(BossTuning &t, Address c, const std::string &name, int game_hits)
         {
             if (!t.bar_handlers.insert(c).second)
                 return;
@@ -5121,6 +5207,7 @@ namespace ingame
                 return;
             }
             t.bar_object = bar, t.bar_found_at = GetTickCount64();
+            t.bar_script = c, t.bar_proj_at = at, t.bar_game_hits = game_hits;
             if (const auto data = value<Address>(c + 16); typed(data, 0x13bbb10))
                 if (const auto off = field_offset(value<Address>(data + 32), "GuiBossHealthBar", 8))
                     t.bar_template = resolve(value<Address>(data + off)) ? resolve(value<Address>(data + off)) : value<Address>(data + off);
@@ -5360,6 +5447,211 @@ namespace ingame
             }
             std::cout << std::flush;
         }
+        // V1.3.24: the fill for more notches than the game's. V1.3.21's clip and V1.3.22's log: with Papu Papu's 10 notches
+        // the bar's layout is the 10 notches' (the frame, notches, dark track and BarParent, which the fill shows up to: 1013
+        // at full health, 91 less with each hit), but the blue ends where the game's 5 notches end (547), whatever his health
+        // above that; its colours are the same at the same place with any health (it's cut off, not squeezed). Nothing in
+        // the bar holds that 547: the fill is a picture shown at its own size up to BarParent's width, and each boss's
+        // picture is painted only as far as his own notches go (Brio's 7 reach 782). So the picture (the setting's
+        // "[Nitrus-Brio.png]", 1040 x 80, with each boss's texture) is made wider by as much as the bar grew
+        float game_bar_width(int hits) { return 547.0f + static_cast<float>(hits - 5) * 117.5f; } // N. Gin's 5: 547, Brio's 7: 782
+        bool bar_part_ok(Address part, Address type, unsigned name_at, const char *name)
+        {
+            return part && typed(part, type) && printable_text(value<Address>(part + name_at)) == name;
+        }
+        float bar_image_width(const BossTuning &t)
+        {
+            return t.fill_image_whole ? static_cast<float>(value<std::int32_t>(t.fill_image + 0x34)) : value<float>(t.fill_image + 0x34);
+        }
+        void set_bar_image_width(const BossTuning &t, float width)
+        {
+            if (t.fill_image_whole)
+                write(t.fill_image + 0x34, static_cast<std::int32_t>(std::lround(width)));
+            else
+                write(t.fill_image + 0x34, width);
+        }
+        // the bar's own parts: what the bar leads to (5 steps, 3000 objects) and its setting (the bar each fight copies)
+        // doesn't (4 steps); BarParent, HealthBar and the fill picture, and every named part of the bar to the log
+        void find_bar_parts(BossTuning &t)
+        {
+            t.parts_searched = true, ++t.parts_searches;
+            if (t.bar_script && t.bar_proj_at)
+            {
+                const auto p = value<Address>(t.bar_script + t.bar_proj_at);
+                if (const auto bar = resolve(p) ? resolve(p) : p; bar && readable(bar, 0x100))
+                    t.bar_object = bar;
+            }
+            const auto reach = [&](Address root, unsigned depth_most, std::size_t most, std::vector<std::pair<Address, unsigned>> &found) {
+                std::vector<std::pair<Address, unsigned>> queue{{root, 0}};
+                std::set<Address> seen{root};
+                std::vector<std::uint32_t> words(0x200 / 4);
+                for (std::size_t q = 0; q < queue.size() && found.size() < most; ++q)
+                {
+                    const auto [object, depth] = queue[q];
+                    if (!read(object, words))
+                        continue;
+                    found.emplace_back(object, depth);
+                    if (depth >= depth_most)
+                        continue;
+                    for (std::size_t i = 0; i + 1 < words.size(); i += 2)
+                    {
+                        const Address p = words[i] | (static_cast<Address>(words[i + 1]) << 32);
+                        if (p >= 0x10000 && p < 0x7fffffff0000ULL && (p < base() || p >= module_end()) && !seen.count(p) && readable(p, 0x40))
+                            seen.insert(p), queue.emplace_back(p, depth + 1);
+                    }
+                }
+            };
+            std::vector<std::pair<Address, unsigned>> setting_parts, bar_parts;
+            if (t.bar_template)
+                reach(t.bar_template, 4, 2000, setting_parts);
+            if (t.bar_object)
+                reach(t.bar_object, 5, 3000, bar_parts);
+            std::set<Address> setting;
+            for (const auto &[a, depth] : setting_parts)
+                setting.insert(a);
+            struct Found
+            {
+                Address at;
+                unsigned depth;
+                bool setting;
+            };
+            std::vector<Found> parents, healths, images;
+            std::ostringstream parts;
+            unsigned named = 0;
+            for (const auto &[a, depth] : bar_parts)
+            {
+                const bool in_setting = setting.count(a) != 0;
+                if (typed(a, 0x161cf98))
+                {
+                    const auto name = printable_text(value<Address>(a + 0x30));
+                    if (name.empty())
+                        continue;
+                    if (name == "BarParent")
+                        parents.push_back({a, depth, in_setting});
+                    else if (name == "HealthBar")
+                        healths.push_back({a, depth, in_setting});
+                    if (!in_setting && named++ < 80)
+                        parts << "\nBoss bar part: " << name << " (depth " << depth << ") x " << value<float>(a + 0x68) << " y " << value<float>(a + 0x6c) << " width "
+                              << value<float>(a + 0x98) << " height " << value<float>(a + 0x9c) << " scale " << value<float>(a + 0x8c) << " " << value<float>(a + 0x90);
+                }
+                else if (typed(a, 0x1622be8) && printable_text(value<Address>(a + 0x10)) == "[Nitrus-Brio.png]")
+                    images.push_back({a, depth, in_setting});
+            }
+            // the bar's own: not its setting's if that can be told, then (the setting's BarParent is the full 1040) a
+            // narrower BarParent, and the fill picture and HealthBar nearest to the BarParent chosen
+            const auto pick = [](const std::vector<Found> &list, Address close_to, const std::function<int(const Found &)> &bonus) {
+                const Found *best = nullptr;
+                long long best_score = -1, best_distance = 0;
+                for (const auto &f : list)
+                {
+                    const long long score = (f.setting ? 0 : 4) + bonus(f);
+                    const long long distance = close_to ? std::llabs(static_cast<long long>(f.at) - static_cast<long long>(close_to)) : 0;
+                    if (!best || score > best_score || (score == best_score && distance < best_distance))
+                        best = &f, best_score = score, best_distance = distance;
+                }
+                return best ? best->at : Address{0};
+            };
+            t.bar_parent = pick(parents, 0, [](const Found &f) { return std::abs(value<float>(f.at + 0x98) - 1040.0f) > 0.5f ? 1 : 0; });
+            t.health_bar = pick(healths, t.bar_parent, [](const Found &) { return 0; });
+            t.fill_image = pick(images, t.bar_parent, [](const Found &) { return 0; });
+            t.fill_image_game = 0;
+            if (t.fill_image)
+            {
+                const auto raw = value<std::uint32_t>(t.fill_image + 0x34);
+                float f = 0;
+                std::memcpy(&f, &raw, 4);
+                if (raw >= 16 && raw <= 8192)
+                    t.fill_image_whole = true, t.fill_image_game = static_cast<float>(raw);
+                else if (std::isfinite(f) && f >= 16 && f <= 8192)
+                    t.fill_image_whole = false, t.fill_image_game = f;
+                else
+                    t.fill_image = 0;
+            }
+            const auto brief = [&](const std::vector<Found> &list, Address chosen) {
+                std::ostringstream out;
+                for (const auto &f : list)
+                    out << " 0x" << std::hex << f.at << std::dec << " (depth " << f.depth << (f.setting ? ", the setting's" : "") << (f.at == chosen ? ", this one" : "") << ")";
+                return out.str();
+            };
+            std::cout << "Boss bar parts: " << bar_parts.size() << " objects from the bar, " << setting_parts.size() << " from its setting; BarParent" << brief(parents, t.bar_parent)
+                      << "; HealthBar" << brief(healths, t.health_bar) << "; the fill picture" << brief(images, t.fill_image);
+            if (t.fill_image)
+                std::cout << ", " << t.fill_image_game << " x " << (t.fill_image_whole ? value<std::int32_t>(t.fill_image + 0x38) : value<float>(t.fill_image + 0x38))
+                          << (t.fill_image_whole ? " (whole numbers)" : " (decimals)");
+            std::cout << parts.str() << "\n" << std::flush;
+        }
+        // our values back as the game had them (the fill picture's width, a /bar_try's), while they're still ours
+        void bar_parts_back(BossTuning &t)
+        {
+            if (t.fill_image_written > 0 && bar_part_ok(t.fill_image, 0x1622be8, 0x10, "[Nitrus-Brio.png]") &&
+                std::abs(bar_image_width(t) - t.fill_image_written) < 0.5f)
+                set_bar_image_width(t, t.fill_image_game);
+            t.fill_image_written = 0;
+            if (t.try_at && typed(t.try_part, 0x161cf98) && std::abs(value<float>(t.try_at) - t.try_written) < 0.0001f)
+                write(t.try_at, t.try_game);
+            t.try_at = t.try_part = 0, t.try_target = 0;
+        }
+        void stretch_bar_fill(BossTuning &t, const Shared &state, std::uint64_t now)
+        {
+            if (!t.bar_object)
+                return;
+            if (!t.parts_searched && t.bar_found_at && now - t.bar_found_at > 1200)
+                find_bar_parts(t);
+            if (!bar_part_ok(t.bar_parent, 0x161cf98, 0x30, "BarParent"))
+            {
+                // (gone, or not found yet: looked for again every 3 seconds, a few times)
+                if (t.parts_searched && t.parts_searches < 6 && now >= t.parts_at)
+                    t.parts_searched = false, t.parts_at = now + 3000, t.bar_parent = t.health_bar = t.fill_image = 0, t.fill_image_written = 0, t.try_at = t.try_part = 0,
+                    t.try_target = 0;
+                return;
+            }
+            const float width = value<float>(t.bar_parent + 0x98);
+            if (std::isfinite(width) && width > t.fill_full && width < 5000)
+                t.fill_full = width;
+            const float game = game_bar_width(t.bar_game_hits);
+            const float stretch = t.bar_game_hits > 0 && game > 1 ? t.fill_full / game : 1.0f;
+            const bool grown = stretch > 1.05f && stretch < 3.0f;
+            // the fill picture as wide as the bar grew (not with /bar_try none, to compare)
+            if (t.fill_image && bar_part_ok(t.fill_image, 0x1622be8, 0x10, "[Nitrus-Brio.png]"))
+            {
+                const float want = grown && state.bar_try_target != 1 ? t.fill_image_game * stretch : t.fill_image_game;
+                const float has = bar_image_width(t);
+                const bool ours_or_game = std::abs(has - t.fill_image_game) < 0.5f || (t.fill_image_written > 0 && std::abs(has - t.fill_image_written) < 0.5f);
+                if (ours_or_game && std::abs(has - want) >= 0.5f)
+                {
+                    set_bar_image_width(t, want);
+                    t.fill_image_written = want == t.fill_image_game ? 0 : want;
+                    // (logged when it starts, ends, or changes by more than a little: the bar may fill up as it appears)
+                    if ((std::abs(stretch - t.fill_stretch) > 0.05f || want == t.fill_image_game) && t.fill_logs++ < 12)
+                    {
+                        t.fill_stretch = want == t.fill_image_game ? 0 : stretch;
+                        std::cout << "Boss bar: the fill picture's width " << has << " -> " << want << " (the bar's fill reaches " << t.fill_full << ", the game's "
+                                  << t.bar_game_hits << " notches " << game << (want == t.fill_image_game ? "; /bar_try none: the game's" : "") << ")\n" << std::flush;
+                    }
+                }
+            }
+            // /bar_try health or scale (V1.3.24 tests): HealthBar's or BarParent's sideways scale times the factor (the
+            // bar's growth unless one is given), kept until /bar_try off
+            const unsigned target = state.bar_try_target >= 2 && state.bar_try_target <= 3 ? state.bar_try_target : 0;
+            if (target != t.try_target)
+            {
+                if (t.try_at && typed(t.try_part, 0x161cf98) && std::abs(value<float>(t.try_at) - t.try_written) < 0.0001f)
+                    write(t.try_at, t.try_game);
+                t.try_at = t.try_part = 0, t.try_target = target;
+                const Address part = target == 2 ? t.health_bar : target == 3 ? t.bar_parent : 0;
+                if (part && bar_part_ok(part, 0x161cf98, 0x30, target == 2 ? "HealthBar" : "BarParent"))
+                {
+                    const float factor = state.bar_try_factor > 0.1f ? state.bar_try_factor : grown ? stretch : 2.0f;
+                    t.try_part = part, t.try_at = part + 0x8c, t.try_game = value<float>(t.try_at), t.try_written = t.try_game * factor;
+                    write(t.try_at, t.try_written);
+                    std::cout << "Boss bar try: " << (target == 2 ? "HealthBar" : "BarParent") << "'s sideways scale " << t.try_game << " -> " << t.try_written << "\n" << std::flush;
+                }
+                else if (target)
+                    std::cout << "Boss bar try: " << (target == 2 ? "HealthBar" : "BarParent") << " wasn't found\n" << std::flush;
+            }
+            else if (t.try_at && typed(t.try_part, 0x161cf98) && std::abs(value<float>(t.try_at) - t.try_game) < 0.0001f && std::abs(t.try_written - t.try_game) > 0.0001f)
+                write(t.try_at, t.try_written); // (the game put its own back)
+        }
         // health: the boss himself (his health bar has his name), not the lions or blobs he sends; not N. Gin's mechs (both
         // only get faster), not Cortex's chase in Crash 2 (more health can't be beaten in time), and of Brio only his
         // last form (his first phase stays). Done again whenever the fight starts over (a death resets the boss to the
@@ -5471,7 +5763,7 @@ namespace ingame
             }
             if (max_health <= 0)
                 return; // not started yet
-            watch_boss_bar(t, c, name);
+            watch_boss_bar(t, c, name, original);
             if (!eligible)
             {
                 tell_once(t, "same" + name, "Boss health: " + name + " keeps his " + std::to_string(original) + " hits");
@@ -5649,8 +5941,9 @@ namespace ingame
         // Crash's damage script ha5y20l3 with seven values; Crash's damage and Aku Aku scripts do the rest (a mask, the
         // hurt animation, or a life; nothing while he's invincible). Sent from a node of our own with the game's node's
         // values (as the Nitro Trap's explosion is), from Papu Papu's attack script
-        // (not used since V1.3.14: kept for the research, see punish_crash)
-        [[maybe_unused]] bool boss_real_hit(BossTuning &t, std::ostream &out)
+        // (not used from V1.3.14 to V1.3.22, see punish_crash; V1.3.24: with what his attack script held when his spin last
+        // hit Crash, replay_real_hit)
+        bool boss_real_hit(BossTuning &t, std::ostream &out)
         {
             const auto crash = player();
             if (!crash || !t.papu)
@@ -5714,6 +6007,54 @@ namespace ingame
             reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(reinterpret_cast<Address>(own.data()), reinterpret_cast<Address>(context.data()));
             out << "; Crash takes the game's hit (Aku Aku takes it if he's there)";
             return true;
+        }
+        // V1.3.24: the angel death for a landing while red without a mask: his spin's own hit, as it last hit Crash in this
+        // visit (see HitCapture). What his attack script held then goes back into it for the moment the game's hit message
+        // is sent from it, and what it held before goes back right after. Not if a kept object's first word (its type)
+        // changed since
+        bool replay_real_hit(BossTuning &t, std::ostream &out)
+        {
+            HitCapture capture;
+            {
+                std::lock_guard lock(hit_capture_mutex);
+                capture = hit_capture;
+            }
+            Address sender = 0;
+            for (const auto &[c, script] : entity_scripts(t.papu))
+                if (script == "common_BossAttackDamageHandler")
+                    sender = c;
+            if (!sender || capture.fields.empty() || capture.component != sender)
+            {
+                out << (capture.fields.empty() || capture.component != sender ? "; his spin hasn't hit Crash yet in this visit, so there's no hit of his to send again"
+                                                                                 : "; his attack script wasn't found");
+                return false;
+            }
+            for (std::size_t i = 0; i < capture.fields.size(); ++i)
+                if (const auto v = capture.fields[i].second; v && (!readable(v, 16) || value<Address>(v) != capture.types[i]))
+                {
+                    out << "; the hit kept from his spin is out of date (" << hex(capture.fields[i].first) << " changed)";
+                    return false;
+                }
+            std::ostringstream fields;
+            std::vector<Address> before;
+            for (const auto &[at, v] : capture.fields)
+            {
+                before.push_back(value<Address>(sender + at));
+                write(sender + at, v);
+                fields << " " << hex(at) << "=" << pointer_brief(v);
+            }
+            own_hit_send = true;
+            std::ostringstream sent_note;
+            const bool sent = boss_real_hit(t, sent_note);
+            own_hit_send = false;
+            for (std::size_t i = 0; i < capture.fields.size(); ++i)
+                if (value<Address>(sender + capture.fields[i].first) == capture.fields[i].second)
+                    write(sender + capture.fields[i].first, before[i]);
+            std::cout << "Boss rule: his spin's hit from " << seconds(GetTickCount64() - capture.at) << " ago, sent again with" << fields.str()
+                      << (sent ? "" : " (it couldn't be sent)") << "\n" << std::flush;
+            if (!sent)
+                out << "; his hit couldn't be sent again";
+            return sent;
         }
         // without the game's hit: as one would be (a mask less, nothing while invincible, a life without a mask). (His
         // state is the mask count while a mask is out, as /aku_give reads it)
@@ -5787,7 +6128,7 @@ namespace ingame
         }
         // the angel death's texts (see red_constants): every "Death..." text constant (+0x1755b20, the text at +24) around
         // Crash's damage script description says clip; how many, and which texts they held
-        unsigned swap_death_constants(Address damage, Address clip, std::string &texts)
+        [[maybe_unused]] unsigned swap_death_constants(Address damage, Address clip, std::string &texts)
         {
             const auto meta = value<Address>(damage + 56);
             std::set<Address> pages;
@@ -5840,30 +6181,23 @@ namespace ingame
                     out << "; Crash has a mask: no hit";
                 return;
             }
-            // (V1.3.15 and V1.3.16 tried for the death his spin gives, the angel, asked for: see death_value. DeathLink's
-            // falling death until it's found)
+            // V1.3.24: his spin's own hit, sent again: the death it gives is the angel's (V1.3.15 to V1.3.22 tried to make
+            // DeathLink's falling death into it: it always makes a falling death, whatever it's given)
+            std::ostringstream replay;
+            if (replay_real_hit(t, replay))
+            {
+                t.replay_check_at = GetTickCount64() + 600;
+                t.replay_deaths = death_values.load(), t.replay_angels = angel_deaths.load();
+                out << "; no mask: his spin's own hit for Crash (the angel death)";
+                return;
+            }
+            out << replay.str();
+            // DeathLink's falling death when there's no hit of his to send
             bool died = false;
             std::string how = "the falling death";
             try
             {
                 const auto body = controlled_actor();
-                Address damage = 0;
-                for (const auto &[c, script] : entity_scripts(player(), 256))
-                    if (script == "Crash_DamageManager")
-                        damage = c;
-                if (const auto [setting, type] = boss_death_behavior(t.papu); setting && type && damage)
-                {
-                    restore_death_constants(); // (any left from before)
-                    red_death_name = setting, red_death_type = type;
-                    std::string texts;
-                    const auto swapped = swap_death_constants(damage, setting, texts);
-                    red_death_until = GetTickCount64() + 2000;
-                    t.death_check_at = GetTickCount64() + 2500;
-                    t.death_angels = red_death_angel.load();
-                    how = "his spin's death " + pointer_brief(setting) + " in " + std::to_string(swapped) + " death texts of Crash's (" + texts + ")";
-                }
-                else
-                    how = "the falling death (his attack's death setting or Crash's damage script wasn't found)";
                 died = body && request_scripted_death(body);
             }
             catch (const std::exception &e)
@@ -6205,6 +6539,29 @@ namespace ingame
                           << (still_out ? " (his death message didn't come within 2.5 s; the death texts were put back now)" : "") << "\n" << std::flush;
                 red_death_until = 0;
             }
+            // (V1.3.24) his spin's hit sent again for a landing while red: Crash's death, and which kind; the falling death if
+            // it didn't kill him
+            if (t.replay_check_at && now >= t.replay_check_at)
+            {
+                t.replay_check_at = 0;
+                const bool died = death_values.load() != t.replay_deaths, angel = angel_deaths.load() != t.replay_angels;
+                std::cout << "Boss rule: his spin's hit sent again: " << (died ? (angel ? "Crash died the angel's death" : "Crash died, but not the angel's death") : "Crash didn't die from it");
+                if (!died)
+                {
+                    bool falling = false;
+                    try
+                    {
+                        const auto body = controlled_actor();
+                        falling = body && request_scripted_death(body);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        std::cout << " (" << e.what() << ")";
+                    }
+                    std::cout << (falling ? "; he loses a life the falling way instead" : "; and his life couldn't be taken the falling way either");
+                }
+                std::cout << "\n" << std::flush;
+            }
             // the mask taken for a landing while red, a second later
             if (t.hit_check_at && now >= t.hit_check_at)
             {
@@ -6296,8 +6653,14 @@ namespace ingame
             if (boss != t.level)
             {
                 boss_tint_off(t, true);
+                bar_parts_back(t);
                 t = {};
                 t.level = boss, t.entered = now;
+                {
+                    // (a hit kept from his spin belongs to this visit's objects)
+                    std::lock_guard lock(hit_capture_mutex);
+                    hit_capture = {};
+                }
                 // the message research starts over with each fight, and Papu Papu's message keeping stops
                 boss_block_actor = 0, boss_block_red = false;
                 boss_event_since = 0;
@@ -6314,6 +6677,7 @@ namespace ingame
             if (boss == "B101")
                 papu_rule(t, state, now);
             update_boss_bar(t, now);
+            stretch_bar_fill(t, state, now);
             if (now < t.next)
                 return;
             // every half second: the boss as he starts, Brio's last form as it appears, a retry

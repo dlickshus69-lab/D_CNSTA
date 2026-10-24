@@ -202,7 +202,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_bar (tests) | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_bar, /bar_try (tests) | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -560,13 +560,30 @@ void ClientRuntime::handle_commands()
                               "landing on him while he's red is a hit for Crash (the game's own: Aku Aku takes it, or a life without him) "
                               "and doesn't count. /boss_rules on, off, or seed.");
             }
+            else if (command == "/bar_try")
+            {
+                // test (V1.3.24): the fill's stretch for a bigger bar, off to compare (none), or a part of the bar stretched
+                // sideways to look at (health, scale; by the bar's growth unless a factor is given)
+                std::istringstream in(argument);
+                std::string what;
+                float factor = 0;
+                in >> what >> factor;
+                const unsigned target = what == "none" ? 1 : what == "health" ? 2 : what == "scale" ? 3 : 0;
+                if (!(factor > 0.1f && factor < 10))
+                    factor = 0;
+                if (box_markers)
+                    box_markers->bar_try(target, factor);
+                print_console(target == 1   ? std::string("Bar try: none (the fill isn't stretched, as before V1.3.24). /bar_try off puts the stretch back.")
+                              : target      ? "Bar try: " + what + " stretched sideways (kept until /bar_try off). Take a screenshot of the bar."
+                                            : std::string("Bar try: off (the fill is stretched to the bar's length). Tests: /bar_try none, /bar_try health, /bar_try scale."));
+            }
             else if (command == "/boss_bar")
             {
                 // test (V1.3.21): with more health, grow the bar's notches (the fill doesn't grow with them yet) or keep the game's
                 if (argument == "grow" || argument == "keep")
                     boss_bar_grow = argument == "grow";
                 print_console(std::string("Boss bar: ") + (boss_bar_grow ? "grow" : "keep") +
-                              " (test). grow (the default): more notches (the fill still stops at the game's length: being worked on). keep: "
+                              " (test). grow (the default): more notches (V1.3.24 stretches the fill to the bar's length: being tested). keep: "
                               "the game's notches, full at the start, each hit takes part of one (works). From the next fight. /boss_bar grow or keep.");
             }
             else if (command == "/clear")

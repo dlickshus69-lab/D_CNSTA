@@ -697,6 +697,13 @@ void BoxMarkers::boss_settings(unsigned health, unsigned speed, bool rules, bool
     shared_->boss_bar_grow = bar_grow ? 1u : 0u;
     unlock();
 }
+void BoxMarkers::bar_try(unsigned target, float factor)
+{
+    lock();
+    shared_->bar_try_target = target;
+    shared_->bar_try_factor = factor;
+    unlock();
+}
 void BoxMarkers::slow_tilt(float tilt)
 {
     if (!ingame::valid_slow_tilt(tilt))

@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 26, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 27, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -174,6 +174,10 @@ namespace ingame
         // (V1.3.21 test, /boss_bar) with more health: 1 grows the bar's notches with it (its fill doesn't grow yet), 0 keeps
         // the game's notches (each hit takes part of one)
         unsigned boss_bar_grow = 0;
+        // (V1.3.24 test, /bar_try) 0 off (the fill picture stretched to a bigger bar's length), 1 none (not stretched, to
+        // compare), 2 HealthBar's or 3 BarParent's sideways scale times bar_try_factor (0: the bar's growth), kept until off
+        unsigned bar_try_target = 0;
+        float bar_try_factor = 0;
         // set by the game thread every frame it runs (GetTickCount64)
         std::uint64_t heartbeat_game = 0;
         // set by the client: trap time is accounted for up to here while the game thread wasn't running
