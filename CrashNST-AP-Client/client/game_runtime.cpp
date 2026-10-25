@@ -5518,10 +5518,11 @@ namespace ingame
             bool face_checked = false;
             std::array<float, 4> face_votes{};
             unsigned face_samples = 0;
-            float aim_yaw = 0, aim_turned = 0;
-            bool aim_wrote = false;
-            unsigned aim_kept = 0, aim_overridden = 0, aim_lines = 0;
-            std::uint64_t aim_last = 0;
+            float aim_yaw = 0, aim_turned = 0, aim_lock = 0, yaw_last = 0;
+            bool aim_wrote = false, aim_skip = false;
+            unsigned aim_kept = 0, aim_overridden = 0, aim_lines = 0, aim_where = 0, yaw_searches = 0;
+            std::uint64_t aim_last = 0, aim_skip_told = 0;
+            std::vector<std::pair<Address, std::string>> yaw_places;
             // V1.3.36 (see papu_slam_rate): his slam's time from when he stands, as the game plays it (the shortest seen while
             // nothing of ours is set), and the stand a try was set in
             std::uint64_t slam_normal = 0, try_stand = 0;
@@ -7866,26 +7867,99 @@ namespace ingame
             std::cout << "Boss rule: jumping into the arena he moved along his " << axis_name(best) << " axis (" << score << " of 1, " << t.face_samples
                       << " looks): his slam is aimed along his " << axis_name(t.face_axis) << " axis\n" << std::flush;
         }
+        // V1.3.37: his facing set to an angle (yaw, radians, along his X axis): his transform's matrix turned about his up axis,
+        // and the two places his transform keeps his turn too (V1.3.36's dump of it: an angle at +0x68 after two zeros, and a
+        // quaternion at +0x10, (0, 0, -sin(yaw / 2), cos(yaw / 2))). V1.3.36 turned only the matrix: after a spin the game turned
+        // him back each frame, and his next spin started from where the game still had him (Eric: "he teleports his spin
+        // somewhere else"). Each of the two is set only when it's what's expected for his facing now (so nothing else is
+        // written); `kept` gets 1 for the angle, 2 for the quaternion
+        bool papu_set_yaw(Address transform, const Matrix &m, float yaw, float target, unsigned &kept)
+        {
+            const float d = wrap_angle(target - yaw), cs = std::cos(d), sn = std::sin(d);
+            std::array<float, 12> rows{};
+            for (std::size_t r = 0; r < 3; ++r)
+            {
+                const float x = m[r * 4], y = m[r * 4 + 1];
+                rows[r * 4] = x * cs - y * sn, rows[r * 4 + 1] = x * sn + y * cs, rows[r * 4 + 2] = m[r * 4 + 2], rows[r * 4 + 3] = m[r * 4 + 3];
+            }
+            if (!write(transform + 32, rows))
+                return false;
+            kept = 0;
+            std::array<float, 3> e{};
+            if (read(transform + 0x60, e) && std::abs(e[0]) < 0.01f && std::abs(e[1]) < 0.01f && std::isfinite(e[2]) && std::abs(wrap_angle(e[2] - yaw)) < 0.02f)
+                write(transform + 0x68, e[2] + d), kept |= 1;
+            std::array<float, 4> q{};
+            const float qz = -std::sin(yaw / 2), qw = std::cos(yaw / 2);
+            if (read(transform + 0x10, q) && std::abs(q[0]) < 0.01f && std::abs(q[1]) < 0.01f)
+            {
+                const bool plus = std::abs(q[2] - qz) < 0.02f && std::abs(q[3] - qw) < 0.02f, minus = std::abs(q[2] + qz) < 0.02f && std::abs(q[3] + qw) < 0.02f;
+                if (plus || minus)
+                {
+                    const float sign = plus ? 1.0f : -1.0f;
+                    write(transform + 0x18, std::array<float, 2>{-sign * std::sin(target / 2), sign * std::cos(target / 2)});
+                    kept |= 2;
+                }
+            }
+            return true;
+        }
+        // V1.3.37 research, in case the game still turns him back: the places on him holding his facing (as an angle, in radians
+        // or degrees) as he stands, and those of the last stand holding the new one too (they follow his facing)
+        void papu_yaw_research(BossTuning &t, float yaw)
+        {
+            if (t.yaw_searches >= 4 || t.clock_regions.empty())
+                return;
+            const float degrees = yaw * 57.29578f;
+            const auto matches = [&](float f) { return std::abs(wrap_angle(f - yaw)) < 0.004f || std::abs(f - degrees) < 0.2f || std::abs(f - degrees - 360) < 0.2f || std::abs(f - degrees + 360) < 0.2f; };
+            std::ostringstream follow;
+            unsigned following = 0;
+            const bool moved = std::abs(wrap_angle(yaw - t.yaw_last)) > 0.3f;
+            for (const auto &[at, where] : t.yaw_places)
+                if (moved && std::isfinite(value<float>(at)) && matches(value<float>(at)) && following++ < 8)
+                    follow << "\n  follows it: " << where;
+            t.yaw_places.clear();
+            for (const auto &r : t.clock_regions)
+            {
+                std::vector<float> words(r.bytes / 4);
+                if (!read(r.at, words))
+                    continue;
+                for (unsigned i = 0; i < words.size() && t.yaw_places.size() < 64; ++i)
+                    if (std::isfinite(words[i]) && std::abs(words[i]) > 0.05f && matches(words[i]))
+                        t.yaw_places.emplace_back(r.at + i * 4, r.where + " " + hex(i * 4));
+            }
+            ++t.yaw_searches;
+            std::cout << "Boss rule research: his facing as he stands (" << degrees << " degrees): " << t.yaw_places.size() << " places around him hold it"
+                      << (t.yaw_searches > 1 ? "; " + std::to_string(following) + " of the last stand's held his new facing too" : std::string()) << follow.str() << "\n" << std::flush;
+            t.yaw_last = yaw;
+        }
         // V1.3.36 (Eric: "when he slams, he always targets you... the last location that Crash was"): as he stands for his slam he
-        // turns to Crash, fast (720 degrees a second), for the first half of the time to his slam, then holds: his slam comes
-        // down where Crash was then. He's turned about his up axis in his own matrix (not while he hangs off something else);
-        // the log says how far he turned, and whether the facing stayed from frame to frame or the game turned him back
+        // turns to Crash for the first half of the time to his slam, then holds that facing. V1.3.37: fast (900 degrees a second),
+        // his turn set where his transform keeps it too (see papu_set_yaw), and held until his slam (V1.3.36 let go halfway, and
+        // after a spin the game turned him back); not his first slam after he comes into the arena (Eric: "the first slam he
+        // ever does when you first start the boss... we can leave that normal"). The log says how far he turned and whether
+        // the turn stayed from frame to frame
         void papu_aim(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
             // (half the time to his slam: the game's own, or shorter once his slam plays faster, see papu_slam_rate)
             const double factor = t.rate_found ? std::clamp(state.boss_speed, 100u, 200u) / 100.0 : 1.0;
             const auto window = static_cast<std::uint64_t>(static_cast<double>(t.slam_normal ? t.slam_normal : 900) / factor / 2);
-            const bool on = state.boss_rules && t.papu && s == 1 && t.stand_seen && now - t.stand_seen <= window;
-            if (!on)
+            const bool stand = state.boss_rules && t.papu && s == 1 && t.stand_seen && !t.aim_skip;
+            const auto since = now - t.stand_seen;
+            const bool slammed = t.slam_seen_at && t.slam_seen_at >= t.stand_seen;
+            const bool aiming = stand && since <= window, holding = stand && !aiming && !slammed && since < 3000;
+            if (!aiming && !holding)
             {
                 if (t.aim_wrote)
                 {
                     t.aim_wrote = false;
-                    if (t.aim_lines < 10)
-                        ++t.aim_lines, std::cout << "Boss rule: he aimed his slam at Crash: turned " << static_cast<int>(t.aim_turned * 57.29578f) << " degrees ("
-                                                 << t.aim_kept << " frames it stayed, " << t.aim_overridden << " the game turned him back)\n" << std::flush;
-                    t.aim_turned = 0, t.aim_kept = t.aim_overridden = 0;
+                    if (t.aim_lines < 12)
+                        ++t.aim_lines, std::cout << "Boss rule: he aimed his slam at Crash: turned " << static_cast<int>(t.aim_turned * 57.29578f) << " degrees and held it "
+                                                 << (slammed ? "until his slam" : "until he stopped standing") << " (" << t.aim_kept << " frames it stayed, " << t.aim_overridden
+                                                 << " the game moved him; his transform's angle " << (t.aim_where & 1 ? "set" : "not set") << ", its quaternion "
+                                                 << (t.aim_where & 2 ? "set" : "not set") << ")\n" << std::flush;
+                    t.aim_turned = 0, t.aim_kept = t.aim_overridden = 0, t.aim_where = 0;
                 }
+                if (state.boss_rules && s == 1 && t.aim_skip && t.aim_skip_told != t.stand_seen && t.aim_lines < 12)
+                    t.aim_skip_told = t.stand_seen, ++t.aim_lines, std::cout << "Boss rule: his first slam after coming into the arena isn't aimed (left as the game has it)\n" << std::flush;
                 return;
             }
             const auto transform = value<Address>(t.papu + 48);
@@ -7894,40 +7968,29 @@ namespace ingame
             if (!transform || value<Address>(t.papu + 16) || !read(transform + 32, m) || !crash || !entity_matrix(crash, c) ||
                 !std::all_of(m.begin(), m.end(), [](float f) { return std::isfinite(f); }) || std::abs(m[15] - 1) > 0.001f)
                 return;
-            // (research, once a visit, in case the game turns him back: his transform's numbers, where his turn may be kept too)
-            if (!t.aim_lines && !t.aim_wrote)
-            {
-                std::array<float, 40> f{};
-                read(transform, f);
-                std::ostringstream out;
-                for (std::size_t i = 2; i < f.size(); ++i)
-                    out << " " << hex(static_cast<unsigned>(i * 4)) << "=" << f[i];
-                std::cout << "Boss rule research: his transform (" << object_brief(transform) << "):" << out.str() << "\n" << std::flush;
-            }
             float fx = 0, fy = 0;
             if (!matrix_facing(m, t.face_axis, fx, fy))
                 return;
             const float yaw = std::atan2(fy, fx);
+            if (!t.aim_wrote)
+                papu_yaw_research(t, yaw);
             if (t.aim_wrote)
                 ++(std::abs(wrap_angle(yaw - t.aim_yaw)) > 0.03f ? t.aim_overridden : t.aim_kept);
-            const float dx = c[12] - m[12], dy = c[13] - m[13];
             const float dt = t.aim_wrote && t.aim_last ? std::clamp(static_cast<float>(now - t.aim_last) / 1000.0f, 0.005f, 0.05f) : 0.016f;
             t.aim_last = now, t.aim_wrote = true, t.aim_yaw = yaw;
-            if (std::hypot(dx, dy) < 1)
-                return;
-            const float most = 12.566f * dt;
-            const float step = std::clamp(wrap_angle(std::atan2(dy, dx) - yaw), -most, most);
-            if (std::abs(step) < 0.0005f)
-                return;
-            const float cs = std::cos(step), sn = std::sin(step);
-            std::array<float, 12> rows{};
-            for (std::size_t r = 0; r < 3; ++r)
+            float target = t.aim_lock;
+            if (aiming)
             {
-                const float x = m[r * 4], y = m[r * 4 + 1];
-                rows[r * 4] = x * cs - y * sn, rows[r * 4 + 1] = x * sn + y * cs, rows[r * 4 + 2] = m[r * 4 + 2], rows[r * 4 + 3] = m[r * 4 + 3];
+                const float dx = c[12] - m[12], dy = c[13] - m[13];
+                const float most = 15.708f * dt;
+                const float step = std::hypot(dx, dy) < 1 ? 0.0f : std::clamp(wrap_angle(std::atan2(dy, dx) - yaw), -most, most);
+                target = yaw + step, t.aim_lock = target, t.aim_turned += step;
             }
-            write(transform + 32, rows);
-            t.aim_yaw = yaw + step, t.aim_turned += step;
+            if (std::abs(wrap_angle(target - yaw)) < 0.0005f)
+                return;
+            unsigned kept = 0;
+            if (papu_set_yaw(transform, m, yaw, target, kept))
+                t.aim_yaw = target, t.aim_where |= kept;
         }
         // V1.3.35 (Eric: "scan the speed of his normal speed and then add it to the logs"): his slams and laps as they come (the
         // rest of each cycle's times, see papu_rule: from when he stands to his slam, from the slam to his spin, his spin).
@@ -8223,7 +8286,7 @@ namespace ingame
                 if (s != 2)
                     t.spin_start_at = 0;
                 if (s == 1)
-                    t.stand_at = t.stand_seen = now;
+                    t.stand_at = t.stand_seen = now, t.aim_skip = t.state == 5; // (V1.3.37: his slam as he comes into the arena isn't aimed, see papu_aim)
                 // (V1.3.36: his jump into the arena is over: which way he faces, see papu_face_decide)
                 if (t.state == 5)
                     papu_face_decide(t);
