@@ -309,13 +309,15 @@ void ClientRuntime::update_display(ClientTick &tick)
             unsigned health = slot["boss_health"].isIntegral() ? static_cast<unsigned>(std::clamp<std::int64_t>(slot["boss_health"].asInt64(), 100, 200)) : 100;
             unsigned speed = slot["boss_speed"].isIntegral() ? static_cast<unsigned>(std::clamp<std::int64_t>(slot["boss_speed"].asInt64(), 100, 200)) : 100;
             bool rules = slot["boss_rules"] == true;
+            // (V1.3.42 / Stable V1.3.1: the YAML's Aku Aku in harder boss fights)
+            const bool masks = slot["boss_aku_aku"] == true;
             if (boss_health_test >= 0)
                 health = static_cast<unsigned>(boss_health_test);
             if (boss_speed_test >= 0)
                 speed = static_cast<unsigned>(boss_speed_test);
             if (boss_rules_test >= 0)
                 rules = boss_rules_test == 1;
-            box_markers->boss_settings(health, speed, rules, boss_bar_grow);
+            box_markers->boss_settings(health, speed, rules, boss_bar_grow, masks);
         }
         auto collectible_checked = tick.checked;
         collectible_checked.insert(pending.begin(), pending.end());

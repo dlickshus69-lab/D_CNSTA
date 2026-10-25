@@ -1094,4 +1094,11 @@ class CrashWorld(World):
         }
         # 0 = any tier, 1 = gold or platinum, 2 = platinum only
         result["relic_requirement"] = self.options.relic_requirement.value
+        # Harder bosses (for now Papu Papu): the rule, and his health and speed in percent (100 is the game's), only with
+        # harder_bosses on; and whether Aku Aku masks still come in those fights
+        harder = bool(self.options.harder_bosses.value)
+        result["boss_rules"] = harder
+        result["boss_health"] = self.options.boss_health.value if harder else 100
+        result["boss_speed"] = self.options.boss_speed.value if harder else 100
+        result["boss_aku_aku"] = bool(self.options.harder_bosses_aku_aku.value)
         return result

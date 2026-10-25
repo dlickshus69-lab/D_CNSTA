@@ -732,7 +732,18 @@ namespace ingame
         // V1.3.33: a boss fight with any of the harder bosses' settings on (more health, more speed, the red rule)
         bool hard_boss_fight(const Shared &state, const std::string &boss)
         {
+#ifdef CRASH_NST_STABLE
+            // (Stable V1.3.1: harder bosses are Papu Papu's alone; every other boss is as the game has him)
+            if (boss != "B101")
+                return false;
+#endif
             return !boss.empty() && (state.boss_rules != 0 || state.boss_health > 100 || state.boss_speed > 100);
+        }
+        // (V1.3.42 / Stable V1.3.1) a harder boss fight where Crash has no Aku Aku mask: unless the YAML lets masks still come
+        // there (harder_bosses_aku_aku)
+        bool hard_boss_no_masks(const Shared &state, const std::string &boss)
+        {
+            return hard_boss_fight(state, boss) && !state.boss_masks;
         }
         void update_aku_lock(bool locked, bool strict = false)
         {
@@ -8910,7 +8921,9 @@ namespace ingame
             papu_speed_timers(t, percent, s);
             // V1.3.41: what turns with him, looked for in his first spins of a visit (see papu_turn_research; before his state
             // is noted, so his spin's start is seen)
-            papu_turn_research(t, s, now, state.boss_rules != 0);
+#ifndef CRASH_NST_STABLE
+            papu_turn_research(t, s, now, state.boss_rules != 0); // (not in the Stable build: research for the aim)
+#endif
             // (after the code review: when the fight starts over from his throne his parts may be new, so what was found is
             // looked for again)
             if (s == 6 && (t.turn_spins || !t.turn_places.empty() || t.turn_tracking))
@@ -9044,8 +9057,11 @@ namespace ingame
             // fight starts over from his throne, what was found in his parts is looked for again
             papu_cycle(t, s, now);
             papu_clocks(t, s, now);
+#ifndef CRASH_NST_STABLE
+            // (not in the Stable build: his slam's speed is still being looked for, and the aim's spin start still jumps)
             papu_slam_rate(t, s, percent, now);
             papu_aim(t, state, s, now);
+#endif
             papu_who(t, s, now);
             if (t.spin_search_due && now >= t.spin_search_due)
             {
@@ -9426,8 +9442,15 @@ namespace ingame
         {
             {
                 const auto boss = boss_zone_key();
+#ifdef CRASH_NST_STABLE
+                // (Stable V1.3.1: harder bosses are Papu Papu's alone, and none of the boss work runs in other boss fights)
+                const auto papu = boss == "B101" ? boss : std::string();
+                update_boss_research(papu);
+                update_boss_tuning(state, papu);
+#else
                 update_boss_research(boss);
                 update_boss_tuning(state, boss);
+#endif
             }
             // the game's sounds from the last level may be gone with it
             static std::string sound_level;
@@ -12561,7 +12584,7 @@ namespace ingame
             const auto boss = boss_zone_key();
             if (boss.empty())
                 boss_given.clear(), state.aku_hold = 0;
-            else if (hard_boss_fight(state, boss))
+            else if (hard_boss_no_masks(state, boss))
                 state.aku_hold = 1; // (V1.3.33: none at all)
             else if (now - checked >= 250)
             {
@@ -12581,7 +12604,7 @@ namespace ingame
         {
             // V1.3.33 (Eric: "get rid of Aku Aku Mask when we have hard bosses"): in a harder boss fight Crash has no mask:
             // the Aku Aku lock takes his (even a filler one) and keeps the fight's crates and items from giving one
-            const bool hard = hard_boss_fight(state, boss_zone_key());
+            const bool hard = hard_boss_no_masks(state, boss_zone_key());
             static bool hard_told = false;
             if (hard != hard_told)
             {

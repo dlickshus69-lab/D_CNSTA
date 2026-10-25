@@ -688,13 +688,14 @@ void BoxMarkers::aku_lock(bool on)
     shared_->aku_lock = on ? 1u : 0u;
     unlock();
 }
-void BoxMarkers::boss_settings(unsigned health, unsigned speed, bool rules, bool bar_grow)
+void BoxMarkers::boss_settings(unsigned health, unsigned speed, bool rules, bool bar_grow, bool masks)
 {
     lock();
     shared_->boss_health = std::clamp(health, 100u, 200u);
     shared_->boss_speed = std::clamp(speed, 100u, 200u);
     shared_->boss_rules = rules ? 1u : 0u;
     shared_->boss_bar_grow = bar_grow ? 1u : 0u;
+    shared_->boss_masks = masks ? 1u : 0u;
     unlock();
 }
 void BoxMarkers::bar_try(unsigned target, float factor)

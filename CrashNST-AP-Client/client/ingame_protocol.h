@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 27, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 28, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -174,6 +174,9 @@ namespace ingame
         // (V1.3.21 test, /boss_bar) with more health: 1 grows the bar's notches with it (its fill doesn't grow yet), 0 keeps
         // the game's notches (each hit takes part of one)
         unsigned boss_bar_grow = 0;
+        // (V1.3.42 and Stable V1.3.1, the YAML's harder_bosses_aku_aku) 1: Aku Aku masks still come in harder boss fights;
+        // 0: Crash has none there (V1.3.33)
+        unsigned boss_masks = 0;
         // (V1.3.25 test, /bar_try) 0 off (the blue, HealthBar, stretched to a bigger bar's length), 1 none (not stretched,
         // to compare), 3 BarParent's sideways scale times bar_try_factor (0: the bar's growth), kept until off
         unsigned bar_try_target = 0;

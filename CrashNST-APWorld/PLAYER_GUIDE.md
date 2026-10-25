@@ -65,7 +65,7 @@ When item spoilers are enabled, the client scouts selected locations on connecti
 
 ## World options
 
-On the options page and in generated YAMLs the options are grouped: Game Options, Goal, Levels, Crystals / Gems / Relics, Sanity Options, Traps, then Item & Location Options.
+On the options page and in generated YAMLs the options are grouped: Game Options, Goal, Levels, Crystals / Gems / Relics, Sanity Options, Traps, Bosses, Cosmetic, then Item & Location Options.
 
 Secret destinations include required source levels automatically.
 
@@ -80,6 +80,7 @@ Secret destinations include required source levels automatically.
 - `require_all_bosses`: off by default. For Cortex goals, require every boss, including Cortex, in the goal campaigns. Required bosses are added even if excluded from the level pool. This does not affect level-clear or token-hunt goals.
 - `token_percentage`: replace 1–100% of the remaining filler slots with AP Tokens (default 20%). `token_required_percentage`: collect 1–100% of those tokens to win (default 80%). Both round up. Progression, collectible rewards and useful items keep their slots. Token hunt needs at least one filler slot.
 - `death_link` is optional and defaults off. 
+- Bosses (Stable V1.3.1, for now only Papu Papu; every other boss stays as the game has him): `harder_bosses` (default off) turns on his red rule: he glows red at the start of the fight and after each hit, until the slam that follows his next spin, and landing on him while he's red doesn't count as a hit (Crash bounces off and gets hurt: an Aku Aku mask takes it, or Crash dies). With it on, `boss_health` (100–200%, default 150) gives him one more hit every 25% (5 hits at 100, 6 at 125, 7 at 150, 8 at 175, 9 at 200; the bar gets a notch for each), and `boss_speed` (100–200%, default 150) makes him spin faster and wait less before his spins. `harder_bosses_aku_aku` (default off): with it off, Crash has no Aku Aku mask in a harder boss fight (masks from crates and items there come in the next level); on, masks work there as usual. Without `harder_bosses`, health and speed do nothing.
 - Cosmetic: `crash_fur_color`, `crash_chest_color`, `crash_pants_color`, `crash_shoes_color`, `crash_hair_color` (the mohawk), `crash_gloves_color` and `crash_eyebrows_color` each take `default` or a color (red, dark_red, orange, yellow, gold, lime, green, dark_green, teal, cyan, light_blue, blue, navy, purple, violet, pink, magenta, brown, tan, white, light_gray, gray, black, and bright_white, which can glow under strong lights), or `random`, and the client wears them from the next game start, for the whole seed (see Crash colors above).
 - `crashsanity` is experimental and defaults off.
 - `relic_requirement`: `any` (default), `gold_or_platinum` or `platinum`. The minimum relic tier that sends a relic check. A lower tier is not awarded, so you can replay the time trial. Relic checks stay in logic; above `any`, Crash 2 relics expect Crash 2 Speed Shoes (not on the polar bear, jetpack or jet board) and Crash 3 on-foot relics expect Crash 3 Speed Shoes (gold) or every Crash 3 power (platinum).
