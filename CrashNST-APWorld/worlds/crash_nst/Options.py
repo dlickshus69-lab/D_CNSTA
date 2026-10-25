@@ -703,8 +703,8 @@ class BossSlamTime(NamedRange):
 
 class BossHitWindow(NamedRange):
     """How long a harder boss can be hit once his red ends, in tenths of a second (needs Harder Bosses; for now Papu
-    Papu); then he's red again until the slam after his next spin. by_speed: from Boss Speed, 3 s at 100% down to 1.5 s
-    at 200%. 5 to 100: that time (0.5 to 10 s) at any Boss Speed."""
+    Papu); then he's red again until the slam after his next spin. by_speed: from Boss Speed, 2 s at 100% down to 1 s at
+    200%. 5 to 100: that time (0.5 to 10 s) at any Boss Speed."""
 
     display_name = "Boss Hit Window"
     range_start = 5

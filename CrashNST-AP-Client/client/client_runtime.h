@@ -181,7 +181,7 @@ class ClientRuntime
     // (V1.3.57 test, /boss_slam) Papu Papu's slam at 200% boss speed, in ms after he stands; -1: 450 (the speeds between follow it)
     int boss_slam_test = -1;
     // (V1.3.58 test, /boss_window) how long Papu Papu can be hit once his red ends, in ms (V1.3.59: at 200% boss speed, the
-    // speeds below follow it); -1: the seed's (V1.3.61: boss_hit_window), or 1500 at 200%
+    // speeds below follow it); -1: the seed's (V1.3.61: boss_hit_window), or 1000 at 200% (V1.3.64)
     int boss_window_test = -1;
     bool boss_bar_grow = true; // /boss_bar (test; V1.3.22: grow by default, asked for)
     unsigned routing_start_count = 0, routing_secret_return_count = 0;

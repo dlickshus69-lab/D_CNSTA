@@ -5549,7 +5549,7 @@ namespace ingame
             std::uint64_t slam_wait_since = 0, start_timer_at = 0;
             // V1.3.58 (see papu_window): once his red ends, how long he can be hit (ms, /boss_window), until when, whether
             // that's on, and a red begun in his spin waits for the next one's end (red_skip_spin)
-            unsigned window_ms = 1500, window_lines = 0, window_percent = 200;
+            unsigned window_ms = 1000, window_lines = 0, window_percent = 200;
             std::uint64_t window_until = 0;
             bool window_on = false, red_skip_spin = false, window_fixed = false;
             // V1.3.59 (Eric's V1.3.58 run: after some hits the game's immunity timer didn't run, so his red ended as his next
@@ -5588,6 +5588,23 @@ namespace ingame
             // V1.3.63 (Eric: "once you hit him ... He'll do his series slams, and then he'll spin, and then he'll do one slam
             // again"): his slams in a row only in his stand after a hit that counted (set at the hit, used as he stands)
             bool ms_due = false;
+            // V1.3.64 (see papu_crash_motion): where Crash was on the floor these last frames (time, x, y), his movement from them,
+            // and how far this stand's aim led him (for the log)
+            std::array<std::array<double, 3>, 24> crash_hist{};
+            unsigned crash_hist_n = 0;
+            std::array<float, 2> crash_v{};
+            float aim_lead_last = 0, aim_speed_last = 0;
+            // V1.3.64 (see papu_chair): where he sits on his throne (his chair) and where he stands in the arena; Crash's farthest
+            // from that spot in 24 directions (0: toward the chair) and his height there, his nearest to the chair; the pushes
+            // off the chair (when, how many, which way of setting his place, how they went)
+            std::array<float, 3> chair_at{}, arena_at{};
+            bool chair_known = false, arena_known = false, chair_told = false;
+            std::array<float, 24> reach{}, reach_z{};
+            float chair_near = 1e9f, chair_near_z = 0;
+            std::uint64_t push_at = 0, reach_told_at = 0;
+            unsigned pushes = 0, push_held = 0, push_back = 0, push_lines = 0, reach_lines = 0;
+            int push_way = 1, push_check = 0;
+            std::array<float, 3> push_to{};
             Address ms_wait_seen = 0;
             float ms_wait_last = 0;
             unsigned slams_seen = 0;
@@ -9180,6 +9197,147 @@ namespace ingame
                           << (t.rev_off ? " (the third time: no more turning around in this visit)" : "") << "\n" << std::flush;
             }
         }
+        // V1.3.64 (for the aim's lead, see papu_aim): Crash's movement along the floor, from where he was 0.1 s or more ago (a
+        // jump of more than 3 m between frames is a respawn or a teleport: started over)
+        void papu_crash_motion(BossTuning &t)
+        {
+            Matrix c{};
+            const auto crash = player();
+            if (!crash || !entity_matrix(crash, c) || !std::isfinite(c[12]) || !std::isfinite(c[13]))
+            {
+                t.crash_hist_n = 0, t.crash_v = {0, 0};
+                return;
+            }
+            const double now_s = precise_seconds();
+            auto &h = t.crash_hist;
+            if (t.crash_hist_n)
+            {
+                const auto &last = h[(t.crash_hist_n - 1) % h.size()];
+                if (now_s - last[0] < 0.004)
+                    return; // (the same frame)
+                if (std::hypot(c[12] - last[1], c[13] - last[2]) > 300 || now_s - last[0] > 0.3)
+                    t.crash_hist_n = 0;
+            }
+            h[t.crash_hist_n % h.size()] = {now_s, c[12], c[13]}, ++t.crash_hist_n;
+            // (from the newest one at least 0.1 s back, or the oldest kept)
+            const unsigned kept = std::min<unsigned>(t.crash_hist_n, static_cast<unsigned>(h.size()));
+            const auto &newest = h[(t.crash_hist_n - 1) % h.size()];
+            const std::array<double, 3> *from = nullptr;
+            for (unsigned k = 1; k < kept; ++k)
+            {
+                const auto &o = h[(t.crash_hist_n - 1 - k) % h.size()];
+                from = &o;
+                if (newest[0] - o[0] >= 0.1)
+                    break;
+            }
+            if (!from || newest[0] - (*from)[0] < 0.03)
+            {
+                t.crash_v = {0, 0};
+                return;
+            }
+            const double span = newest[0] - (*from)[0];
+            t.crash_v = {static_cast<float>((newest[1] - (*from)[1]) / span), static_cast<float>((newest[2] - (*from)[2]) / span)};
+        }
+        // V1.3.64 (Eric: "let's start working on blocking the chair. So maybe we just put an invisible wall ... by the chair
+        // too. So it basically is just a circle"): the chair is where he sits before the fight (state 6), the arena's middle
+        // where he stands in it. Research for the wall: Crash's farthest from the arena's middle in 24 directions (0: toward the
+        // chair) and his height there, his nearest to the chair, to the log as each fight goes back to his throne or over
+        // (and every 30 s). And a first push: with the harder rules on, while Crash is within 30% of the way from the chair to
+        // the middle of it, he's set 15% of the way toward the middle (every 0.4 s), first by his place (+32), then by his
+        // transform's matrix if that doesn't hold; the log says which held
+        void papu_chair(BossTuning &t, const Shared &state, int s, std::uint64_t now)
+        {
+            Matrix m{};
+            if (!entity_matrix(t.papu, m) || !std::isfinite(m[12]) || !std::isfinite(m[13]) || !std::isfinite(m[14]))
+                return;
+            if (s == 6 && t.speed < 10)
+                t.chair_at = {m[12], m[13], m[14]}, t.chair_known = true;
+            if (s == 5)
+                t.arena_known = false; // (looked for again as he lands)
+            if (s == 1 && !t.arena_known)
+                t.arena_at = {m[12], m[13], m[14]}, t.arena_known = true;
+            if (!t.chair_known || !t.arena_known)
+                return;
+            const float cx = t.chair_at[0] - t.arena_at[0], cy = t.chair_at[1] - t.arena_at[1], span = std::hypot(cx, cy);
+            if (span < 50)
+                return;
+            if (!t.chair_told)
+            {
+                t.chair_told = true;
+                std::cout << "Boss chair research: his chair at (" << t.chair_at[0] << ", " << t.chair_at[1] << ", " << t.chair_at[2] << "), the arena's middle at ("
+                          << t.arena_at[0] << ", " << t.arena_at[1] << ", " << t.arena_at[2] << "): " << span << " apart, the chair " << t.chair_at[2] - t.arena_at[2]
+                          << " higher\n" << std::flush;
+            }
+            const auto crash = player();
+            std::array<float, 3> at{};
+            if (!crash || !read(crash + 32, at) || !std::isfinite(at[0]) || !std::isfinite(at[1]) || !std::isfinite(at[2]))
+                return;
+            const auto told = [&](bool force) {
+                if (t.reach_lines >= 8 || (!force && now - t.reach_told_at < 30000))
+                    return;
+                ++t.reach_lines, t.reach_told_at = now;
+                std::ostringstream out;
+                out << "Boss chair research: Crash's farthest from the arena's middle by direction (degrees from the chair: distance, height):";
+                for (std::size_t b = 0; b < t.reach.size(); ++b)
+                    if (t.reach[b] > 0)
+                        out << " " << static_cast<int>(b * 15) - 180 << ": " << static_cast<int>(t.reach[b]) << " " << static_cast<int>(t.reach_z[b]);
+                out << "; nearest the chair " << static_cast<int>(t.chair_near) << " (height " << static_cast<int>(t.chair_near_z) << "); pushes " << t.pushes << " (held "
+                    << t.push_held << ", put back " << t.push_back << ")";
+                std::cout << out.str() << "\n" << std::flush;
+            };
+            if (s == 5 || s == 6)
+            {
+                if (t.reach_told_at != 1 && std::any_of(t.reach.begin(), t.reach.end(), [](float r) { return r > 0; }))
+                    told(true), t.reach_told_at = 1;
+                return;
+            }
+            if (s != 1 && s != 2 && s != 3)
+                return;
+            if (t.reach_told_at == 1)
+                t.reach_told_at = now;
+            // (his farthest by direction, his nearest to the chair)
+            const float ax = at[0] - t.arena_at[0], ay = at[1] - t.arena_at[1], d = std::hypot(ax, ay), h = at[2] - t.arena_at[2];
+            const float angle = wrap_angle(std::atan2(ay, ax) - std::atan2(cy, cx));
+            const auto bin = std::min<std::size_t>(23, static_cast<std::size_t>((angle + 3.14159265f) / (2 * 3.14159265f) * 24));
+            if (d > t.reach[bin])
+                t.reach[bin] = d, t.reach_z[bin] = h;
+            const float to_chair = std::hypot(at[0] - t.chair_at[0], at[1] - t.chair_at[1]);
+            if (to_chair < t.chair_near)
+                t.chair_near = to_chair, t.chair_near_z = h;
+            told(false);
+            // (the push: how the last one went, then another while he's still on the chair)
+            if (t.push_check && now - t.push_at >= 30)
+            {
+                // (where he's seen now: his place, and his transform's matrix, what's drawn)
+                Matrix c{};
+                const bool drawn = entity_matrix(crash, c) && std::isfinite(c[12]) && std::isfinite(c[13]);
+                const float off_place = std::hypot(at[0] - t.push_to[0], at[1] - t.push_to[1]), off_drawn = drawn ? std::hypot(c[12] - t.push_to[0], c[13] - t.push_to[1]) : 1e9f;
+                const bool held = off_drawn < 0.05f * span || (!drawn && off_place < 0.05f * span);
+                ++(held ? t.push_held : t.push_back);
+                if (t.push_lines < 12)
+                    ++t.push_lines, std::cout << "Boss chair: Crash pushed off the chair by his " << (t.push_way == 1 ? "place" : "transform's matrix") << ": "
+                                              << (held ? "it held" : "the game put him back") << " (his place " << static_cast<int>(off_place) << " from where he was set, drawn "
+                                              << static_cast<int>(off_drawn) << " from it)\n" << std::flush;
+                if (!held && t.push_way == 1 && t.push_back >= 2 && !t.push_held)
+                    t.push_way = 2; // (his place didn't hold: his transform's matrix next)
+                t.push_check = 0;
+            }
+            if (!state.boss_rules || to_chair > 0.3f * span || t.push_check || now - t.push_at < 400 || t.pushes >= 40)
+                return;
+            const float k = 0.15f * span / std::max(1.0f, d);
+            t.push_to = {at[0] - ax * k, at[1] - ay * k, at[2]};
+            bool wrote = false;
+            if (t.push_way == 1)
+                wrote = write(crash + 32, std::array<float, 2>{t.push_to[0], t.push_to[1]});
+            else if (const auto transform = value<Address>(crash + 48))
+                wrote = write(transform + 32 + 48, std::array<float, 2>{t.push_to[0], t.push_to[1]});
+            if (!wrote)
+                return;
+            ++t.pushes, t.push_at = now, t.push_check = 1;
+            if (t.push_lines < 12)
+                ++t.push_lines, std::cout << "Boss chair: Crash is on the chair (" << static_cast<int>(to_chair) << " from it, height " << static_cast<int>(h)
+                                          << "): pushed toward the arena's middle by his " << (t.push_way == 1 ? "place" : "transform's matrix") << "\n" << std::flush;
+        }
         void papu_aim(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
             // (V1.3.52: the steering only with the harder rules on: off, he goes back to the game's own turn)
@@ -9252,7 +9410,8 @@ namespace ingame
                                     each << "\n  " << p.where << ": set " << p.set << ", held " << p.held << ", put back " << p.reset;
                             }
                         std::cout << "Boss rule: he aimed his slam at Crash: turned " << static_cast<int>(wrap_angle(t.aim_lock - t.aim_from) * 57.29578f)
-                                  << " degrees from his own facing and held it " << (spun ? "until his spin started" : slammed ? "after his slam until he stopped standing" : "until he stopped standing")
+                                  << " degrees from his own facing (led him by " << static_cast<int>(t.aim_lead_last) << " at " << static_cast<int>(t.aim_speed_last)
+                                  << " a second) and held it " << (spun ? "until his spin started" : slammed ? "after his slam until he stopped standing" : "until he stopped standing")
                                   << " (" << t.aim_kept << " frames it stayed, " << t.aim_overridden << " the game moved him; "
                                   << (t.aim_modes & 4 ? "the game kept putting him back: let be after " + std::to_string(t.aim_kept + t.aim_overridden) + " frames"
                                       : t.aim_modes & 2 ? std::string("what was set didn't hold him: then only his matrix")
@@ -9362,7 +9521,14 @@ namespace ingame
             t.aim_prev = t.aim_yaw, t.aim_last = now, t.aim_wrote = true, t.aim_yaw = yaw;
             if (aiming)
             {
-                const float dx = c[12] - m[12], dy = c[13] - m[13];
+                // V1.3.64 (Eric: "he'll kind of predict where you're going to be based on the movement ... But at the same time,
+                // you still have enough time to react"): aimed at where Crash will be as his slam lands if he keeps going as he
+                // is now (see papu_crash_motion), 80% of the way: keep running the same way and it lands on him, turn or stop
+                // and it doesn't (his aim is held from half the time to his slam, as before)
+                const float slam_s = t.sc_target > 0.1f ? t.sc_target : static_cast<float>(t.slam_normal ? t.slam_normal : 900) / 1000.0f / static_cast<float>(factor);
+                const float lead = 0.8f * std::clamp(slam_s - static_cast<float>(since) / 1000.0f, 0.0f, 0.6f);
+                const float dx = c[12] + t.crash_v[0] * lead - m[12], dy = c[13] + t.crash_v[1] * lead - m[13];
+                t.aim_lead_last = std::hypot(t.crash_v[0], t.crash_v[1]) * lead, t.aim_speed_last = std::hypot(t.crash_v[0], t.crash_v[1]);
                 const float most = 15.708f * dt;
                 if (std::hypot(dx, dy) >= 1)
                     t.aim_lock = wrap_angle(t.aim_lock + std::clamp(wrap_angle(std::atan2(dy, dx) - t.aim_lock), -most, most));
@@ -9558,8 +9724,10 @@ namespace ingame
         // own immunity as always; the fight starting over, or the rule off, ends it
         // V1.3.59 (Eric: "the two second is good for 200% speed ... scale it based on the speed"): /boss_window's time is his
         // time at 200%, and it's longer by the same pace at lower speeds. V1.3.61 (Eric: "make the hit window for 200% speed to
-        // 1.5 seconds"): 1.5 s at 200%, 1.7 s at 175%, 2 s at 150%, 2.4 s at 125%, 3 s at 100%; or the seed's own time at any
-        // speed (its YAML's boss_hit_window)
+        // 1.5 seconds"); V1.3.64 (Eric: "instead of ... the hit window being 1.5, let's make it 1 second"): 1 s at 200%, 1.14 s
+        // at 175%, 1.33 s at 150%, 1.6 s at 125%, 2 s at 100%; or the seed's own time at any speed (its YAML's boss_hit_window).
+        // V1.3.64 (Eric's V1.3.63 clips: after his slam he could be hit into his next spin, turned red in it, and that spin didn't
+        // count, so he stayed red at the slam after it): his time to be hit also ends as his next spin starts, and that spin counts
         void papu_window(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
             t.window_percent = std::clamp(state.boss_speed, 100u, 200u), t.window_fixed = state.boss_window_fixed_ms != 0;
@@ -9573,11 +9741,18 @@ namespace ingame
                     ++t.window_lines, std::cout << "Boss rule: hit with " << seconds(t.window_until > now ? t.window_until - now : 0) << " of his time to be hit left\n" << std::flush;
                 return;
             }
-            if (now < t.window_until || (s != 1 && s != 2))
+            if (s != 1 && s != 2)
                 return;
-            const bool spinning = s == 2;
+            if (s == 2)
+            {
+                papu_start_red(t, now, "his spin started, so his time to be hit is over");
+                t.red_skip_spin = false; // (this spin counts: his red ends at the slam after it)
+                return;
+            }
+            if (now < t.window_until)
+                return;
             papu_start_red(t, now, "his time to be hit is over");
-            t.red_skip_spin = spinning;
+            t.red_skip_spin = false;
         }
         // V1.3.59 (see hit_red): his red after a hit held by us from here (his health script's list emptied and his can-be-hit
         // flag held clear, see papu_rule), until the slam after his next spin
@@ -9637,7 +9812,7 @@ namespace ingame
                 // (a stand of his: how many slams; 1 to 5 after a hit that counted, one otherwise)
                 static std::mt19937 rng{std::random_device{}()};
                 t.ms_stand = t.state_since, t.ms_done = 0, t.ms_holding = false, t.ms_slams_seen = papu_slams.load();
-                t.ms_total = t.ms_due && wait ? std::uniform_int_distribution<int>(1, 5)(rng) : 1;
+                t.ms_total = t.ms_due && wait ? std::uniform_int_distribution<int>(2, 5)(rng) : 1; // (V1.3.64, Eric: "2 to 5")
                 if (t.ms_due && t.ms_lines < 40)
                     ++t.ms_lines, std::cout << "Boss pattern: after his hit, " << t.ms_total << (t.ms_total == 1 ? " slam" : " slams") << " in this stand"
                                             << (wait ? "" : " (his AI's wait after a slam isn't found yet: one)") << "\n" << std::flush;
@@ -9916,6 +10091,8 @@ namespace ingame
             papu_stand_clock(t, s, now);        // (V1.3.56)
             papu_multi_slam(t, state, s, now); // (V1.3.62)
             papu_slam_rate(t, s, percent, now);
+            papu_crash_motion(t); // (V1.3.64)
+            papu_chair(t, state, s, now);
             papu_aim(t, state, s, now);
             papu_reverse(t, state, s, now); // (V1.3.60)
 #endif
