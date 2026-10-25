@@ -4,23 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Papu Papu: his spin from where he slammed, one more step** (Eric's V1.3.50 run: after each spin the game keeps turning him for about half a second, about 130 degrees on, and his next spin starts from where that leaves him, not from the aim; the watch caught the game copying his facing again, but the address V1.3.50 took from it held nothing usable). This build takes the address the game was reading at that very moment, turns it with the aim, and right away watches it to see what writes it. Each aimed slam's line in the log also says where the game itself last had him (`the game itself last had him at`). Test: the test seed with `/boss papu`, a few of his slams, then the log and a clip.
-- From V1.3.50: the watch for the record his physics is copied from runs at his second aimed stand.
-- From V1.3.49: the record his physics is copied from each frame is turned with the aim too, and each aimed slam's line in the log says how often that held.
-- From V1.3.48: Stormy Ascent's crates shut in between iron crates need Spin (new seeds, and shown on running ones).
-- From V1.3.47: Tomb Wader needs Spin (its first door opens only when you spin the wheel next to it), in new seeds and shown on running ones.
-- From V1.3.46: no free Aku Aku mask after deaths in a row with Aku Aku Sanity; a DeathLink during the box count at a level's end misses you; Un-Bearable strikes on foot, and one waiting on a ride when a level ends gets you in the next level on foot; boxes behind obstacles found since your seed was made no longer show as available (Jungle Rollers' crate wall, Piston It Away, High Time's bonus round, stacks three high, crates under iron-bound ones, Sunset Vista's Cortex bonus round); Sunset Vista's Cortex bonus round needs Spin (new seeds).
-- From V1.3.45: the death counter is shared through the room, so every client shows the same numbers, including deaths while one of you was offline.
-- From V1.3.44: logic follows each level's Crashsanity controls (new seeds): a level only gets controls that can do its clear, crystal, gems and secret exit, and boxes its controls can't reach aren't checks.
-- From V1.3.43: boxes count again after the warp room or a Continue; no white screen after a game over (DeathLink); DeathLinks strike on foot in Hang Eight, Air Crash and Plant Food; the log says why a DeathLink or a trap waits; ride research for DeathLink on rides (crash a ride once and send the log); colors fixed when the saved Crash.pak was colored, and `/colors random`; box logic fixes (Piston It Away, High Time's bonus, Jungle Rollers' crate wall, stacks three high, crates under iron-bound ones).
-- From V1.3.42: Papu Papu's aim also turns his physics (where the game copies his facing from every frame), so his spin should start where he slammed; if it still jumps, the watch goes on his physics; the Bosses options in the YAML (`harder_bosses`, `boss_health`, `boss_speed`, `harder_bosses_aku_aku`), with the slam aim part of `harder_bosses` here.
-- From V1.3.41: health one hit every 25% (125 is 6, 150 is 7, 175 is 8, 200 is 9), his aim held until his spin starts, and the search for what turns with him (it found only his transform and his physics shape's angles: the facing lives deeper, in his physics).
-- From V1.3.39–40: every slam aimed at Crash (except his first as he comes into the arena), and no dying after his last hit.
-- From V1.3.38: the freeze fix (the game froze as he stood up after his first spin in V1.3.37).
-- From V1.3.36: his last speed-ups gentler at 200% (2, 2.16, 2.3, 2.35, 2.39); his slam's own speed still isn't found (it comes 0.9 s after he stands, as in the game).
-- From V1.3.35: a faster spin (his settings' list of spin speeds), his moves timed in the log.
-- From V1.3.34: shorter waits before his spin and as he comes into the arena, and red at the start the first time in a visit is the game's bounce, with no flinch.
-- From V1.3.33: 9 hits at most, no Aku Aku masks in harder boss fights, red from the very start as he comes into the arena.
-- From V1.3.27–32: red follows the game's own "can be hit" switch and ends after the slam that follows his spin; a landing on red Papu bounces Crash off and hurts him (the angel death without a mask), and Papu isn't hurt and doesn't flinch; the bar lasts until his last hit.
-- From V1.3.13–26: `/aku_give` and `/skip_filler yes`, his spins keep the game's length, and the bar grows by default (`/boss_bar keep` keeps the game's 5 notches).
-- **Options page** (from V1.3.10): the colors are a plain list (each color, or Random), no Crash Skin option.
+- **Papu Papu's spin starts where he slammed (next try):** his turn is now changed right as the game copies it each frame, so his spin should start where his aim left him. Test: the test seed, `/boss papu`, a few slams, then the log and a clip.
+- From V1.3.49–51: research into where the game keeps Papu Papu's facing.
+- From V1.3.48: Stormy Ascent's crates shut in between iron crates need Spin.
+- From V1.3.47: Tomb Wader needs Spin (its first door opens with the wheel).
+- From V1.3.46: no free Aku Aku mask after deaths in a row (Aku Aku Sanity); DeathLink misses you during the box count; Un-Bearable strikes on foot.
