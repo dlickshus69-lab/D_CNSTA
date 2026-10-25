@@ -4,10 +4,11 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Fixed: the game froze** as Papu Papu stood up after his first spin (V1.3.37). A search for his facing that runs then got stuck on a number it couldn't handle. Everything from V1.3.37 below is in this build too, now without the freeze.
-- **No more jump when his spin starts after an aimed slam.** V1.3.36 turned only the picture of Papu Papu, but the game keeps his facing in two more places. So as his spin started, the game put him back where it still had him, and the spin began somewhere else. Now all three are turned together, so his spin starts from where he slammed.
-- **Every slam is aimed now, not only the ones after a hit.** After a spin, the game kept turning him back each frame (V1.3.36's log), so only slams after a hit stayed aimed. He now turns fast toward Crash for the first half of the wind-up and holds that facing until the slam lands.
-- **His first slam as he comes into the arena isn't aimed**, at the start of the fight and when it starts over after a death. That one is left as the game has it.
+- **Every slam aimed at Crash, for real this time** (all but his first one as he comes into the arena). V1.3.38's log showed the game putting Papu Papu back to his own facing every single frame, so each frame's turn was a new little one (15 degrees at most) and he never got all the way around to Crash. Now his turn carries over from frame to frame, and it's also set in the two places the game keeps his facing (V1.3.38's search found them), so the game itself has him facing Crash, and his spin should start from where he slammed.
+- If the game still puts him back, the client tries the way that held after a hit in V1.3.36 (only his picture turned), and if that doesn't hold either, it leaves that one slam as the game has it instead of flickering between two facings.
+- **No more dying after the last hit.** In V1.3.38's log the last hit landed just as his spin started, and 1.3 seconds after he was beaten his spinning staff still hit Crash. Once he's beaten, his attack can't hurt Crash.
+- The log now says for each slam which way held him, and names the two places that keep his facing (from the game's own names for them).
+- From V1.3.38: the freeze fix (the game froze as he stood up after his first spin in V1.3.37).
 - From V1.3.36: his last speed-ups gentler at 200% (2, 2.16, 2.3, 2.35, 2.39), and the search for his slam's own speed.
 - From V1.3.35: a faster spin (his settings' list of spin speeds), his moves timed in the log.
 - From V1.3.34: shorter waits before his spin and as he comes into the arena, and red at the start the first time in a visit is the game's bounce, with no flinch.
