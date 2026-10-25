@@ -534,6 +534,23 @@ def crate_event(crate):
     return "box:" + crate["name"] + ("@gem_route" if crate.get("route_member") else "")
 
 
+# (V1.3.48) crates whose spot needs a move that the crate data can't show: plain iron crates and the "!" crate aren't in
+# it, so a crate shut in between iron crates looks free. (level, crate name): moves
+CRATE_SPOT_MOVES = {
+    # Stormy Ascent, the run of Crash crates past the first platform: Crash crates between iron crates, and the "!"
+    # crate that brings out the outlined crates sits between iron crates too, so all of them need Spin from the side
+    # (Eric: Crate_Bonus_ExtraLife008 showed as available with no moves)
+    ("L128", "Crate_Bonus_ExtraLife005"): ("Spin",),
+    ("L128", "Crate_Bonus_ExtraLife007"): ("Spin",),
+    ("L128", "Crate_Bonus_ExtraLife008"): ("Spin",),
+    ("L128", "Crate_Bonus_ExtraLife_Outlined001"): ("Spin",),
+    ("L128", "Crate_Bonus_ExtraLife_Outlined002"): ("Spin",),
+    ("L128", "Crate_Bonus_TNT_Outlined001"): ("Spin",),
+    ("L128", "Crate_Bonus_TNT_Outlined002"): ("Spin",),
+    ("L128", "Crate_Bonus_Random_Outlined"): ("Spin",),
+}
+
+
 def _crate_moves():
     """Crates logic can't expect to break by jumping alone, from their kind and where they sit (relaxed Ability Logic
     expects only jumping for boxes; cautious already expects these moves):
@@ -578,6 +595,9 @@ def _crate_moves():
                                    for other, (px, py, pz) in members)
             if high - low + 1 >= 3 or on_explosive or under_iron_bound:
                 moves[(crate["level"], crate_event(crate))].add("Spin")
+    for crate in CRATES:
+        for move in CRATE_SPOT_MOVES.get((crate["level"], crate["name"]), ()):
+            moves[(crate["level"], crate_event(crate))].add(move)
     return {key: tuple(sorted(value)) for key, value in moves.items()}
 
 

@@ -4,7 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Tomb Wader needs Spin** (Eric): right at the start, its first door only opens when you spin the wheel next to it. Logic expects Spin for everything there in new seeds, and on a running seed the client shows Tomb Wader's checks as needing Spin.
+- **Stormy Ascent: the crates shut in between iron crates need Spin** (Eric). Past the first platform, Crash crates sit between iron crates, and so does the "!" crate that brings out the outlined crates, so they all need Spin from the side. The crate data has no plain iron crates, so logic couldn't see it. New seeds expect Spin, and on a running seed the client shows these checks as needing Spin.
+- From V1.3.47: Tomb Wader needs Spin (its first door opens only when you spin the wheel next to it), in new seeds and shown on running ones.
 - From V1.3.46: no free Aku Aku mask after deaths in a row with Aku Aku Sanity; a DeathLink during the box count at a level's end misses you; Un-Bearable strikes on foot, and one waiting on a ride when a level ends gets you in the next level on foot; boxes behind obstacles found since your seed was made no longer show as available (Jungle Rollers' crate wall, Piston It Away, High Time's bonus round, stacks three high, crates under iron-bound ones, Sunset Vista's Cortex bonus round); Sunset Vista's Cortex bonus round needs Spin (new seeds).
 - From V1.3.45: the death counter is shared through the room, so every client shows the same numbers, including deaths while one of you was offline.
 - From V1.3.44: logic follows each level's Crashsanity controls (new seeds): a level only gets controls that can do its clear, crystal, gems and secret exit, and boxes its controls can't reach aren't checks.
