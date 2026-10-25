@@ -82,16 +82,30 @@ void ClientRuntime::initialize_ap()
     AP_SetClientVersion(&client_version);
     AP_EnableQueueItemRecvMsgs(false);
     AP_SetDeathLinkSupported(true);
-    AP_SetDeathLinkRecvCallback(
-        std::function<void(std::string, std::string)>([this](std::string source, std::string cause) {
-            std::lock_guard<std::mutex> lock(state_mutex);
-            if (console_notifications.size() == ingame::max_lines)
-                console_notifications.pop_front();
-            console_notifications.push_back("DeathLink from " + source.substr(0, 255) +
-                                            (cause.empty() ? "." : ": " + cause.substr(0, 1024)));
-            if (deaths_seen.size() < 256)
-                deaths_seen.push_back(source.substr(0, 60));
-        }));
+    // (V1.3.45) DeathLinks come in as raw bounces (APCpp's own DeathLink handling is off then), so each one's time is
+    // known for the shared death count. Our own come back too: counted, but they don't strike
+    AP_RegisterBouncedCallback([this, me = slot](AP_Bounce bounce) {
+        if (!bounce.tags || std::find(bounce.tags->begin(), bounce.tags->end(), std::string("DeathLink")) == bounce.tags->end())
+            return;
+        Json::Value data;
+        Json::Reader reader;
+        if (!reader.parse(bounce.data, data) || !data.isObject() || !data["source"].isString())
+            return;
+        const auto source = data["source"].asString().substr(0, 60);
+        const auto cause = data["cause"].isString() ? data["cause"].asString().substr(0, 1024) : std::string();
+        const auto key = death_entry_key(data["time"], source);
+        std::lock_guard<std::mutex> lock(state_mutex);
+        if (!key.empty() && death_entries_out.size() < 512)
+            death_entries_out.push_back(key);
+        if (source == me)
+            return;
+        if (console_notifications.size() == ingame::max_lines)
+            console_notifications.pop_front();
+        console_notifications.push_back("DeathLink from " + source + (cause.empty() ? "." : ": " + cause));
+        if (deaths_seen.size() < 256)
+            deaths_seen.push_back(source);
+        ++deathlinks_pending;
+    });
     register_packet_callbacks();
     AP_SetItemClearCallback([] {});
     AP_SetItemRecvCallback([](std::int64_t, int, bool) {});
@@ -698,6 +712,7 @@ void ClientRuntime::process_packets(AP_ConnectionStatus status)
                         if (!cloud)
                             cloud = std::make_unique<CloudSaves>(session);
                         save_dir = cloud->save_directory();
+                        connect_shared_deaths(message["team"].asInt());
                         cloud->connected();
                         server_matches_session = true;
                         std::cout << "Session bound: " << observed_seed << ", team " << message["team"].asInt()
@@ -745,9 +760,11 @@ void ClientRuntime::process_packets(AP_ConnectionStatus status)
                     {
                         session.acknowledge(message["checked_locations"]);
                     }
-                    else if (command == "SetReply" && cloud)
+                    else if (command == "SetReply")
                     {
-                        cloud->receive(message);
+                        receive_shared_deaths(message);
+                        if (cloud)
+                            cloud->receive(message);
                     }
                 }
             }

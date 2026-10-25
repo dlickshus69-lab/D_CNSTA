@@ -4,21 +4,13 @@ This is the **Stable build**, for playing seeds: everything finished so far. Wha
 
 Updating in the middle of a seed is fine: the client fixes work right away. The logic fixes only change seeds generated with this release's `crash_nst.apworld`; a seed already running keeps its logic (F10 still gives normal controls where a move is missing).
 
-## What's new in V1.3.2
+## What's new in V1.3.3
 
-- **No more white screen after a game over (DeathLink).** DeathLinks that came while you were at the game over screen were kept, and all struck as the level opened again, which left the screen white until you restarted the level. Now the ones that come at the game over screen are dropped (Crash is already out), and a DeathLink only strikes once the level is open: Crash able to move for 1.5 seconds with the level's HUD on screen.
-- **Boxes count again after a level loads.** The client could keep listening to the crate script of the place it started listening in (the Crash 2 warp room before a level, or a level before a Continue after a game over), so no broken box counted any more, and nothing said so (MondoF in N. Sanity Beach, Eric after the warp room). Now it listens afresh in every new level and scene, and whenever a level's crate script is set up again.
-- **When a DeathLink or a trap waits, the log says why.** A DeathLink still waiting after 10 seconds (`DeathLink: waiting ...`), or traps standing still for 15 seconds while Crash plays (`Traps wait: ...`), now names what the client sees as the reason. Guicho's DeathLinks didn't strike and his traps stood still with nothing in his log; if it happens again, his log will show why.
-- **DeathLink in Hang Eight, Air Crash and Plant Food:** these levels mix jet-board parts with parts on foot, and the whole level counted as a ride, so a DeathLink waited ("on a ride") even while walking. Now it strikes on foot as anywhere else, and waits only while Crash is on the board.
-- **Crash colors that only partly took are fixed.** If `CrashNSTAP\skins` was lost while Crash wore an older seed's colors, the client kept that colored Crash as the game's own and colored on top of it. Now it checks the copy it colors from: if it already has colors in it, the console says so, and verifying the game's files in Steam fixes it (the colors are made again at the next connection, then show after a restart). Everyone's colored Crash is made once more with this update, so restart the game when the console says so.
-- **`/colors random`**: random colors for this seed, kept until `/colors seed` (back to your YAML's colors) or a new seed. They show from the next game start.
-- **Box logic fixes** (new seeds, Ability Shuffle):
-  - Piston It Away needs Slide to finish.
-  - High Time's bonus round needs Crouch Jump (a stack of four iron crates is in the way).
-  - Jungle Rollers needs Spin for its crate wall after the first checkpoint, so for the clear, the boxes past the wall and the bonus round.
-  - Every crate in a stack three high needs Spin (was four).
-  - A crate right under an iron-bound crate needs Spin (The Pits' bonus round).
-  - A full pass over every level's boxes is coming in the next Stable build.
+- **The death counter is the same for everyone, and counts deaths while you were offline** (asked for). Every client now writes each death it sees to the room's data on the server, keyed by the DeathLink's time and player, so a death several clients see counts once. Each client reads everyone's deaths back from there. So every client shows the same numbers, including deaths while one of you was offline, as long as someone was online. The first time each client connects with this build, its count so far goes along, and the shared count carries on from the highest one. DeathLinks strike the same way as before.
+
+## From V1.3.2
+
+- Boxes count again after the warp room or a Continue; no white screen after a game over (DeathLink); DeathLinks on foot in Hang Eight, Air Crash and Plant Food; the log says why a DeathLink or a trap waits; colors fixed when the saved Crash.pak was colored, and `/colors random`; box logic fixes for new seeds.
 
 ## From V1.3.1
 
