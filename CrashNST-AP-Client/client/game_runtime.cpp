@@ -5631,6 +5631,15 @@ namespace ingame
             int watch_step = 0;
             std::uint64_t watch_at = 0;
             bool watch_due = false;
+            // V1.3.42 (see papu_body_record and papu_body_set): where the game keeps his turn for real, in his physics (a place
+            // and a turn: x, y, z, then a quaternion x, y, z, w): its address this stand, the way its turn goes against his facing
+            // (1 or -1, 0: it doesn't hold his facing, left alone), what it held as he stood, what was set last frame, and how
+            // often it was set, held, or put back by the game; the stands it was told about in the log
+            Address body_at = 0;
+            float body_sign = 0;
+            std::array<float, 2> body_from{}, body_wrote{};
+            bool body_written = false;
+            unsigned body_set = 0, body_held = 0, body_reset = 0, body_told = 0;
             // V1.3.36 (see papu_slam_rate): his slam's time from when he stands, as the game plays it (the shortest seen while
             // nothing of ours is set), and the stand a try was set in
             std::uint64_t slam_normal = 0, try_stand = 0;
@@ -8481,6 +8490,81 @@ namespace ingame
                     p.wrote = to, p.written = true, p.set += !same;
             }
         }
+        // V1.3.42 (Eric: "the spin doesn't start exactly where he slammed... it jumps to a different location"): V1.3.41's watch
+        // caught what puts his facing back every frame: the game's code at +0x546662 (a step run for his physics shape each
+        // frame) reads his turn from his physics, a place and a quaternion at (his physics +0x30, then the record that points to,
+        // plus the 16-bit number at its +0x14), makes angles of it (his physics shape's _gimbalAngles) and puts his transform
+        // there. So his physics holds his real facing, and his spin starts from it. Found from his physics shape (an object of
+        // type +0x181a628 it points to), or from his behavior's character (+0x38, then +0x30)
+        Address papu_body_record(Address papu)
+        {
+            Address shape = 0, behavior = 0;
+            for (const auto part : list(value<Address>(papu + 24), 128))
+            {
+                if (typed(part, 0x150ee50))
+                    shape = part;
+                else if (typed(part, 0x150c710))
+                    behavior = part;
+            }
+            Address body = 0;
+            for (unsigned off = 8; shape && !body && off + 8 <= 0x98; off += 8)
+                if (const auto p = value<Address>(shape + off); p >= 0x10000 && !(p & 7) && typed(p, 0x181a628))
+                    body = p;
+            if (!body && behavior)
+                if (const auto character = value<Address>(behavior + 0x38); character >= 0x10000 && typed(character, 0x1509a38))
+                    if (const auto p = value<Address>(character + 0x30); p >= 0x10000 && typed(p, 0x181a628))
+                        body = p;
+            const auto holder = body ? value<Address>(body + 0x30) : 0;
+            const auto record = holder >= 0x10000 ? value<Address>(holder) : 0;
+            if (record < 0x10000)
+                return 0;
+            const auto at = record + value<std::int16_t>(record + 0x14);
+            return at >= 0x10000 && !(at & 15) ? at : 0;
+        }
+        // (V1.3.42) his physics' turn as he stands: found and checked against his facing (a turn about his up axis that is his
+        // facing, one way or the other), or left alone
+        void papu_body_start(BossTuning &t, float yaw)
+        {
+            t.body_at = papu_body_record(t.papu), t.body_sign = 0, t.body_written = false, t.body_set = t.body_held = t.body_reset = 0;
+            std::array<float, 8> rec{};
+            if (!t.body_at || !read(t.body_at, rec) || !std::all_of(rec.begin(), rec.end(), [](float f) { return std::isfinite(f); }))
+                return;
+            const float x = rec[4], y = rec[5], z = rec[6], w = rec[7];
+            const float turn = 2 * std::atan2(z, w);
+            if (std::abs(x) < 0.02f && std::abs(y) < 0.02f && std::abs(x * x + y * y + z * z + w * w - 1) < 0.02f)
+            {
+                if (std::abs(wrap_angle(turn - yaw)) < 0.05f)
+                    t.body_sign = 1;
+                else if (std::abs(wrap_angle(-turn - yaw)) < 0.05f)
+                    t.body_sign = -1;
+            }
+            t.body_from = {z, w};
+            if (t.body_told < 2)
+            {
+                ++t.body_told;
+                std::cout << "Boss rule research: his physics keeps his place and turn at 0x" << std::hex << t.body_at << std::dec << ": place (" << rec[0] << ", " << rec[1] << ", "
+                          << rec[2] << "), turn (" << x << ", " << y << ", " << z << ", " << w << "), " << static_cast<int>(std::lround(turn * 57.29578f)) << " degrees against his facing's "
+                          << static_cast<int>(std::lround(yaw * 57.29578f))
+                          << (t.body_sign ? std::string(t.body_sign > 0 ? " (the same way)" : " (the other way)") + ": turned with the aim" : std::string(": not his facing, left alone"))
+                          << "\n" << std::flush;
+            }
+        }
+        // (V1.3.42) his physics' turn set to his aim: what it held as he stood, turned about his up axis by as much as the aim
+        // turned him (d), the way it goes; the log says how often the game left it, or put it back
+        void papu_body_set(BossTuning &t, float d)
+        {
+            if (!t.body_at || !t.body_sign || papu_body_record(t.papu) != t.body_at)
+                return;
+            std::array<float, 2> now{};
+            if (!read(t.body_at + 0x18, now) || !std::isfinite(now[0]) || !std::isfinite(now[1]))
+                return;
+            if (t.body_written)
+                ++(std::abs(now[0] - t.body_wrote[0]) <= 1e-4f && std::abs(now[1] - t.body_wrote[1]) <= 1e-4f ? t.body_held : t.body_reset);
+            const float h = t.body_sign * d / 2;
+            const std::array<float, 2> to{t.body_from[0] * std::cos(h) + t.body_from[1] * std::sin(h), t.body_from[1] * std::cos(h) - t.body_from[0] * std::sin(h)};
+            if (to == now || write(t.body_at + 0x18, to))
+                t.body_set += to != now, t.body_wrote = to, t.body_written = true;
+        }
         // V1.3.37 research, in case the game still turns him back: the places on him holding his facing (as an angle, in radians
         // or degrees) as he stands, and those of the last stand holding the new one too (they follow his facing)
         void papu_yaw_research(BossTuning &t, float yaw)
@@ -8611,6 +8695,8 @@ namespace ingame
                                   << ")" << (spun ? "; his spin started " + std::to_string(std::abs(jump)) + " degrees from his aim" + (std::abs(jump) <= 25 ? " (where he slammed)" : " (a jump)") : std::string())
                                   << (turned ? "; " + std::to_string(turned) + " places that turn with him set (held " + std::to_string(held) + " frames, put back " + std::to_string(reset) + ")" : std::string("; nothing found yet that turns with him"))
                                   << (apart ? "; " + std::to_string(apart) + " out of step with his facing as he stood, left alone" : std::string())
+                                  << (t.body_sign ? "; his physics' turn set " + std::to_string(t.body_set) + " times (held " + std::to_string(t.body_held) + " frames, put back " + std::to_string(t.body_reset) + ")"
+                                                  : std::string(t.body_at ? "; his physics' turn didn't hold his facing, left alone" : "; his physics' turn not found"))
                                   << places.str() << each.str() << (t.aim_trace.empty() ? std::string() : "\n  frame by frame, his facing as the game had it / what was set (degrees from his own): " + t.aim_trace)
                                   << "\n" << std::flush;
                     }
@@ -8654,6 +8740,7 @@ namespace ingame
                 }
                 t.aim_trace.clear(), tracing = t.aim_traces < 2;
                 t.aim_traces += tracing;
+                papu_body_start(t, yaw); // (V1.3.42: his physics' turn)
                 // (the first stands of a visit: what each of them holds, and what they are, from the game's own names)
                 if (t.facing_told < 2)
                 {
@@ -8685,7 +8772,7 @@ namespace ingame
                     // (his facing's places and what turns with him back as the game had them, so they can't be what puts him
                     // back now)
                     if (t.aim_mode == 0)
-                        papu_facing_set(t, yaw, t.aim_from), papu_turn_set(t, 0);
+                        papu_facing_set(t, yaw, t.aim_from), papu_turn_set(t, 0), papu_body_set(t, 0);
                     ++t.aim_mode, t.aim_mode_frames = t.aim_mode_kept = 0, t.aim_modes |= 1u << t.aim_mode;
                 }
             }
@@ -8707,7 +8794,7 @@ namespace ingame
                 return;
             // (nothing set in his places while the watch is on, see papu_who: only the game's own writes are caught)
             if (t.aim_mode == 0 && t.watch_step != 1)
-                papu_facing_set(t, yaw, target), papu_turn_set(t, wrap_angle(target - t.aim_from));
+                papu_facing_set(t, yaw, target), papu_turn_set(t, wrap_angle(target - t.aim_from)), papu_body_set(t, wrap_angle(target - t.aim_from));
             if (std::abs(wrap_angle(target - yaw)) >= 0.0005f && papu_turn_matrix(transform, m, yaw, target))
                 t.aim_yaw = target;
         }
@@ -11460,10 +11547,16 @@ namespace ingame
             }
             if (t.watch_step || !t.watch_due || s != 1 || !t.aim_wrote || w.mode || IsDebuggerPresent())
                 return;
+            // (V1.3.42: his physics' turn when it's found, see papu_body_record: what writes that is where his spin comes from;
+            // else the place V1.3.41 watched)
             Address target = 0;
-            for (const auto part : list(value<Address>(t.papu + 24), 128))
-                if (typed(part, 0x150c710))
-                    target = part + 0xd8;
+            const char *what = "Papu Papu's facing place (his CBehaviorComponent +0xd8)";
+            if (const auto body = papu_body_record(t.papu))
+                target = body + 0x18, what = "Papu Papu's physics turn (its quaternion's z and w)";
+            else
+                for (const auto part : list(value<Address>(t.papu + 24), 128))
+                    if (typed(part, 0x150c710))
+                        target = part + 0xd8;
             if (!target || (target & 7))
             {
                 t.watch_step = 2;
@@ -11475,12 +11568,12 @@ namespace ingame
             w = {};
             w.started = now; // (its mode stays 0: it's not the ice test's, see update_ice_who)
             who_last = value<std::uint64_t>(target);
-            who_what = "Papu Papu's facing place (his CBehaviorComponent +0xd8)", who_every = true;
+            who_what = what, who_every = true;
             who_target = target;
             who_armed = true;
             const auto threads = who_debug_registers(target);
             t.watch_step = 1, t.watch_at = now;
-            std::cout << "Boss rule research: his spin jumped from his aim: a watch on his facing's place (0x" << std::hex << target << std::dec << ") in " << threads
+            std::cout << "Boss rule research: his spin jumped from his aim: a watch on " << what << " (0x" << std::hex << target << std::dec << ") in " << threads
                       << " threads, to see what writes it\n" << std::flush;
         }
         //  contact (research): the floor change is noticed in the game's code at +0x510b70, called every frame from
