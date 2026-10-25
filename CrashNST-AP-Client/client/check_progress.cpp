@@ -15,6 +15,20 @@ namespace
     const LogicLevel catalogue[]{
 #include "check_logic_specs.inc"
     };
+    // (V1.3.46 / Stable V1.3.4) the moves the APWorld's logic now expects past obstacles found since a seed was made
+    // (Ability Shuffle with relaxed Ability Logic: crate walls and tall stacks, bonus rounds like Sunset Vista's Cortex
+    // round and High Time's): added to a seed's own requirements, so the checks behind them don't show as available
+    // before you can reach them (Eric: "if it's something I'm going to get eventually and have to come back, the boxes
+    // shouldn't be green")
+    struct MoveFix
+    {
+        const char *level;
+        const char *event;
+        std::vector<std::int64_t> items;
+    };
+    const MoveFix move_fixes[]{
+#include "move_fix_specs.inc"
+    };
     const LogicLevel *level_logic(const std::string &key)
     {
         const auto found = std::find_if(std::begin(catalogue), std::end(catalogue),
@@ -198,6 +212,14 @@ CheckRules compile_check_rules(const std::map<std::pair<std::string, std::string
         }
     }
     const bool local_rules_valid = result.error.empty();
+    // (V1.3.46) moves logic expects since the seed was made (see move_fixes): only with the basic moves as items and
+    // relaxed Ability Logic (cautious logic already expects them)
+    const auto &shuffle = slot_data["ability_shuffle"], &ability_logic = slot_data["ability_logic"];
+    const bool fix_moves = shuffle.isIntegral() && shuffle.asInt64() > 0 && ability_logic.isIntegral() && ability_logic.asInt64() == 1;
+    std::map<std::pair<std::string, std::string>, const MoveFix *> fixes;
+    if (fix_moves)
+        for (const auto &fix : move_fixes)
+            fixes.emplace(std::make_pair(std::string(fix.level), std::string(fix.event)), &fix);
     for (const auto &[key, id] : checks)
     {
         std::map<std::int64_t, unsigned> required;
@@ -219,6 +241,10 @@ CheckRules compile_check_rules(const std::map<std::pair<std::string, std::string
         }
         else
             known = false;
+        if (known)
+            if (const auto fix = fixes.find(key); fix != fixes.end())
+                for (const auto item : fix->second->items)
+                    required[item] = std::max(required[item], 1u);
         const auto *level = level_logic(key.first);
         result.checks.push_back({key, id, level ? level->title : key.first, std::move(required), known});
         if (!known && result.error.empty())

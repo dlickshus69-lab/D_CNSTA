@@ -626,6 +626,27 @@ std::string BoxMarkers::take_ice_note()
     unlock();
     return note;
 }
+std::string BoxMarkers::take_death_note()
+{
+    std::string note;
+    lock();
+    if (shared_->death_note_id != death_note_seen_)
+    {
+        death_note_seen_ = shared_->death_note_id;
+        shared_->death_note[sizeof(shared_->death_note) - 1] = 0;
+        note = shared_->death_note;
+    }
+    unlock();
+    return note;
+}
+unsigned BoxMarkers::take_death_carries()
+{
+    lock();
+    const unsigned carried = shared_->death_carry - death_carry_seen_;
+    death_carry_seen_ = shared_->death_carry;
+    unlock();
+    return carried;
+}
 void BoxMarkers::request_ice_probe()
 {
     lock();
@@ -686,6 +707,12 @@ void BoxMarkers::aku_lock(bool on)
 {
     lock();
     shared_->aku_lock = on ? 1u : 0u;
+    unlock();
+}
+void BoxMarkers::aku_sanity(bool on)
+{
+    lock();
+    shared_->aku_sanity = on ? 1u : 0u;
     unlock();
 }
 void BoxMarkers::boss_settings(unsigned health, unsigned speed, bool rules, bool bar_grow, bool masks)

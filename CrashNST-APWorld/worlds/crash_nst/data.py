@@ -409,6 +409,13 @@ CLEAR_GATES = {
     # of the three Tawna tokens for the bonus round are past it (Eric's Stable V1.3.1 run)
     "L102": (("Spin",), 1, 13400, True),
 }
+# bonus rounds whose way is blocked part way through (V1.3.46): {(level, bonus stage): (moves, axis 0/1/2 for x/y/z, the
+# coordinate past the obstacle)}. The bonus round's boxes past the obstacle need the moves.
+BONUS_GATES = {
+    # Sunset Vista's Cortex bonus round: right after its five TNT crates a stack of three crates (x -67404) fills the way,
+    # too high to jump over (Eric, with no moves: everything after it showed as available)
+    ("L115", "BonusRound_Cortex"): (("Spin",), 0, -67440),
+}
 # first chamber AFTER each boss's award
 C3_POWER_STAGES = (6, 11, 16, 21)
 # vehicle and riding stages do not use Crash's on-foot powers.
@@ -688,6 +695,11 @@ def move_requirements(level, event, spin_shuffled, jump_only_levels, relaxed=Fal
             spot = CRATE_SPOTS.get((level.key, event))
             if (gate[3] if bonus else spot is not None and spot[gate[1]] > gate[2]):
                 extra = (*extra, *gate[0])
+        if "@bonus:" in event:
+            bonus_gate = BONUS_GATES.get((level.key, event.split("@bonus:", 1)[1]))
+            spot = CRATE_SPOTS.get((level.key, event))
+            if bonus_gate and spot is not None and spot[bonus_gate[1]] > bonus_gate[2]:
+                extra = (*extra, *bonus_gate[0])
         way = tuple(dict.fromkeys((*way, *extra, *CRATE_MOVES.get((level.key, event), ()))))
     if relaxed:
         if event in ("clear", "crystal"):

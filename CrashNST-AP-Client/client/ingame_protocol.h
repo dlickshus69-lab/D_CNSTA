@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 28, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 29, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -187,6 +187,15 @@ namespace ingame
         std::uint64_t stall_accounted = 0;
         // set by the client: Aku Aku Sanity without the Aku Aku item (or /aku_lock on): Aku Aku crates give no mask
         unsigned aku_lock = 0;
+        // (V1.3.46 / Stable V1.3.4) set by the client: Aku Aku Sanity is on in this seed, so the free mask the game gives
+        // after a few deaths in a row stays off, Aku Aku item or not
+        unsigned aku_sanity = 0;
+        // set by the game thread: bumped when a level ends with a DeathLink still waiting because Crash was on a ride (the
+        // client then keeps it for the next level played on foot)
+        unsigned death_carry = 0;
+        // set by the game thread: a console line about a DeathLink (dropped at the end of a level's box count)
+        unsigned death_note_id = 0;
+        char death_note[160]{};
         // /aku_give (research for an Aku Aku filler): the client bumps the request, the game thread makes one mask
         unsigned aku_give_request = 0, aku_give_ack = 0;
         // Crash's colors (research): /crash_probe logs how his model is built (its parts and their names);
@@ -282,7 +291,7 @@ namespace ingame
             return false;
         const auto terminated = [](const auto &text)
         { return std::memchr(text, 0, sizeof(text)) != nullptr; };
-        if (!terminated(s.status) || !terminated(s.binding) || !terminated(s.error) || !terminated(s.goal_counts))
+        if (!terminated(s.status) || !terminated(s.binding) || !terminated(s.error) || !terminated(s.goal_counts) || !terminated(s.death_note))
             return false;
         for (const auto &counts : s.campaign_counts)
             if (!terminated(counts))

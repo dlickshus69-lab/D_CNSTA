@@ -257,6 +257,8 @@ class AkuAkuSanity(Toggle):
     games, like a move you have not unlocked yet. Once you have it, Aku Aku crates work normally.
     Lights Out and Fumbling in the Dark (Crash 1) are pitch dark without his light, so logic expects the
     Aku Aku item for everything in them.
+    The free mask the game gives after a few deaths in a row stays off, Aku Aku item or not: masks come only
+    from Aku Aku crates once you have the item, and from Aku Aku Mask items.
 
     The client uses the game's own "no Aku Aku masks" switch.
     """
@@ -274,8 +276,8 @@ class AbilityLogic(Choice):
     Spin, and gems and relics keep the cautious needs.
     Either way, levels that can't be cleared by jumping alone need their move for everything past the
     obstacle: The Great Gate and Native Fortress need Spin, and Jungle Rollers needs it past its crate wall; Crash Crush,
-    Bee-Having and Piston It Away need Slide; Sewer or Later needs Spin and Crouch Jump; The Eel Deal's bonus round needs
-    Spin and High Time's needs Crouch Jump. Some crates need a move of their own: arrow crates, crates on a TNT or
+    Bee-Having and Piston It Away need Slide; Sewer or Later needs Spin and Crouch Jump; The Eel Deal's bonus round and
+    Sunset Vista's Cortex bonus round need Spin and High Time's needs Crouch Jump. Some crates need a move of their own: arrow crates, crates on a TNT or
     Nitro, crates in stacks three high and crates right under an iron-bound crate need Spin; iron-bound crates and
     Turtle Woods' underground room need Body Slam. Gimmick stages keep vanilla controls, so they need no moves.
     Gimmick stages need no moves either way.

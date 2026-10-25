@@ -15,10 +15,12 @@ using save_probe::level_key;
 // so a DeathLink received there waits until the player is on foot again. (V1.3.43) The Crash 2 jet-board levels (Hang
 // Eight, Air Crash, Plant Food) mix board parts with parts on foot, so they aren't on this list any more: a DeathLink
 // there goes to the game, which strikes once Crash is on foot (MondoF's was held as "on a ride" while he walked in Plant
-// Food)
+// Food). (V1.3.46 / Stable V1.3.4) Un-Bearable (L215) too: Crash runs from the giant polar bear on foot there (Guicho's
+// were held as "on a ride" then); on the bear the game waits, and if the level ends with one still waiting it hands it
+// back (death_carry) for the next level played on foot
 static bool ridden_level(const std::string &key)
 {
-    static const char *const levels[]{"L107", "L114", "L208", "L213", "L215", "L222", "L224", "L226", "L302", "L303",
+    static const char *const levels[]{"L107", "L114", "L208", "L213", "L222", "L224", "L226", "L302", "L303",
                                       "L305", "L308", "L310", "L312", "L314", "L317", "L318", "L322", "L324", "L326",
                                       "L328", "L330", "L331", "L332"};
     return std::find(std::begin(levels), std::end(levels), key) != std::end(levels);
@@ -253,6 +255,18 @@ void ClientRuntime::update_zone(ClientTick &tick)
         print_console(ride    ? "DeathLink received while you're on a ride. It gets you once you're on foot again."
                       : apply ? "DeathLink received."
                               : "DeathLink ignored outside an active level.");
+    }
+    if (box_markers)
+    {
+        // (V1.3.46) what the game thread did with a DeathLink: dropped at the end of a level's box count, or handed back
+        // because the level ended while it waited for Crash to get off a ride (it then waits for the next level on foot)
+        if (const auto note = box_markers->take_death_note(); !note.empty())
+            print_console(note);
+        if (box_markers->take_death_carries())
+        {
+            deathlink_held = true;
+            print_console("The level ended while you were on a ride. The DeathLink gets you in the next level you play on foot.");
+        }
     }
     // a DeathLink held from a ride: it strikes in the next level played on foot (once, however many came in)
     if (deathlink_held && box_markers && tick.online && tick.room_ready && session.slot_data()["death_link"].asBool() &&
