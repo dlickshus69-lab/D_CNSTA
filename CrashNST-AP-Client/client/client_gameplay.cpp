@@ -240,7 +240,8 @@ void ClientRuntime::update_zone(ClientTick &tick)
     tick.c1_active = scene_ready && active_zone.hub == 1;
     tick.c2_active = scene_ready && active_zone.hub == 2;
     tick.c3_active = scene_ready && active_zone.hub == 3;
-    if (box_markers && tick.online && AP_DeathLinkPending())
+    // (V1.3.45) DeathLinks arrive as bounces now (the shared death count): several at once still strike once
+    if (box_markers && tick.online && deathlinks_pending.exchange(0))
     {
         const bool apply =
             tick.room_ready && session.slot_data()["death_link"].asBool() && death_link_level(active_zone);
@@ -249,7 +250,6 @@ void ClientRuntime::update_zone(ClientTick &tick)
             deathlink_held = true;
         else if (apply)
             box_markers->receive_death();
-        AP_DeathLinkClear();
         print_console(ride    ? "DeathLink received while you're on a ride. It gets you once you're on foot again."
                       : apply ? "DeathLink received."
                               : "DeathLink ignored outside an active level.");

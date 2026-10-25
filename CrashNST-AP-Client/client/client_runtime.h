@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <random>
 #include "Archipelago.h"
 #include "cloud_saves.h"
@@ -20,6 +21,25 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <cmath>
+#include <cstdio>
+
+// (V1.3.45) a death in the shared death count: "time|player", the time as its DeathLink gave it (whole seconds, or
+// seconds with 6 decimals), so every client writes the same entry for the same death; empty when it can't be keyed
+inline std::string death_entry_key(const Json::Value &time, const std::string &player)
+{
+    if (player.empty() || !time.isNumeric())
+        return {};
+    const double t = time.asDouble();
+    if (!std::isfinite(t) || t < 0)
+        return {};
+    char text[64];
+    if (time.isIntegral() || t == std::floor(t))
+        std::snprintf(text, sizeof(text), "%lld", static_cast<long long>(t));
+    else
+        std::snprintf(text, sizeof(text), "%.6f", t);
+    return std::string(text) + "|" + player;
+}
 
 struct ClientTick
 {
@@ -62,6 +82,19 @@ class ClientRuntime
     std::deque<std::string> console_notifications;
     // who sent each DeathLink received (filled by the AP thread), counted on the next update
     std::deque<std::string> deaths_seen;
+    // (V1.3.45) the shared death count. DeathLinks come in as raw bounces, so each death is known by its time and its
+    // player: "time|player" entries in the room's DataStorage (CrashNST:deaths:team<N>), written by every client that
+    // sees the death (the same entry from several clients is one), read back by all of them, so every client counts
+    // the same deaths, also the ones while it was offline. The AP thread fills these two:
+    std::deque<std::string> death_entries_out; // entries to add to the room's list
+    std::atomic<unsigned> deathlinks_pending{0}; // DeathLinks from others, waiting to strike (several at once strike once)
+    Json::Value shared_deaths = Json::Value(Json::objectValue), shared_death_bases = Json::Value(Json::objectValue);
+    bool shared_deaths_ready = false, shared_death_bases_ready = false, shared_death_base_sent = false;
+    std::string shared_deaths_key, shared_death_bases_key;
+    void connect_shared_deaths(int team);
+    void receive_shared_deaths(const Json::Value &message);
+    void send_shared_deaths();
+    void send_deathlink();
     // DeathLink deaths per player for this seed (yours and everyone's), saved in the state folder
     std::map<std::string, unsigned> death_tally;
     std::string death_tally_seed;

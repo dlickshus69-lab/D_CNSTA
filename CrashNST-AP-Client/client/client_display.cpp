@@ -104,6 +104,7 @@ void ClientRuntime::update_bridge(AP_ConnectionStatus status)
     {
         for (const auto &player : deaths)
             count_death(player);
+        send_shared_deaths();
         update_death_tally();
     }
     catch (const std::exception &error)
@@ -343,8 +344,16 @@ void ClientRuntime::update_display(ClientTick &tick)
             {
                 if (death_link && tick.online)
                 {
-                    AP_DeathLinkSend();
+                    send_deathlink();
                     print_console("DeathLink sent.");
+                }
+                else
+                {
+                    // the shared death count has your deaths without DeathLink too
+                    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                    std::lock_guard<std::mutex> lock(state_mutex);
+                    if (const auto key = death_entry_key(Json::Value(static_cast<double>(now) / 1000.0), slot); !key.empty())
+                        death_entries_out.push_back(key);
                 }
                 // the death counter counts your deaths with or without DeathLink
                 try
@@ -366,6 +375,121 @@ void ClientRuntime::update_display(ClientTick &tick)
         box_markers->configure({}, false);
         box_markers->collectibles({});
         box_markers->message(gameplay_state);
+    }
+}
+
+// (V1.3.45) a DeathLink of our own, as a bounce we make (APCpp's own leaves its time unknown): its time in seconds with
+// milliseconds, so two deaths in one second are two; its entry goes into the shared death count too
+void ClientRuntime::send_deathlink()
+{
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    Json::Value data;
+    data["time"] = static_cast<double>(now) / 1000.0;
+    data["source"] = slot;
+    std::vector<std::string> tags{"DeathLink"};
+    AP_Bounce bounce;
+    bounce.tags = &tags;
+    bounce.data = Json::FastWriter().write(data);
+    AP_SendBounce(bounce);
+    std::lock_guard<std::mutex> lock(state_mutex);
+    if (const auto key = death_entry_key(data["time"], slot); !key.empty())
+        death_entries_out.push_back(key);
+}
+
+void ClientRuntime::connect_shared_deaths(int team)
+{
+    shared_deaths_key = "CrashNST:deaths:team" + std::to_string(team);
+    shared_death_bases_key = "CrashNST:death_counts:team" + std::to_string(team);
+    shared_deaths_ready = shared_death_bases_ready = false;
+    shared_death_base_sent = false;
+    shared_deaths = Json::Value(Json::objectValue);
+    shared_death_bases = Json::Value(Json::objectValue);
+    AP_SetNotify({{shared_deaths_key, AP_DataType::Raw}, {shared_death_bases_key, AP_DataType::Raw}});
+    // a "default" write answers with what's there now
+    for (const auto *key : {&shared_deaths_key, &shared_death_bases_key})
+    {
+        std::string empty = "{}", fallback = "{}";
+        AP_SetServerDataRequest request;
+        request.key = *key;
+        request.type = AP_DataType::Raw;
+        request.want_reply = true;
+        request.default_value = &fallback;
+        request.operations = {{"default", &empty}};
+        AP_SetServerData(&request);
+    }
+}
+
+void ClientRuntime::receive_shared_deaths(const Json::Value &message)
+{
+    const auto &key = message["key"];
+    const auto &value = message["value"];
+    if (!key.isString() || !value.isObject())
+        return;
+    if (key.asString() == shared_deaths_key)
+    {
+        shared_deaths = value;
+        shared_deaths_ready = true;
+    }
+    else if (key.asString() == shared_death_bases_key)
+    {
+        shared_death_bases = value;
+        shared_death_bases_ready = true;
+    }
+}
+
+// the entries waiting go to the room's list in one write; and once per seed this client's count from before the shared
+// count (it counted only what it saw) goes along with when it was made, so the count carries on from there
+void ClientRuntime::send_shared_deaths()
+{
+    // both of the room's lists first: the counts from before must not go in twice
+    if (!shared_deaths_ready || !shared_death_bases_ready || shared_deaths_key.empty() || !session.ready() ||
+        AP_GetConnectionStatus() != AP_ConnectionStatus::Authenticated)
+        return;
+    std::deque<std::string> entries;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex);
+        entries.swap(death_entries_out);
+    }
+    if (!entries.empty())
+    {
+        Json::Value add(Json::objectValue);
+        for (const auto &entry : entries)
+            add[entry] = 1;
+        std::string update = Json::FastWriter().write(add), fallback = "{}";
+        AP_SetServerDataRequest request;
+        request.key = shared_deaths_key;
+        request.type = AP_DataType::Raw;
+        request.want_reply = true;
+        request.default_value = &fallback;
+        request.operations = {{"update", &update}};
+        AP_SetServerData(&request);
+        for (const auto &entry : entries)
+            shared_deaths[entry] = 1;
+    }
+    if (!shared_death_base_sent)
+    {
+        shared_death_base_sent = true;
+        update_death_tally(); // the local count of this seed, loaded
+        if (!death_tally.empty() && !shared_death_bases.isMember(slot))
+        {
+            Json::Value mine;
+            mine["at"] = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                 std::chrono::system_clock::now().time_since_epoch()).count()) / 1000.0;
+            for (const auto &[name, count] : death_tally)
+                mine["counts"][name] = count;
+            Json::Value add(Json::objectValue);
+            add[slot] = mine;
+            std::string update = Json::FastWriter().write(add), fallback = "{}";
+            AP_SetServerDataRequest request;
+            request.key = shared_death_bases_key;
+            request.type = AP_DataType::Raw;
+            request.want_reply = true;
+            request.default_value = &fallback;
+            request.operations = {{"update", &update}};
+            AP_SetServerData(&request);
+            shared_death_bases[slot] = mine;
+            std::cout << "Death count: shared with the room from now on (this client's count so far goes along).\n" << std::flush;
+        }
     }
 }
 
@@ -431,13 +555,48 @@ void ClientRuntime::update_death_tally()
     // die), most first
     std::vector<std::string> lines;
     {
-        std::map<std::string, unsigned> shown = death_tally;
+        // (V1.3.45) the room's shared count once it's known: per player, the deaths in the room's list, or what a client
+        // counted before the shared count started plus the list's deaths since, whichever is more
+        std::map<std::string, unsigned> counted = death_tally;
+        if (shared_deaths_ready && shared_death_bases_ready)
+        {
+            std::map<std::string, std::vector<double>> times;
+            for (const auto &entry : shared_deaths.getMemberNames())
+                if (const auto bar = entry.find('|'); bar != std::string::npos && bar + 1 < entry.size())
+                    times[entry.substr(bar + 1)].push_back(std::atof(entry.substr(0, bar).c_str()));
+            counted.clear();
+            for (const auto &[name, list] : times)
+                counted[name] = static_cast<unsigned>(list.size());
+            for (const auto &client : shared_death_bases.getMemberNames())
+            {
+                const auto &base = shared_death_bases[client];
+                if (!base.isObject() || !base["at"].isNumeric() || !base["counts"].isObject())
+                    continue;
+                const double at = base["at"].asDouble();
+                for (const auto &name : base["counts"].getMemberNames())
+                {
+                    if (!base["counts"][name].isUInt())
+                        continue;
+                    unsigned since = 0;
+                    for (const auto t : times[name])
+                        since += t > at;
+                    counted[name] = std::max(counted[name], base["counts"][name].asUInt() + since);
+                }
+            }
+        }
+        // without DeathLink the count is your own deaths, as before
+        if (!session.slot_data()["death_link"].asBool())
+        {
+            const auto mine = counted.count(slot) ? counted[slot] : 0u;
+            counted = {{slot, mine}};
+        }
+        std::map<std::string, unsigned> shown = counted;
         shown.emplace(slot, 0);
         for (const auto &[number, name] : player_aliases)
             if (!name.empty())
                 shown.emplace(name, 0);
         unsigned total = 0;
-        for (const auto &[name, count] : death_tally)
+        for (const auto &[name, count] : counted)
             total += count;
         std::vector<std::pair<std::string, unsigned>> players(shown.begin(), shown.end());
         std::stable_sort(players.begin(), players.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
