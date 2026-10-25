@@ -181,8 +181,9 @@ namespace ingame
         // the speeds between are even steps of his animation's pace (game_runtime.cpp, papu_stand_clock)
         unsigned boss_slam_ms = 450;
         // (V1.3.58 test, /boss_window) with the boss rules on: how long Papu Papu can be hit once his red ends, in ms, before
-        // he's red again until the slam after his next spin
-        unsigned boss_window_ms = 5000;
+        // he's red again until the slam after his next spin. V1.3.59: his time at 200% boss speed (Eric: 2 s), longer by the
+        // same pace at lower speeds (game_runtime.cpp, papu_window)
+        unsigned boss_window_ms = 2000;
         // (V1.3.25 test, /bar_try) 0 off (the blue, HealthBar, stretched to a bigger bar's length), 1 none (not stretched,
         // to compare), 3 BarParent's sideways scale times bar_try_factor (0: the bar's growth), kept until off
         unsigned bar_try_target = 0;

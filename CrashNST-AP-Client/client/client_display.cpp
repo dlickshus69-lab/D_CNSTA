@@ -322,7 +322,7 @@ void ClientRuntime::update_display(ClientTick &tick)
             if (boss_rules_test >= 0)
                 rules = boss_rules_test == 1;
             box_markers->boss_settings(health, speed, rules, boss_bar_grow, masks, boss_slam_test >= 0 ? static_cast<unsigned>(boss_slam_test) : 450u,
-                                       boss_window_test >= 0 ? static_cast<unsigned>(boss_window_test) : 5000u);
+                                       boss_window_test >= 0 ? static_cast<unsigned>(boss_window_test) : 2000u);
         }
         auto collectible_checked = tick.checked;
         collectible_checked.insert(pending.begin(), pending.end());

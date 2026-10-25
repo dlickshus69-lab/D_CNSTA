@@ -5549,9 +5549,22 @@ namespace ingame
             std::uint64_t slam_wait_since = 0, start_timer_at = 0;
             // V1.3.58 (see papu_window): once his red ends, how long he can be hit (ms, /boss_window), until when, whether
             // that's on, and a red begun in his spin waits for the next one's end (red_skip_spin)
-            unsigned window_ms = 5000, window_lines = 0;
+            unsigned window_ms = 2000, window_lines = 0, window_percent = 200;
             std::uint64_t window_until = 0;
             bool window_on = false, red_skip_spin = false;
+            // V1.3.59 (Eric's V1.3.58 run: after some hits the game's immunity timer didn't run, so his red ended as his next
+            // spin started and he could be hit at the slam after it): red after a hit is ours too, until the slam after his
+            // next spin (hit_red); once the game's immunity of that hit is over before then (or its timer doesn't count
+            // down as he gets up), red is held by us as at the fight's start (hit_hold: his health script's list emptied,
+            // his can-be-hit flag held clear). And whether the game's immunity timer counts down now (it's only run again,
+            // or cut, while it does: the run's timer wasn't run again after a write into one that had ended, nor after a
+            // cut that set it below 0), and its numbers as they were before a run again (put back if it doesn't count down)
+            bool hit_red = false, hit_hold = false;
+            std::uint64_t hit_red_at = 0, timer_tick_at = 0;
+            Address timer_seen = 0;
+            float timer_seen50 = 0, timer_kept48 = 0, timer_kept50 = 0;
+            bool timer_ticking = false, timer_kept = false;
+            unsigned hit_hold_lines = 0;
             unsigned slams_seen = 0;
             float start_timer_set = 0;
             // V1.3.29 (see bar_count): the bar's own count of notches left (two copies), found at the fight's start and
@@ -5829,6 +5842,9 @@ namespace ingame
             float sc_wrote = 0, sc_extra = 0, sc_lead = 0;
             bool sc_written = false;
             unsigned sc_frames = 0, sc_held = 0, sc_back = 0, sc_told = 0;
+            // V1.3.59 (see papu_stand_clock): the tries in this stand, the next one when, and the failed tries told about
+            unsigned sc_tries = 0, sc_fail_told = 0;
+            std::uint64_t sc_retry_at = 0;
             // V1.3.57 (Eric: "find the right scale for each speed"; 200% at 0.45 s to try, 0.5 if that's too fast): the boss
             // speed and the slam time at 200% (ms, /boss_slam), his stand clock's time at his slam as the game plays it (the
             // least seen, 0 until one is), and when this stand's slam was meant to come
@@ -9277,7 +9293,8 @@ namespace ingame
                 }
             }
             else if (!immune && t.immune_flag && t.timer_lines < 60)
-                ++t.timer_lines, std::cout << "Boss rule: his immunity is over (his can-be-hit flag is back), " << seconds(now - t.immune_since) << " after it started (state " << s
+                ++t.timer_lines, std::cout << "Boss rule: " << (t.flag_held ? "his can-be-hit flag is held by us from here, " : "his immunity is over (his can-be-hit flag is back), ")
+                                           << seconds(now - t.immune_since) << " after it started (state " << s
                                            << (t.cut_done ? ", " + seconds(now - t.cut_at) + " after the cut" : std::string()) << ")\n" << std::flush;
             if (immune && t.timer_start_at && !t.timer_sampled && now - t.timer_start_at >= 300)
             {
@@ -9332,15 +9349,17 @@ namespace ingame
             const auto timer = papu_timer(t);
             if (!timer)
                 line << "its timer isn't there (it runs to its end)", t.cut_checked = true;
+            else if (!t.timer_ticking)
+                // (V1.3.59: nothing written into a timer that doesn't count down: V1.3.58's run, after the cut that set one
+                // below 0 (V1.3.33) the game's next hit didn't run it)
+                line << "its timer doesn't count down (left as the game has it)", t.cut_checked = true;
             else if (!t.timer_down.empty() || t.timer_up.empty())
             {
-                // (V1.3.31's log: its countdown is +0x50. V1.3.33: one run again at the fight's start that doesn't count down
-                // is put below 0, as it wouldn't run out by itself)
+                // (V1.3.31's log: its countdown is +0x50)
                 const auto down = t.timer_down.empty() ? std::vector<unsigned>{0x50} : t.timer_down;
-                const bool still = t.start_timer && t.start_timer_checked && !t.start_timer_ticks;
                 for (const auto off : down)
-                    write(timer + off, still ? -1.0f : 0.02f);
-                line << "its timer's countdown (" << offsets_text(down) << ") set to its end" << (still ? " (below 0: it doesn't count down)" : "");
+                    write(timer + off, 0.02f);
+                line << "its timer's countdown (" << offsets_text(down) << ") set to its end";
             }
             else if (!t.timer_up.empty() && t.timer_length > 0)
             {
@@ -9358,21 +9377,29 @@ namespace ingame
         // Before that (V1.3.33: a landing then was a hit for the game, taken back, with his flinch) his health script's list
         // of the attacks that hurt him is emptied for that red instead (V1.3.34, see papu_list_block)
         // V1.3.58: and again (why) once his time to be hit is over, see papu_window
+        // V1.3.59: his immunity's timer run again only while it counts down (the game's immunity of a hit still on, as the
+        // fight starts over after Crash died); one that had ended is left as the game has it (writing into it didn't run it,
+        // and the game's next hit then didn't either), and his health script's list is emptied instead (see papu_rule)
         void papu_start_red(BossTuning &t, std::uint64_t now, const char *why = nullptr)
         {
             t.start_red = true, t.red_spun = false, t.slam_wait = false, t.start_timer = false, t.start_timer_ticks = false, t.window_on = false;
+            t.hit_red = t.hit_hold = false;
             std::ostringstream line;
             if (why)
                 line << "Boss rule: " << why << "; he's red again until the slam after his next spin";
             else
                 line << "Boss rule: the fight starts; he's red until the slam after his first spin";
-            if (const auto timer = papu_timer(t))
+            const auto timer = papu_timer(t);
+            if (timer && t.timer_ticking)
             {
                 const float length = papu_red_time(t);
+                t.timer_kept48 = value<float>(timer + 0x48), t.timer_kept50 = value<float>(timer + 0x50), t.timer_kept = true;
                 write(timer + 0x48, length), write(timer + 0x50, length);
                 t.start_timer = true, t.start_timer_at = now, t.start_timer_set = length, t.start_timer_checked = false;
                 line << "; his immunity's timer runs again for " << length << " s";
             }
+            else if (timer)
+                line << " (his immunity is over and its timer is left as the game has it: his health script's list is emptied instead)";
             else
                 line << " (his immunity's timer isn't made yet, at his first hit: V1.3.34 empties his health script's list instead)";
             std::cout << line.str() << "\n" << std::flush;
@@ -9384,23 +9411,28 @@ namespace ingame
         {
             if (t.cut_lines < 40)
                 ++t.cut_lines, std::cout << "Boss rule: his red ends: " << why << " (" << seconds(now - t.slam_wait_since) << " after his spin)\n" << std::flush;
-            t.slam_wait = false, t.start_red = false;
-            if (immune || t.start_timer)
+            t.slam_wait = false, t.start_red = false, t.hit_red = t.hit_hold = false;
+            // (V1.3.59: also a timer of his that counts down under red held by us; papu_cut writes only into one that does)
+            if (immune || t.start_timer || t.timer_ticking)
                 papu_cut(t, now);
             t.start_timer = false;
             // (V1.3.58: he can be hit for a while now, see papu_window)
             t.window_on = true, t.window_until = now + t.window_ms, t.red_skip_spin = false;
             if (t.window_lines < 40)
-                ++t.window_lines, std::cout << "Boss rule: he can be hit for " << seconds(t.window_ms) << ", then he's red again\n" << std::flush;
+                ++t.window_lines, std::cout << "Boss rule: he can be hit for " << seconds(t.window_ms) << " (at " << t.window_percent << "%), then he's red again\n" << std::flush;
         }
         // V1.3.58 (Eric: "after his first spin, he's vulnerable maybe for like 5 seconds, and then he's ... red, and then you have
         // to wait for the other spin cycle"; 5 s to start, less if that's too long): with the boss rules on, once his red ends
         // he can be hit for /boss_window's time (5 s), then he's red again as at the fight's start (see papu_start_red), until
         // the slam after his next spin (a spin he's in then doesn't count: red_skip_spin). A hit in that time starts the game's
         // own immunity as always; the fight starting over, or the rule off, ends it
+        // V1.3.59 (Eric: "the two second is good for 200% speed ... scale it based on the speed"): /boss_window's time (2 s)
+        // is his time at 200%, and it's longer by the same pace at lower speeds: 2.3 s at 175%, 2.7 s at 150%, 3.2 s at 125%,
+        // 4 s at 100%
         void papu_window(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
-            t.window_ms = std::clamp(state.boss_window_ms, 1000u, 15000u);
+            t.window_percent = std::clamp(state.boss_speed, 100u, 200u);
+            t.window_ms = std::clamp(state.boss_window_ms, 500u, 10000u) * 200u / t.window_percent;
             if (!t.window_on)
                 return;
             if (!state.boss_rules || t.start_red || s == 3 || s == 4 || s == 5 || s == 6)
@@ -9416,6 +9448,15 @@ namespace ingame
             papu_start_red(t, now, "his time to be hit is over");
             t.red_skip_spin = spinning;
         }
+        // V1.3.59 (see hit_red): his red after a hit held by us from here (his health script's list emptied and his can-be-hit
+        // flag held clear, see papu_rule), until the slam after his next spin
+        void papu_hit_hold(BossTuning &t, std::uint64_t now, const char *why)
+        {
+            t.hit_hold = true;
+            if (t.hit_hold_lines < 40)
+                ++t.hit_hold_lines, std::cout << "Boss rule: " << why << " (" << seconds(now - t.hit_red_at) << " after his hit): his red goes on, held by us until the slam after his "
+                                              << (t.red_spun ? "spin" : "next spin") << "\n" << std::flush;
+        }
         void papu_who(BossTuning &t, int s, std::uint64_t now);         // (V1.3.41, below the write watch it uses)
         void papu_stand_clock(BossTuning &t, int s, std::uint64_t now); // (V1.3.56, the same)
         void papu_who_off(BossTuning &t, const char *why);
@@ -9430,6 +9471,19 @@ namespace ingame
             // (V1.3.34: not while we hold it clear ourselves, see papu_list_block)
             const bool immune = (value<std::uint32_t>(t.papu + 0x7c) & 0x8) == 0 && !t.flag_held;
             papu_lists(t);
+            // (V1.3.59) whether his immunity's timer counts down now: its time left (+0x50) gone down in the last 0.15 s
+            if (const auto timer = papu_timer(t))
+            {
+                const float left = value<float>(timer + 0x50);
+                if (timer != t.timer_seen)
+                    t.timer_tick_at = 0;
+                else if (std::isfinite(left) && left < t.timer_seen50 - 0.0005f)
+                    t.timer_tick_at = now;
+                t.timer_seen = timer, t.timer_seen50 = left;
+                t.timer_ticking = t.timer_tick_at && now - t.timer_tick_at < 150 && std::isfinite(left) && left > 0.02f;
+            }
+            else
+                t.timer_seen = 0, t.timer_tick_at = 0, t.timer_ticking = false;
             probe_state_at = t.papu_ai + t.state_at;
             probe_timer_at = t.hh && t.hh_timer_at && typed(t.hh, 0x13bbbd0) ? t.hh + t.hh_timer_at : 0;
             probe_damage_at = t.health_part && typed(t.health_part, 0x14da2c0) ? t.health_part + 0x310 : 0;
@@ -9506,7 +9560,12 @@ namespace ingame
                     t.blocked_told = now, t.blocked_seen = boss_blocked.load();
                 }
                 else if (s == 3 || s == 4)
+                {
                     t.valid_hit_at = now; // (a hit that counts)
+                    // V1.3.59: red after it is ours too, until the slam after his next spin (see hit_red)
+                    if (state.boss_rules && s == 3 && !t.was_red)
+                        t.hit_red = true, t.hit_hold = false, t.hit_red_at = now, t.red_spun = false, t.slam_wait = false, t.red_skip_spin = false;
+                }
                 // (V1.3.30) any hit the game takes starts its immunity, as long as it's set for that hit
                 if (s == 3 || s == 4)
                 {
@@ -9522,12 +9581,16 @@ namespace ingame
                     papu_start_red(t, now);
                 // V1.3.32: his first spin since he turned red is over: red ends with the slam after it (see papu_red_end)
                 // (V1.3.58: a spin he was in as he turned red again doesn't count, see papu_window)
-                if (t.state == 2 && s == 1 && (immune || t.start_red) && state.boss_rules && !t.red_spun && t.red_skip_spin)
+                // (V1.3.59: and red after a hit, ours too)
+                if (t.state == 2 && s == 1 && (immune || t.start_red || t.hit_red) && state.boss_rules && !t.red_spun && t.red_skip_spin)
                     t.red_skip_spin = false;
-                else if (t.state == 2 && s == 1 && (immune || t.start_red) && state.boss_rules && !t.red_spun)
+                else if (t.state == 2 && s == 1 && (immune || t.start_red || t.hit_red) && state.boss_rules && !t.red_spun)
                     t.red_spun = true, t.slam_wait = true, t.slam_wait_since = now, t.slams_seen = papu_slams.load();
                 else if (t.state == 1 && s == 2 && t.slam_wait)
                     papu_red_end(t, immune, now, "his next spin started before a slam");
+                // V1.3.59: up after a hit while the game's immunity timer of it doesn't count down: red held by us from here
+                if (t.state == 3 && s == 1 && t.hit_red && !t.hit_hold && !t.timer_ticking && state.boss_rules)
+                    papu_hit_hold(t, now, "he's up, and the game's immunity timer of his hit doesn't count down");
                 // research: what in his health part changed since the last state began
                 if (!t.health_part || !typed(t.health_part, 0x14da2c0))
                 {
@@ -9615,6 +9678,8 @@ namespace ingame
                 t.immune_until = 0; // the fight starts over (Crash died)
             if (s != 3)
                 t.forbidden = false;
+            if (s == 6 || !state.boss_rules)
+                t.hit_red = t.hit_hold = false; // (V1.3.59: the fight over, or the rule off)
             // V1.3.35: his moves timed, what plays them looked for, his slam at the speed (see papu_cycle, papu_clocks and
             // papu_slam_rate), his spin speed looked for a little into each spin (research, see papu_spin_search); and when the
             // fight starts over from his throne, what was found in his parts is looked for again
@@ -9643,14 +9708,26 @@ namespace ingame
             else if (t.slam_wait && now - t.slam_wait_since >= 2500)
                 papu_red_end(t, immune, now, "no slam 2.5 s after his spin");
             papu_window(t, state, s, now); // (V1.3.58)
+            // V1.3.59: the game's immunity of his hit over before his red is (his can-be-hit flag is the game's and back): red
+            // held by us from here (see hit_red)
+            if (t.hit_red && !t.hit_hold && (s == 1 || s == 2) && !immune && state.boss_rules)
+                papu_hit_hold(t, now, "the game's immunity of his hit is over before his red");
             if (t.start_timer && !t.start_timer_checked && now - t.start_timer_at >= 300)
             {
                 t.start_timer_checked = true;
                 const auto timer = papu_timer(t);
                 const float left = timer ? value<float>(timer + 0x50) : 0.0f;
                 t.start_timer_ticks = timer && std::isfinite(left) && left > 0 && left < t.start_timer_set - 0.15f;
-                std::cout << "Boss rule: his immunity's timer " << (t.start_timer_ticks ? "runs again" : "doesn't count down (it had ended): red goes on without it")
-                          << " (" << left << " of " << t.start_timer_set << " s left " << seconds(now - t.start_timer_at) << " in)\n" << std::flush;
+                // (V1.3.59: one that doesn't count down is put back as the game had it, and his red is held by us instead)
+                const bool put_back = !t.start_timer_ticks && timer && t.timer_kept;
+                if (put_back)
+                    write(timer + 0x48, t.timer_kept48), write(timer + 0x50, t.timer_kept50);
+                if (!t.start_timer_ticks)
+                    t.start_timer = false;
+                t.timer_kept = false;
+                std::cout << "Boss rule: his immunity's timer " << (t.start_timer_ticks ? "runs again" : "doesn't count down: red goes on without it") << " (" << left << " of "
+                          << t.start_timer_set << " s left " << seconds(now - t.start_timer_at) << " in)" << (put_back ? "; its numbers put back as the game had them" : "") << "\n"
+                          << std::flush;
             }
             // V1.3.34: red without the game's immunity (no timer yet, or one that didn't run again): his health script's list
             // emptied and his can-be-hit flag held clear for as long as that red lasts (see papu_list_block); back as red ends,
@@ -9659,18 +9736,24 @@ namespace ingame
                 const auto timer = papu_timer(t);
                 // (a timer run again at the fight's start is checked 300 ms in: until then the block stays as it is)
                 const bool pending = t.start_timer && !t.start_timer_checked;
-                const bool no_immunity = !timer || (t.start_timer && t.start_timer_checked && !t.start_timer_ticks);
+                // (V1.3.59: his timer not run again, see papu_start_red)
+                const bool no_immunity = !timer || !t.start_timer || (t.start_timer_checked && !t.start_timer_ticks);
                 // (a hit the game took anyway: his flinch, or a timer the game made at it while the block was on)
                 const bool came_hit = s == 3 || s == 4 || (timer && list_block_now.list && !t.block_had_timer);
-                const bool want = state.boss_rules && t.lists_done && t.start_red && no_immunity && !came_hit && s != 6;
+                // (V1.3.59: and red after a hit, once it's held by us, see hit_red)
+                const bool hit_want = t.hit_red && t.hit_hold && (s == 1 || s == 2);
+                const bool want = state.boss_rules && t.lists_done && ((t.start_red && no_immunity) || hit_want) && !came_hit && s != 6;
                 if (!pending && want != (list_block_now.list != 0))
                 {
                     if (want)
-                        papu_list_block(t, true, now, !timer ? "no timer of his yet: his first fight in this visit" : "his timer didn't run again");
+                        papu_list_block(t, true, now, hit_want && !t.start_red ? "after his hit, the game's immunity is over before his red"
+                                                      : !timer                 ? "no timer of his yet: his first fight in this visit"
+                                                                               : "his timer isn't running");
                     else
                         papu_list_block(t, false, now, came_hit ? "a hit came anyway (the game's own immunity runs now)" : !state.boss_rules ? "the red rule is off"
                                                                                                                          : s == 6 ? "the fight starts over from his throne"
-                                                                                                                         : !t.start_red ? "his red is over" : "his timer runs again");
+                                                                                                                         : !t.start_red && !t.hit_red ? "his red is over"
+                                                                                                                                                      : "his timer runs again");
                 }
                 if (list_block_now.list && typed(t.papu, 0x1592220))
                 {
@@ -9697,7 +9780,8 @@ namespace ingame
             // V1.3.30: for as long as the game's immunity of that hit lasts. V1.3.31: as the game has it, his can-be-hit flag
             // (see papu_immune_watch), which papu_cut ends with his first spin after the hit (Eric: "once the cycle is
             // done"): he can't be hit whenever he's red, and can be as soon as he isn't
-            const bool red = state.boss_rules && (((immune || t.start_red) && (s == 1 || s == 2)) || (t.start_red && s == 5) || (t.forbidden && s == 3));
+            // (V1.3.59: and after a hit until the slam after his next spin, also once the game's immunity of it is over, see hit_red)
+            const bool red = state.boss_rules && (((immune || t.start_red || t.hit_red) && (s == 1 || s == 2)) || (t.start_red && s == 5) || (t.forbidden && s == 3));
             // (red's end, to see how it fits his spin: the state then, and how long he's been in it)
             if (t.red && !red && t.red_lines < 80)
                 ++t.red_lines, std::cout << "Boss rule: he's not red any more, " << (t.game_hit_at ? seconds(now - t.game_hit_at) : std::string("?")) << " after his hit ("
@@ -12248,7 +12332,7 @@ namespace ingame
                 return;
             if (t.sc_stand != t.stand_seen)
                 t.sc_stand = t.stand_seen, t.sc_step = 0, t.sc_cands.clear(), t.sc_clocks.clear(), t.sc_from.clear(), t.sc_written = false,
-                t.sc_frames = t.sc_held = t.sc_back = 0, t.sc_extra = 0, t.sc_target = 0;
+                t.sc_frames = t.sc_held = t.sc_back = 0, t.sc_extra = 0, t.sc_target = 0, t.sc_tries = 0, t.sc_retry_at = 0;
             const bool slammed = t.slam_seen_at && t.slam_seen_at >= t.stand_seen;
             // (his slam, or his stand over: how it went; and his slam's time on his clock, the least seen)
             if (t.sc_step == 2 && (slammed || s != 1))
@@ -12274,40 +12358,63 @@ namespace ingame
                 return;
             const auto since = now - t.stand_seen;
             const float since_s = static_cast<float>(since) / 1000.0f;
-            if (t.sc_step == 0 && since >= 60)
+            // V1.3.59 (Eric: "it took a while for his speed and stuff to catch up"; his V1.3.58 run: in the first two stands of
+            // each visit, none of the numbers found 0.06 s in went on with the time, and those slams came at the game's 0.9 s):
+            // looked for again (3 tries, until 0.4 s into his stand) when none are found or none go on; numbers up to 0.25 s
+            // behind the time since he stood count too (the game may have stopped a moment as his breakpoints were set), up
+            // to 96 of them (V1.3.58 kept 24, and the second visit's first stand had that many); checked 50 ms later
+            const auto retry = [&](const std::string &why) {
+                const bool again = t.sc_tries < 3 && since < 400;
+                if (t.sc_fail_told < 16)
+                {
+                    std::ostringstream line;
+                    line << std::fixed << std::setprecision(2) << "Boss speed: his stand's clocks, try " << t.sc_tries << " (" << since_s << " s in): " << why
+                         << (again ? "; looked for again" : "; his slam stays the game's in this stand");
+                    ++t.sc_fail_told, std::cout << line.str() << "\n" << std::flush;
+                }
+                t.sc_cands.clear(), t.sc_from.clear(), t.sc_clocks.clear();
+                t.sc_step = again ? 0 : 9, t.sc_retry_at = now + 20;
+            };
+            if (t.sc_step == 0 && since >= 60 && now >= t.sc_retry_at)
             {
-                // (the numbers that hold about the time since he stood)
+                ++t.sc_tries;
+                // (the numbers that hold about the time since he stood, or a little less)
                 for (const auto &o : papu_anim_objects())
                 {
                     std::array<float, 0xc0> f{};
                     if (!read(o.first, f))
                         continue;
-                    for (std::size_t i = 0; i < f.size() && t.sc_cands.size() < 24; ++i)
-                        if (std::isfinite(f[i]) && f[i] > 0.03f && std::abs(f[i] - since_s) < 0.06f)
+                    for (std::size_t i = 0; i < f.size() && t.sc_cands.size() < 96; ++i)
+                        if (std::isfinite(f[i]) && f[i] > 0.02f && f[i] < since_s + 0.06f && f[i] > since_s - 0.25f)
                             t.sc_cands.push_back({o.first + i * 4, o.second + " +" + hex(static_cast<unsigned>(i * 4))}), t.sc_from.push_back(f[i]);
                 }
-                t.sc_t0 = now, t.sc_step = t.sc_cands.empty() ? 9 : 1;
-                if (t.sc_cands.empty() && t.sc_told < 12)
-                    ++t.sc_told, std::cout << "Boss speed: his stand's clocks: none found (" << since_s << " s in)\n" << std::flush;
+                t.sc_t0 = now, t.sc_step = 1;
+                if (t.sc_cands.empty())
+                    retry("none found");
                 return;
             }
-            if (t.sc_step == 1 && now - t.sc_t0 >= 40)
+            if (t.sc_step == 1 && now - t.sc_t0 >= 50)
             {
                 const float went = static_cast<float>(now - t.sc_t0) / 1000.0f;
-                std::ostringstream found;
+                std::ostringstream found, missed;
+                unsigned shown = 0;
                 for (std::size_t i = 0; i < t.sc_cands.size(); ++i)
-                    if (const float v = value<float>(t.sc_cands[i].first); std::isfinite(v) && v - t.sc_from[i] > went * 0.6f && v - t.sc_from[i] < went * 1.4f)
+                {
+                    const float v = value<float>(t.sc_cands[i].first);
+                    if (std::isfinite(v) && v - t.sc_from[i] > went * 0.5f && v - t.sc_from[i] < went * 1.6f)
                         t.sc_clocks.push_back(t.sc_cands[i]), found << (t.sc_clocks.size() > 1 ? ", " : "") << t.sc_cands[i].second << " (" << v << ")";
+                    else if (shown++ < 4)
+                        missed << (shown > 1 ? ", " : "") << t.sc_cands[i].second << " " << t.sc_from[i] << " -> " << v;
+                }
                 if (t.sc_clocks.empty())
                 {
-                    t.sc_step = 9;
-                    if (t.sc_told < 12)
-                        ++t.sc_told, std::cout << "Boss speed: his stand's clocks: none went on with the time (" << t.sc_cands.size() << " looked at)\n" << std::flush;
+                    retry("none of the " + std::to_string(t.sc_cands.size()) + " looked at went on with the time (" + std::to_string(went).substr(0, 5) + " s; " + missed.str() + ")");
                     return;
                 }
-                if (t.sc_told < 4)
-                    ++t.sc_told, std::cout << "Boss speed: his stand's clocks: " << found.str() << "\n" << std::flush;
-                // (how far the first is ahead of the time since he stood, before anything is moved on)
+                if (auto &told = t.sc_tries > 1 ? t.sc_fail_told : t.sc_told; told < (t.sc_tries > 1 ? 16u : 4u))
+                    ++told, std::cout << "Boss speed: his stand's clocks" << (t.sc_tries > 1 ? " (try " + std::to_string(t.sc_tries) + ")" : std::string()) << ": " << found.str()
+                                      << "\n" << std::flush;
+                // (how far the first is ahead of the time since he stood, before anything is moved on; behind it, below 0)
                 t.sc_step = 2, t.sc_last = now, t.sc_lead = value<float>(t.sc_clocks[0].first) - since_s;
                 return;
             }

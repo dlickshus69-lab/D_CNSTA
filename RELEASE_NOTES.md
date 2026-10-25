@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Papu Papu's hit window:** with the boss rules on, once his red ends you have 5 s to hit him; then he's red again until the slam after his next spin. `/boss_window 4` (1 to 15) tries another time; `/boss_window off` goes back to 5.
-- From V1.3.57: Papu Papu's slam paced by boss speed (0.9 s after he stands at 100%, 0.72 at 125%, 0.6 at 150%, 0.51 at 175%, 0.45 at 200%); `/boss_slam 0.5` tries another 200% time.
-- From V1.3.52: Papu Papu's spin starts where he slammed.
-- From V1.3.48: Stormy Ascent's crates shut in between iron crates need Spin.
-- From V1.3.47: Tomb Wader needs Spin (its first door opens with the wheel).
+- **Papu Papu stays red after every hit** until the slam after his next spin (some hits ended it as his spin started).
+- **His hit window goes by speed:** 2 s at 200%, up to 4 s at 100%. `/boss_window` sets the 200% time.
+- **His faster slam from his first stand** of a fight (it took two stands before).
+- From V1.3.57: his slam paced by boss speed (0.9 s after he stands at 100%, 0.45 s at 200%).
+- From V1.3.52: his spin starts where he slammed.

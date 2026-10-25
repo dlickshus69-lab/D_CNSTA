@@ -724,7 +724,7 @@ void BoxMarkers::boss_settings(unsigned health, unsigned speed, bool rules, bool
     shared_->boss_bar_grow = bar_grow ? 1u : 0u;
     shared_->boss_masks = masks ? 1u : 0u;
     shared_->boss_slam_ms = std::clamp(slam_ms, 250u, 900u);
-    shared_->boss_window_ms = std::clamp(window_ms, 1000u, 15000u);
+    shared_->boss_window_ms = std::clamp(window_ms, 500u, 10000u);
     unlock();
 }
 void BoxMarkers::bar_try(unsigned target, float factor)
