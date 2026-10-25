@@ -5585,6 +5585,9 @@ namespace ingame
             std::uint64_t ms_stand = 0, ms_rewound_at = 0, ms_wait_tick_at = 0;
             unsigned ms_slams_seen = 0, ms_lines = 0;
             bool ms_holding = false;
+            // V1.3.63 (Eric: "once you hit him ... He'll do his series slams, and then he'll spin, and then he'll do one slam
+            // again"): his slams in a row only in his stand after a hit that counted (set at the hit, used as he stands)
+            bool ms_due = false;
             Address ms_wait_seen = 0;
             float ms_wait_last = 0;
             unsigned slams_seen = 0;
@@ -9586,7 +9589,10 @@ namespace ingame
                                               << (t.red_spun ? "spin" : "next spin") << "\n" << std::flush;
         }
         // V1.3.62 (Eric: "he can slam maybe 1 to 5 times and then start spinning ... it'll be random"): with the harder rules
-        // on, each stand of his has 1 to 5 slams (at random) before his spin. After each slam but the last, his stand plays
+        // on, each stand of his has 1 to 5 slams (at random) before his spin. V1.3.63 (Eric: "at the start of the battle arena,
+        // he'll do one slam, and then he'll spin, he'll do one slam again, and then once you hit him ... He'll do his series
+        // slams, and then he'll spin, and then he'll do one slam again"): only his stand after a hit that counted has them (he's
+        // red through them, his spin and up to the slam after it, as after any hit); every other stand has one slam. After each slam but the last, his stand plays
         // again from its start: his stand's clocks (see papu_stand_clock) set back by as far as they went, so the game plays
         // his stand and slam again, aimed and paced again as a new stand; his AI's wait after a slam (iftes1je, which ends in
         // his spin) is held while it runs, until his last slam, and then it runs as the game has it (cut by his speed). If no
@@ -9617,6 +9623,8 @@ namespace ingame
                 if (!why.empty() && t.ms_lines < 40)
                     ++t.ms_lines, std::cout << "Boss pattern: " << why << "\n" << std::flush;
             };
+            if (s == 5 || s == 6 || !state.boss_rules)
+                t.ms_due = false; // (the fight starts over, or the rule is off)
             if (s != 1 || !state.boss_rules || !t.papu_ai)
             {
                 if (t.ms_holding)
@@ -9626,13 +9634,14 @@ namespace ingame
             }
             if (t.ms_stand != t.state_since)
             {
-                // (a stand of his: how many slams)
+                // (a stand of his: how many slams; 1 to 5 after a hit that counted, one otherwise)
                 static std::mt19937 rng{std::random_device{}()};
                 t.ms_stand = t.state_since, t.ms_done = 0, t.ms_holding = false, t.ms_slams_seen = papu_slams.load();
-                t.ms_total = wait ? std::uniform_int_distribution<int>(1, 5)(rng) : 1;
-                if (t.ms_lines < 40)
-                    ++t.ms_lines, std::cout << "Boss pattern: " << t.ms_total << (t.ms_total == 1 ? " slam" : " slams") << " in this stand"
+                t.ms_total = t.ms_due && wait ? std::uniform_int_distribution<int>(1, 5)(rng) : 1;
+                if (t.ms_due && t.ms_lines < 40)
+                    ++t.ms_lines, std::cout << "Boss pattern: after his hit, " << t.ms_total << (t.ms_total == 1 ? " slam" : " slams") << " in this stand"
                                             << (wait ? "" : " (his AI's wait after a slam isn't found yet: one)") << "\n" << std::flush;
+                t.ms_due = false;
             }
             if (const auto slams = papu_slams.load(); slams != t.ms_slams_seen)
             {
@@ -9779,7 +9788,7 @@ namespace ingame
                     t.valid_hit_at = now; // (a hit that counts)
                     // V1.3.59: red after it is ours too, until the slam after his next spin (see hit_red)
                     if (state.boss_rules && s == 3 && !t.was_red)
-                        t.hit_red = true, t.hit_hold = false, t.hit_red_at = now, t.red_spun = false, t.slam_wait = false, t.red_skip_spin = false;
+                        t.hit_red = true, t.hit_hold = false, t.hit_red_at = now, t.red_spun = false, t.slam_wait = false, t.red_skip_spin = false, t.ms_due = true;
                 }
                 // (V1.3.30) any hit the game takes starts its immunity, as long as it's set for that hit
                 if (s == 3 || s == 4)
@@ -12662,7 +12671,10 @@ namespace ingame
             // moved on to 3.08 s and his slam came at the game's 0.95 s: not what his slam goes by in that stand): none is moved
             // on past his slam's time on it, and one past it by 0.15 s with no slam is looked for again without those (twice at
             // most in a stand)
-            if (std::isfinite(clock) && clock > slam_at + 0.15f && t.sc_late_tries < 2)
+            // (V1.3.63, Eric's V1.3.61 run: his slam came at 0.97 s with one moved on that the game put back 35 frames, never past
+            // his slam's time: also when his slam is 0.1 s late and that one is still 0.1 s short of it)
+            const bool past = clock > slam_at + 0.15f, held_back = since_s > t.sc_target + 0.1f && clock < slam_at - 0.1f;
+            if (std::isfinite(clock) && (past || held_back) && t.sc_late_tries < 2)
             {
                 ++t.sc_late_tries;
                 std::ostringstream names;
@@ -12671,8 +12683,9 @@ namespace ingame
                 if (t.sc_fail_told < 16)
                 {
                     std::ostringstream line;
-                    line << std::fixed << std::setprecision(2) << "Boss speed: his stand's clocks went past his slam's time on them (" << clock << " of " << slam_at
-                         << ") with no slam, " << since_s << " s in: not what his slam goes by in this stand (" << names.str() << "); looked for again without them";
+                    line << std::fixed << std::setprecision(2) << "Boss speed: his stand's clocks " << (past ? "went past" : "were kept short of") << " his slam's time on them ("
+                         << clock << " of " << slam_at << ") with no slam, " << since_s << " s in: not what his slam goes by in this stand (" << names.str()
+                         << "); looked for again without them";
                     ++t.sc_fail_told, std::cout << line.str() << "\n" << std::flush;
                 }
                 t.sc_cands.clear(), t.sc_from.clear(), t.sc_clocks.clear(), t.sc_step = 0, t.sc_retry_at = now;

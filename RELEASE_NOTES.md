@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Papu Papu slams 1 to 5 times (at random) before each spin.** Only the first slam after a spin ends his red, as before.
-- **Each spin starts clockwise or counterclockwise at random**, and still turns around in the middle.
-- From V1.3.61: his mid-spin turn keeps working after Crash dies in a spin.
+- **After you hit Papu Papu, he slams 1 to 5 times (at random) before his spin**, red the whole time. Every other stand has one slam, and the slam after his spin opens the hit window as before.
+- **A rare slow slam fixed:** the speed-up now notices when the game keeps resetting the timing it locked onto.
+- From V1.3.62: each spin starts clockwise or counterclockwise at random, and turns around in the middle.
 - From V1.3.61: his hit window is 1.5 s at 200%, up to 3 s at 100%.
 - From V1.3.61: YAML sliders Boss Slam Time and Boss Hit Window (new seeds).
