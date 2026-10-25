@@ -5804,6 +5804,12 @@ namespace ingame
             bool steer_on = false, steer_told = false;
             float steer_sign = 0;
             unsigned steer_from = 0, steer_seen = 0;
+            // V1.3.53 (see slam_step): his stand and slam played faster: the stand it was set up for, his steps seen by then
+            // (none since the last stand: the breakpoint goes into every thread again), the rate this stand, the log told
+            std::uint64_t slam_stand = 0;
+            unsigned slam_seen_steps = 0;
+            float slam_rate_used = 1;
+            bool slam_told = false;
             // V1.3.36 (see papu_slam_rate): his slam's time from when he stands, as the game plays it (the shortest seen while
             // nothing of ours is set), and the stand a try was set in
             std::uint64_t slam_normal = 0, try_stand = 0;
@@ -7947,6 +7953,14 @@ namespace ingame
                     write(rc.at, 1.0f);
                 t.rate_written = false;
             };
+            // (V1.3.53: his slam is faster another way, see papu_slam_speed: nothing tried here, and what was set put back)
+            if (t.slam_rate_used > 1)
+            {
+                if (t.rate_written)
+                    put_back();
+                t.rate_trying = false;
+                return;
+            }
             if (s != 1 || percent <= 100)
             {
                 if (t.rate_written)
@@ -8660,7 +8674,7 @@ namespace ingame
         // plus the 16-bit number at its +0x14), makes angles of it (his physics shape's _gimbalAngles) and puts his transform
         // there. So his physics holds his real facing, and his spin starts from it. Found from his physics shape (an object of
         // type +0x181a628 it points to), or from his behavior's character (+0x38, then +0x30)
-        Address papu_body_record(Address papu)
+        Address papu_body_object(Address papu)
         {
             Address shape = 0, behavior = 0;
             for (const auto part : list(value<Address>(papu + 24), 128))
@@ -8678,6 +8692,12 @@ namespace ingame
                 if (const auto character = value<Address>(behavior + 0x38); character >= 0x10000 && typed(character, 0x1509a38))
                     if (const auto p = value<Address>(character + 0x30); p >= 0x10000 && typed(p, 0x181a628))
                         body = p;
+            return body;
+        }
+        // (the record his place and turn are in: his physics' body +0x30, then the record that points to, plus its 16-bit +0x14)
+        Address papu_body_record(Address papu)
+        {
+            const auto body = papu_body_object(papu);
             const auto holder = body ? value<Address>(body + 0x30) : 0;
             const auto record = holder >= 0x10000 ? value<Address>(holder) : 0;
             if (record < 0x10000)
@@ -8700,16 +8720,33 @@ namespace ingame
         std::atomic<float> steer_target{0}, steer_delta{0}, steer_game{0};
         std::atomic_uint steer_copies{0}, steer_turned{0};
         std::atomic_bool steer_rewound{false};
-        constexpr DWORD steer_arm_code = 0xE0C0FFEF; // raised by us: sets this thread's debug register 1
-        unsigned steer_debug_register(std::uint64_t at);
-        // (V1.3.52) debug register 1 as a write watch on 8 bytes at `at`, or off (0), keeping the others (debug register 0
-        // is the research watch's, see who_debug_registers)
-        void steer_dr7(DWORD64 &dr1, DWORD64 &dr7, std::uint64_t at)
+        constexpr DWORD steer_arm_code = 0xE0C0FFEF; // raised by us: sets this thread's debug registers 1 and 2
+        // V1.3.53 (Eric: "is it possible to speed up his slam"): his slam comes with his animation (at the same time into his
+        // stand at any /boss_speed: none of his AI's waits hold it back). Each character's animation is stepped by the time
+        // handed to its update at +0xf7e790 (movss [rsp+0x20], xmm0: the step, the update's 5th argument, see +0xf7e799),
+        // with rdx then the character's body slot ([rdx]: his physics' body, an object of type +0x181a628, see
+        // papu_body_object). A hardware breakpoint there (debug register 2, in every thread, see slam_apply) makes that store
+        // itself, with Papu Papu's step longer while he stands (slam_rate: /boss_speed), so his stand and slam play faster
+        constexpr std::uint64_t slam_step = 0xf7e790;
+        std::atomic<std::uint64_t> slam_body{0}, slam_arm_address{0};
+        std::atomic<float> slam_rate{1.0f};
+        std::atomic_uint slam_steps{0}, slam_faster{0};
+        unsigned steer_debug_register(std::uint64_t at, std::uint64_t step_at);
+        // (V1.3.52) debug register 1 as a write watch on 8 bytes at `at`; (V1.3.53) debug register 2 as an execute breakpoint at
+        // `step_at`; 0 for off; the others kept (debug register 0 is the research watch's, see who_debug_registers)
+        void steer_dr7(DWORD64 &dr1, DWORD64 &dr2, DWORD64 &dr7, std::uint64_t at, std::uint64_t step_at)
         {
+            dr7 &= ~0xFF0003CULL, dr1 = at, dr2 = step_at;
             if (at)
-                dr1 = at, dr7 = (dr7 & ~0xF0000CULL) | (1ULL << 2) | (1ULL << 20) | (2ULL << 22);
-            else
-                dr1 = 0, dr7 &= ~0xF0000CULL;
+                dr7 |= (1ULL << 2) | (1ULL << 20) | (2ULL << 22);
+            if (step_at)
+                dr7 |= 1ULL << 4; // (its kind and length stay 0: execute)
+        }
+        // (V1.3.53) the game's code where a breakpoint goes is what it was made for
+        bool code_is(std::uint64_t rva, std::initializer_list<unsigned char> bytes)
+        {
+            std::array<unsigned char, 16> at{};
+            return bytes.size() <= at.size() && read(base() + rva, at) && std::equal(bytes.begin(), bytes.end(), at.begin());
         }
         // (V1.3.42) his physics' turn as he stands: found and checked against his facing (a turn about his up axis that is his
         // facing, one way or the other), or left alone
@@ -8764,15 +8801,25 @@ namespace ingame
             if (!steer_body.load() && !steer_arm_address.load())
                 return;
             steer_mode = 0, steer_body = 0;
-            steer_debug_register(0);
+            steer_debug_register(0, slam_arm_address.load());
             steer_rewound = false;
+        }
+        // (V1.3.53) his stand and slam back to the game's own pace, see slam_step
+        void papu_slam_off()
+        {
+            slam_rate = 1.0f;
+            if (!slam_body.load() && !slam_arm_address.load())
+                return;
+            slam_body = 0;
+            steer_debug_register(steer_arm_address.load(), 0);
         }
         void papu_steer_start(BossTuning &t)
         {
             t.steer_on = false;
             const bool same = t.body_at && steer_body.load() == t.body_at;
             const float sign = t.body_sign ? t.body_sign : same ? t.steer_sign : 0.0f;
-            if (!t.body_at || !sign || IsDebuggerPresent())
+            // (V1.3.53: and only where the game's copy is the store it was made for, see steer_copy)
+            if (!t.body_at || !sign || IsDebuggerPresent() || !code_is(steer_copy, {0x0f, 0x29, 0x4c, 0x08, 0x10}))
                 return;
             if (!same)
                 steer_mode = 0, steer_rewound = false, steer_body = t.body_at;
@@ -8781,13 +8828,43 @@ namespace ingame
             const auto copies = steer_copies.load();
             unsigned threads = 2;
             if (!same || steer_arm_address.load() != t.body_at + 0x18 || copies == t.steer_seen)
-                threads = steer_debug_register(t.body_at + 0x18);
+                threads = steer_debug_register(t.body_at + 0x18, slam_arm_address.load());
             t.steer_on = threads > 1, t.steer_sign = sign;
             t.steer_from = steer_turned.load(), t.steer_seen = copies;
             if (!t.steer_told)
             {
                 t.steer_told = true;
                 std::cout << "Boss rule: his turn is steered as the game copies it into his physics (a watch on it in " << threads << " threads)\n" << std::flush;
+            }
+        }
+        // (V1.3.53, see slam_step) as he stands, his animation stepped faster by /boss_speed (his own pace as he spins, is hit
+        // or comes into the arena); the breakpoint set up at each stand (into every thread again when none of his steps was
+        // seen since the last one), off at /boss_speed 100%
+        void papu_slam_speed(BossTuning &t, int s, unsigned percent)
+        {
+            const unsigned speed = std::clamp(percent, 100u, 200u);
+            slam_rate = s == 1 && speed > 100 && slam_body.load() ? static_cast<float>(speed) / 100.0f : 1.0f;
+            if (s != 1 || !t.stand_seen || t.slam_stand == t.stand_seen)
+                return;
+            t.slam_stand = t.stand_seen;
+            const auto body = speed > 100 && t.papu && !IsDebuggerPresent() && code_is(slam_step, {0xf3, 0x0f, 0x11, 0x44, 0x24, 0x20}) ? papu_body_object(t.papu) : 0;
+            if (!body)
+            {
+                t.slam_rate_used = 1;
+                papu_slam_off();
+                return;
+            }
+            const auto steps = slam_steps.load();
+            unsigned threads = 2;
+            if (slam_body.load() != body || slam_arm_address.load() != base() + slam_step || steps == t.slam_seen_steps)
+                slam_body = body, threads = steer_debug_register(steer_arm_address.load(), base() + slam_step);
+            t.slam_seen_steps = steps, t.slam_rate_used = threads > 1 ? static_cast<float>(speed) / 100.0f : 1.0f;
+            slam_rate = t.slam_rate_used;
+            if (!t.slam_told)
+            {
+                t.slam_told = true;
+                std::cout << "Boss speed: his stand and slam play at " << speed << "% (his animation stepped faster as he stands; a breakpoint in " << threads << " threads)\n"
+                          << std::flush;
             }
         }
         // V1.3.37 research, in case the game still turns him back: the places on him holding his facing (as an angle, in radians
@@ -8880,7 +8957,7 @@ namespace ingame
                     ++t.spin_lines, std::cout << "Boss rule: his spin's first frames, his facing from where his aim was held (degrees): " << t.spin_trace << "\n" << std::flush;
             }
             // (half the time to his slam: the game's own, or shorter once his slam plays faster, see papu_slam_rate)
-            const double factor = t.rate_found ? std::clamp(state.boss_speed, 100u, 200u) / 100.0 : 1.0;
+            const double factor = t.slam_rate_used > 1 ? t.slam_rate_used : t.rate_found ? std::clamp(state.boss_speed, 100u, 200u) / 100.0 : 1.0;
             const auto window = static_cast<std::uint64_t>(static_cast<double>(t.slam_normal ? t.slam_normal : 900) / factor / 2);
             const bool stand = state.boss_rules && t.papu && s == 1 && t.stand_seen && !t.aim_skip;
             const auto since = now - t.stand_seen;
@@ -9069,8 +9146,10 @@ namespace ingame
             if (const auto n = papu_slams.load(); n != t.slams_cycle)
             {
                 t.slams_cycle = n, t.slam_seen_at = now;
-                if (s == 1 && t.stand_seen && !t.rate_written && now - t.stand_seen > 500 && now - t.stand_seen < 3000)
-                    t.slam_normal = t.slam_normal ? std::min(t.slam_normal, now - t.stand_seen) : now - t.stand_seen;
+                // (V1.3.53: as the game plays it: with his stand stepped faster, the time it took times that rate)
+                const auto took = static_cast<std::uint64_t>(static_cast<double>(now - t.stand_seen) * std::max(1.0f, t.slam_rate_used));
+                if (s == 1 && t.stand_seen && !t.rate_written && took > 500 && took < 3000)
+                    t.slam_normal = t.slam_normal ? std::min(t.slam_normal, took) : took;
             }
             if (s == 2 && t.laps_at)
             {
@@ -9408,7 +9487,9 @@ namespace ingame
             papu_cycle(t, s, now);
             papu_clocks(t, s, now);
 #ifndef CRASH_NST_STABLE
-            // (not in the Stable build: his slam's speed is still being looked for, and the aim's spin start still jumps)
+            // (not in the Stable build yet: his slam's speed (V1.3.53: his animation stepped faster as he stands, see
+            // papu_slam_speed; V1.3.35's search for it only while that isn't on) and the slam aim)
+            papu_slam_speed(t, s, percent);
             papu_slam_rate(t, s, percent, now);
             papu_aim(t, state, s, now);
 #endif
@@ -9675,7 +9756,7 @@ namespace ingame
                 // (V1.3.34) his health script's list as the game had it, if it's still there
                 id_list_restore("the fight was left");
                 papu_who_off(t, "the fight was left"); // (V1.3.41: never left on past his objects)
-                papu_steer_off();                      // (V1.3.52: the same)
+                papu_steer_off(), papu_slam_off();     // (V1.3.52, V1.3.53: the same)
                 t = {};
                 t.level = boss, t.entered = now;
                 // (V1.3.28) Papu Papu's stomps from here on only
@@ -9705,8 +9786,8 @@ namespace ingame
             if (t.watch_step == 1 && (boss != "B101" || !t.papu || !event_owner(t.papu) || now - t.watch_at > 1500))
                 papu_who_off(t, "he's gone, or 1.5 s went by");
             // (V1.3.52: nor the steering, see papu_steer)
-            if (steer_body.load() && (boss != "B101" || !t.papu || !event_owner(t.papu)))
-                t.steer_on = false, papu_steer_off();
+            if ((steer_body.load() || slam_body.load()) && (boss != "B101" || !t.papu || !event_owner(t.papu)))
+                t.steer_on = false, papu_steer_off(), papu_slam_off();
             if (boss == "B101")
                 papu_rule(t, state, now);
             stretch_bar_fill(t, state, now);
@@ -9765,7 +9846,7 @@ namespace ingame
                             t.papu = owner, t.papu_ai = c, t.state = -1;
                         // (V1.3.52: his objects made again: the steering lets go of his old physics, see papu_steer)
                         if (t.state_at)
-                            t.steer_on = false, papu_steer_off();
+                            t.steer_on = false, papu_steer_off(), papu_slam_off(), t.slam_stand = 0;
                         // V1.3.34: his AI's timers, its waits (see papu_speed_timers)
                         t.ai_timers.clear();
                         const unsigned count = value<unsigned>(meta + 24);
@@ -11576,13 +11657,30 @@ namespace ingame
             steer_rewound = true;
             steer_turned.fetch_add(1, std::memory_order_relaxed);
         }
+        // (V1.3.53, see slam_step) the breakpoint before a character's animation step is stored: the store done here, Papu
+        // Papu's step longer as he stands, and on past it (so it doesn't stop there again)
+        void slam_apply(CONTEXT &c)
+        {
+            float dt = 0;
+            std::memcpy(&dt, &c.Xmm0, sizeof dt);
+            const auto body = slam_body.load(std::memory_order_acquire);
+            if (body && c.Rdx >= 0x10000 && !(c.Rdx & 7) && *reinterpret_cast<const std::uint64_t *>(c.Rdx) == body)
+            {
+                slam_steps.fetch_add(1, std::memory_order_relaxed);
+                const float rate = slam_rate.load(std::memory_order_relaxed);
+                if (rate > 1.0f && rate <= 2.0f && std::isfinite(dt) && dt > 0)
+                    dt *= rate, slam_faster.fetch_add(1, std::memory_order_relaxed);
+            }
+            *reinterpret_cast<float *>(c.Rsp + 0x20) = dt;
+            c.Rip += 6;
+        }
         LONG CALLBACK who_handler(EXCEPTION_POINTERS *e)
         {
             auto *record = e->ExceptionRecord;
             auto *context = e->ContextRecord;
             if (record->ExceptionCode == steer_arm_code)
             {
-                steer_dr7(context->Dr1, context->Dr7, steer_arm_address.load());
+                steer_dr7(context->Dr1, context->Dr2, context->Dr7, steer_arm_address.load(), slam_arm_address.load());
                 context->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
@@ -11606,6 +11704,14 @@ namespace ingame
             }
             if (record->ExceptionCode != EXCEPTION_SINGLE_STEP)
                 return EXCEPTION_CONTINUE_SEARCH;
+            // (V1.3.53) the slam's step, see slam_step: a stop before an instruction, so only right there (a debug status
+            // bit left from an earlier stop doesn't count)
+            if ((context->Dr6 & 4) && context->Rip == base() + slam_step)
+            {
+                context->Dr6 &= ~4ULL;
+                slam_apply(*context);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
             if (context->Dr6 & 2) // (V1.3.52) the steering's watch, see steer_copy
             {
                 const bool also = context->Dr6 & 1;
@@ -11676,13 +11782,13 @@ namespace ingame
             RaiseException(who_arm_code, 0, 0, nullptr); // this thread, through the handler
             return done + 1;
         }
-        // (V1.3.52) the steering's watch (debug register 1, see steer_copy) on (at != 0) or off in every thread; returns how
-        // many threads took it
-        unsigned steer_debug_register(std::uint64_t at)
+        // (V1.3.52) the steering's watch (debug register 1, see steer_copy) and (V1.3.53) the slam's step (debug register 2, see
+        // slam_step) on (not 0) or off in every thread; returns how many threads took them
+        unsigned steer_debug_register(std::uint64_t at, std::uint64_t step_at)
         {
             if (!who_handler_cookie)
                 who_handler_cookie = AddVectoredExceptionHandler(1, who_handler);
-            steer_arm_address = at;
+            steer_arm_address = at, slam_arm_address = step_at;
             const DWORD self = GetCurrentThreadId(), process = GetCurrentProcessId();
             unsigned done = 0;
             const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
@@ -11703,7 +11809,7 @@ namespace ingame
                         c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
                         if (GetThreadContext(thread, &c))
                         {
-                            steer_dr7(c.Dr1, c.Dr7, at);
+                            steer_dr7(c.Dr1, c.Dr2, c.Dr7, at, step_at);
                             if (SetThreadContext(thread, &c))
                                 ++done;
                         }
