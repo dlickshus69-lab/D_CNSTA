@@ -4,6 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
+- **Fixed: the game froze** as Papu Papu stood up after his first spin (V1.3.37). A search for his facing that runs then got stuck on a number it couldn't handle. Everything from V1.3.37 below is in this build too, now without the freeze.
 - **No more jump when his spin starts after an aimed slam.** V1.3.36 turned only the picture of Papu Papu, but the game keeps his facing in two more places. So as his spin started, the game put him back where it still had him, and the spin began somewhere else. Now all three are turned together, so his spin starts from where he slammed.
 - **Every slam is aimed now, not only the ones after a hit.** After a spin, the game kept turning him back each frame (V1.3.36's log), so only slams after a hit stayed aimed. He now turns fast toward Crash for the first half of the wind-up and holds that facing until the slam lands.
 - **His first slam as he comes into the arena isn't aimed**, at the start of the fight and when it starts over after a death. That one is left as the game has it.

@@ -7810,14 +7810,14 @@ namespace ingame
                       << std::flush;
             t.spin_places = std::move(found);
         }
-        // V1.3.36: an angle between -pi and pi
+        // V1.3.36: an angle between -pi and pi. (V1.3.38: without a loop. V1.3.37 took 2 pi off until it was below pi, and his
+        // facing search (see papu_yaw_research) gave it every number around him: for a huge one taking 2 pi off changes
+        // nothing, and the game froze as he first stood after his spin)
         float wrap_angle(float a)
         {
-            while (a > 3.14159265f)
-                a -= 6.2831853f;
-            while (a < -3.14159265f)
-                a += 6.2831853f;
-            return a;
+            if (!std::isfinite(a))
+                return a;
+            return std::remainder(a, 6.2831853f);
         }
         // the way a matrix faces along one of its axes (see BossTuning::face_axis), flat on the ground
         bool matrix_facing(const Matrix &m, int axis, float &x, float &y)
@@ -7886,7 +7886,8 @@ namespace ingame
                 return false;
             kept = 0;
             std::array<float, 3> e{};
-            if (read(transform + 0x60, e) && std::abs(e[0]) < 0.01f && std::abs(e[1]) < 0.01f && std::isfinite(e[2]) && std::abs(wrap_angle(e[2] - yaw)) < 0.02f)
+            if (read(transform + 0x60, e) && std::abs(e[0]) < 0.01f && std::abs(e[1]) < 0.01f && std::isfinite(e[2]) && std::abs(e[2]) < 100 &&
+                std::abs(wrap_angle(e[2] - yaw)) < 0.02f)
                 write(transform + 0x68, e[2] + d), kept |= 1;
             std::array<float, 4> q{};
             const float qz = -std::sin(yaw / 2), qw = std::cos(yaw / 2);
@@ -7909,7 +7910,12 @@ namespace ingame
             if (t.yaw_searches >= 4 || t.clock_regions.empty())
                 return;
             const float degrees = yaw * 57.29578f;
-            const auto matches = [&](float f) { return std::abs(wrap_angle(f - yaw)) < 0.004f || std::abs(f - degrees) < 0.2f || std::abs(f - degrees - 360) < 0.2f || std::abs(f - degrees + 360) < 0.2f; };
+            // (only numbers an angle can be: radians within a few turns, degrees within a turn either way)
+            const auto matches = [&](float f) {
+                return std::isfinite(f) && std::abs(f) < 1000 &&
+                       ((std::abs(f) < 30 && std::abs(wrap_angle(f - yaw)) < 0.004f) || std::abs(f - degrees) < 0.2f || std::abs(f - degrees - 360) < 0.2f ||
+                        std::abs(f - degrees + 360) < 0.2f);
+            };
             std::ostringstream follow;
             unsigned following = 0;
             const bool moved = std::abs(wrap_angle(yaw - t.yaw_last)) > 0.3f;
