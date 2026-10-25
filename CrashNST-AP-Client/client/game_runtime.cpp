@@ -5814,6 +5814,15 @@ namespace ingame
             // (the stand told about, how many were, the counts as it started)
             std::uint64_t slam_stand_told = 0;
             unsigned slam_reports = 0, slam_from_steps = 0, slam_from_faster = 0, slam_from_hits = 0;
+            // V1.3.55 research (see papu_anim_scan): his animation's objects read as he stands: the stand, its step (0 none yet,
+            // 1 the first read, 2 done), the reads, the objects, and the last stand's first read and objects
+            std::uint64_t scan_stand = 0, scan_first_at = 0, scan_prev_at = 0;
+            int scan_step = 0;
+            unsigned scan_reports = 0;
+            bool scan_layers_told = false;
+            std::vector<std::pair<Address, std::string>> scan_objects;
+            std::vector<std::vector<unsigned char>> scan_first, scan_prev;
+            std::vector<Address> scan_prev_objects;
             // V1.3.36 (see papu_slam_rate): his slam's time from when he stands, as the game plays it (the shortest seen while
             // nothing of ours is set), and the stand a try was set in
             std::uint64_t slam_normal = 0, try_stand = 0;
@@ -8741,6 +8750,11 @@ namespace ingame
         std::atomic<float> slam_rate{1.0f}, slam_dt{0}, slam_frame_dt{0};
         std::atomic_uint slam_steps{0}, slam_faster{0}, slam_hits{0}, slam_layers{0};
         void code_dump_tree(Address begin, Address end, std::set<Address> &done);
+        // V1.3.55 (Eric's V1.3.54 run: his steps were seen there, about 600 a stand over up to 14 layers, but each was handed no
+        // time at all, 0 s, the job's own too: his animation keeps its time somewhere else): each layer's node and item as his
+        // steps go by (the step's rcx, see +0xf7e782, and its item, kept at [rsp+0x70], see +0xf7e10b), for the search for
+        // what counts up in his animation as he stands (see papu_anim_scan)
+        std::array<std::atomic<std::uint64_t>, 16> slam_nodes{}, slam_items{};
         unsigned steer_debug_register(std::uint64_t at, std::uint64_t step_at);
         // (V1.3.52) debug register 1 as a write watch on 8 bytes at `at`; (V1.3.53) debug register 2 as an execute breakpoint at
         // `step_at`; 0 for off; the others kept (debug register 0 is the research watch's, see who_debug_registers)
@@ -8904,6 +8918,132 @@ namespace ingame
                             code_dump_tree(image + entry->BeginAddress, std::min<Address>(image + entry->EndAddress, image + entry->BeginAddress + 0x1000), done);
                     }
                 }
+            }
+        }
+        // (V1.3.55 research, see slam_nodes) what counts up in his animation as he stands: his layers' nodes and items, and the
+        // objects they point to (one level down), read 0.12 s and 0.62 s into his first three stands with /boss_speed above
+        // 100%. The numbers (4-byte and 8-byte) that went up or down by a fifth to five times the time between go to the log,
+        // closest to the time itself first, and so do the ones that changed between two stands' first reads by about the time
+        // between them (a time kept from his clip's start); and once, what each layer's node and item are
+        void papu_anim_scan(BossTuning &t, int s, std::uint64_t now)
+        {
+            if (t.scan_reports >= 3 || !slam_body.load() || !t.stand_seen)
+                return;
+            if (t.scan_stand != t.stand_seen)
+                t.scan_stand = t.stand_seen, t.scan_step = 0;
+            if (s != 1 || t.scan_step >= 2)
+                return;
+            const auto since = now - t.stand_seen;
+            const auto snapshot = [&] {
+                std::vector<std::vector<unsigned char>> out;
+                for (const auto &o : t.scan_objects)
+                {
+                    std::vector<unsigned char> bytes(0x300);
+                    SIZE_T got = 0;
+                    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(o.first), bytes.data(), bytes.size(), &got))
+                        got = 0;
+                    bytes.resize(got);
+                    out.push_back(std::move(bytes));
+                }
+                return out;
+            };
+            const auto type_of = [](Address a) {
+                const auto vt = value<Address>(a);
+                return vt >= base() && vt < module_end() ? hex(static_cast<unsigned>(vt - base())) : std::string("none");
+            };
+            // (what changed by a rate like the time's between two reads of the same objects)
+            const auto compare = [&](const std::vector<std::vector<unsigned char>> &a, const std::vector<std::vector<unsigned char>> &b, double seconds, double low, double high,
+                                     const char *head) {
+                struct Found
+                {
+                    double off_one;
+                    std::string text;
+                };
+                std::vector<Found> found;
+                for (std::size_t k = 0; k < t.scan_objects.size() && k < a.size() && k < b.size(); ++k)
+                {
+                    const auto n = std::min(a[k].size(), b[k].size());
+                    const auto note = [&](unsigned off, double x, double y, const char *kind) {
+                        const double rate = (y - x) / seconds;
+                        if (!std::isfinite(rate) || std::abs(rate) < low || std::abs(rate) > high || std::abs(x) > 1e7 || std::abs(y) > 1e7)
+                            return;
+                        std::ostringstream line;
+                        line << t.scan_objects[k].second << " (type " << type_of(t.scan_objects[k].first) << ") +" << hex(off) << kind << ": " << x << " -> " << y << " ("
+                             << rate << " a second)";
+                        found.push_back({std::abs(std::abs(rate) - 1.0), line.str()});
+                    };
+                    for (unsigned off = 0; off + 4 <= n; off += 4)
+                    {
+                        float x = 0, y = 0;
+                        std::memcpy(&x, a[k].data() + off, 4), std::memcpy(&y, b[k].data() + off, 4);
+                        if (x != y && std::isfinite(x) && std::isfinite(y))
+                            note(off, x, y, "");
+                    }
+                    for (unsigned off = 0; off + 8 <= n; off += 8)
+                    {
+                        double x = 0, y = 0;
+                        std::memcpy(&x, a[k].data() + off, 8), std::memcpy(&y, b[k].data() + off, 8);
+                        if (x != y && std::isfinite(x) && std::isfinite(y) && std::abs(x) > 1e-6 && std::abs(y) > 1e-6)
+                            note(off, x, y, " (8 bytes)");
+                    }
+                }
+                std::sort(found.begin(), found.end(), [](const Found &x, const Found &y) { return x.off_one < y.off_one; });
+                std::ostringstream out;
+                out << "Boss speed research: " << head << " (" << seconds << " s apart, " << t.scan_objects.size() << " objects read): " << found.size() << " numbers";
+                for (std::size_t i = 0; i < found.size() && i < 40; ++i)
+                    out << "\n  " << found[i].text;
+                std::cout << out.str() << "\n" << std::flush;
+            };
+            if (t.scan_step == 0 && since >= 120)
+            {
+                std::vector<std::pair<Address, std::string>> objects;
+                std::set<Address> seen;
+                ReadableRegions ok;
+                const auto add = [&](Address a, const std::string &what) {
+                    if (a >= 0x10000 && a < 0x7fffffff0000ULL && !(a & 7) && objects.size() < 240 && ok(a, 8) && seen.insert(a).second)
+                        objects.push_back({a, what});
+                };
+                for (std::size_t i = 0; i < 16; ++i)
+                    add(slam_nodes[i].load(), "layer " + std::to_string(i) + "'s node"), add(slam_items[i].load(), "layer " + std::to_string(i) + "'s item");
+                const auto first = objects.size();
+                if (!t.scan_layers_told && first)
+                {
+                    t.scan_layers_told = true;
+                    std::ostringstream out;
+                    out << "Boss speed research: his animation's layers:";
+                    for (std::size_t i = 0; i < first; ++i)
+                        out << (i ? "; " : " ") << objects[i].second << " 0x" << std::hex << objects[i].first << std::dec << " (type " << type_of(objects[i].first) << ")";
+                    std::cout << out.str() << "\n" << std::flush;
+                }
+                for (std::size_t k = 0; k < first; ++k)
+                {
+                    std::array<Address, 0x40> words{};
+                    if (!read(objects[k].first, words))
+                        continue;
+                    for (std::size_t w = 1; w < words.size(); ++w)
+                        if (const auto q = words[w]; q >= 0x10000 && q < 0x7fffffff0000ULL && !(q & 7) && ok(q, 8))
+                            if (const auto vt = value<Address>(q); vt >= base() && vt < module_end())
+                                add(q, objects[k].second + " +" + hex(static_cast<unsigned>(w * 8)) + " ->");
+                }
+                t.scan_objects = std::move(objects);
+                t.scan_first = snapshot(), t.scan_first_at = now, t.scan_step = 1;
+                // (the last stand's first read, of the same objects: a time kept from his clip's start moves by about the time
+                // between the stands)
+                std::vector<Address> addresses;
+                for (const auto &o : t.scan_objects)
+                    addresses.push_back(o.first);
+                if (!t.scan_prev.empty() && addresses == t.scan_prev_objects && now > t.scan_prev_at)
+                {
+                    const double between = static_cast<double>(now - t.scan_prev_at) / 1000.0;
+                    compare(t.scan_prev, t.scan_first, between, 0.75, 1.25, "his animation, between two stands");
+                }
+                t.scan_prev_objects = std::move(addresses);
+            }
+            else if (t.scan_step == 1 && since >= 620)
+            {
+                const auto second = snapshot();
+                compare(t.scan_first, second, static_cast<double>(now - t.scan_first_at) / 1000.0, 0.2, 5.0, "what counts in his animation as he stands");
+                t.scan_prev = t.scan_first, t.scan_prev_at = t.scan_first_at, t.scan_step = 2, ++t.scan_reports;
             }
         }
         // V1.3.37 research, in case the game still turns him back: the places on him holding his facing (as an angle, in radians
@@ -9529,6 +9669,7 @@ namespace ingame
             // (not in the Stable build yet: his slam's speed (V1.3.53: his animation stepped faster as he stands, see
             // papu_slam_speed; V1.3.35's search for it only while that isn't on) and the slam aim)
             papu_slam_speed(t, s, percent);
+            papu_anim_scan(t, s, now); // (V1.3.55 research)
             papu_slam_rate(t, s, percent, now);
             papu_aim(t, state, s, now);
 #endif
@@ -11728,6 +11869,14 @@ namespace ingame
                         slam_frame_dt.store(frame, std::memory_order_relaxed);
                     if (read(static_cast<Address>(c.R15 + 0x4c), layer) && layer >= 0 && layer < 32)
                         slam_layers.fetch_or(1u << layer, std::memory_order_relaxed);
+                    // (V1.3.55: the layer's node and item, see slam_nodes)
+                    if (layer >= 0 && layer < 16)
+                    {
+                        std::uint64_t item = 0;
+                        slam_nodes[static_cast<std::size_t>(layer)].store(c.Rcx, std::memory_order_relaxed);
+                        if (read(static_cast<Address>(c.Rsp + 0x70), item))
+                            slam_items[static_cast<std::size_t>(layer)].store(item, std::memory_order_relaxed);
+                    }
                     const float rate = slam_rate.load(std::memory_order_relaxed);
                     if (rate > 1.0f && rate <= 2.0f && std::isfinite(dt) && dt > 0)
                         dt *= rate, slam_faster.fetch_add(1, std::memory_order_relaxed);

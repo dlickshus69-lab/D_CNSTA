@@ -4,7 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Papu Papu's slam comes faster (another try)** with `boss_speed` above 100%: V1.3.53 made no difference (his slam still came 0.9 s after he stood); this build finds his animation another way, and the log says what it saw. Test: the test seed, `/boss papu`, a few slams, then the log and a clip.
+- **Papu Papu's faster slam: still looking.** V1.3.54 showed his animation gets no time at the spot the build was speeding up, so it keeps its time somewhere else; this build looks for where. Test: the test seed, `/boss papu`, a few slams, then the log.
 - From V1.3.52: Papu Papu's spin starts where he slammed.
 - From V1.3.48: Stormy Ascent's crates shut in between iron crates need Spin.
 - From V1.3.47: Tomb Wader needs Spin (its first door opens with the wheel).
