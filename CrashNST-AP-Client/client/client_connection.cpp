@@ -217,7 +217,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_slam, /boss_window, /boss_bar, /bar_try (tests) | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_slam, /boss_window, /boss_lead, /boss_bar, /bar_try (tests) | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -599,7 +599,7 @@ void ClientRuntime::handle_commands()
                 // test (V1.3.58, Eric: "we'll start with 5, and if it's too long, we'll drop it down"): with the boss rules on,
                 // how long Papu Papu can be hit once his red ends before he's red again. V1.3.59 (Eric: "the two second is good
                 // for 200% speed ... scale it based on the speed"): the time at 200% boss speed, longer by the same pace at lower
-                // speeds (twice as long at 100%); "off" goes back to the seed's (V1.3.65: 1.3 s at 200% unless its YAML sets boss_hit_window)
+                // speeds (twice as long at 100%); "off" goes back to the seed's (V1.3.66: 1.5 s at 200% unless its YAML sets boss_hit_window)
                 double seconds = -1;
                 try
                 {
@@ -613,7 +613,7 @@ void ClientRuntime::handle_commands()
                     boss_window_test = -1;
                 else if (seconds >= 0.5 && seconds <= 10)
                     boss_window_test = static_cast<int>(seconds * 1000 + 0.5);
-                const double at = (boss_window_test >= 0 ? boss_window_test : 1300) / 1000.0;
+                const double at = (boss_window_test >= 0 ? boss_window_test : 1500) / 1000.0;
                 // (V1.3.61: or the seed's own time at any speed, its YAML's boss_hit_window in tenths of a second)
                 const auto &yaml = session.slot_data()["boss_hit_window"];
                 std::ostringstream out;
@@ -624,7 +624,31 @@ void ClientRuntime::handle_commands()
                 else
                     out << "Boss window: with the boss rules on, Papu Papu can be hit for " << at << " s once his red ends at 200% boss speed" << (boss_window_test >= 0 ? " (test)" : "")
                         << "; at 175% " << at * 200 / 175 << " s, 150% " << at * 200 / 150 << " s, 125% " << at * 200 / 125 << " s, 100% " << at * 2
-                        << " s; then he's red again until the slam after his next spin. /boss_window 0.5 to 10 sets the 200% one, /boss_window off goes back to the seed's (1.3 at 200% unless its YAML sets one).";
+                        << " s; then he's red again until the slam after his next spin. /boss_window 0.5 to 10 sets the 200% one, /boss_window off goes back to the seed's (1.5 at 200% unless its YAML sets one).";
+                print_console(out.str());
+            }
+            else if (command == "/boss_lead")
+            {
+                // test (V1.3.66, Eric: "his slam is still pretty hard to dodge ... maybe we could turn down the accuracy"): how far
+                // Papu Papu's slam aim leads Crash, from 0 (where he is) to 1 (where he'll be as it lands if he keeps going), up
+                // to 1.2; "off" goes back to 0.7
+                double share = -1;
+                try
+                {
+                    if (!argument.empty() && argument != "off")
+                        share = std::stod(argument);
+                }
+                catch (const std::exception &)
+                {
+                }
+                if (argument == "off")
+                    boss_lead_test = -1;
+                else if (share >= 0 && share <= 1.2)
+                    boss_lead_test = static_cast<int>(share * 100 + 0.5);
+                std::ostringstream out;
+                out << std::fixed << std::setprecision(2) << "Boss lead: Papu Papu's slam aims " << (boss_lead_test >= 0 ? boss_lead_test : 70) / 100.0
+                    << " of the way to where Crash will be as it lands" << (boss_lead_test >= 0 ? " (test)" : "")
+                    << ". /boss_lead 0 to 1.2 sets it (0: where he is, 1: where he'll be if he keeps going), /boss_lead off goes back to 0.7.";
                 print_console(out.str());
             }
             else if (command == "/boss_rules")

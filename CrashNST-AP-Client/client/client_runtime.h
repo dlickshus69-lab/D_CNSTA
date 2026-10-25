@@ -183,6 +183,8 @@ class ClientRuntime
     // (V1.3.58 test, /boss_window) how long Papu Papu can be hit once his red ends, in ms (V1.3.59: at 200% boss speed, the
     // speeds below follow it); -1: the seed's (V1.3.61: boss_hit_window), or 1300 at 200% (V1.3.65)
     int boss_window_test = -1;
+    // (V1.3.66 test, /boss_lead) how far Papu Papu's slam aim leads Crash, in percent; -1: 70
+    int boss_lead_test = -1;
     bool boss_bar_grow = true; // /boss_bar (test; V1.3.22: grow by default, asked for)
     unsigned routing_start_count = 0, routing_secret_return_count = 0;
     std::string routing_error;

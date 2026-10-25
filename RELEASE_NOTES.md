@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **His chair, second try:** an invisible wall in front of it, so the arena is a circle. The last build's push couldn't move Crash, so this one sets every place the game keeps where Crash is. The log says if it holds.
-- **His slam leads you all the way** to where you'll be when it lands (was 80%). Turn or stop to dodge it.
-- **His hit window is 1.3 s at 200%** (2.6 s at 100%), still over once his next spin starts.
+- **His chair, third try:** while you stand still at a fight's start, the client finds every copy of where Crash is in the game's memory, and the wall in front of the chair moves all the ones that follow him. The log says if it holds.
+- **The rare slow slam fixed:** the speed-up threw out the right timing when it found it late.
+- **His slam aims 70% of the way** to where you'll be. `/boss_lead 0.5` tries another (0 = where you are, 1 = all the way).
+- **His hit window is back to 1.5 s at 200%** (3 s at 100%), over once his next spin starts.
 - From V1.3.64: 2 to 5 slams after a hit.
-- From V1.3.63: his spins start either way and turn around in the middle.

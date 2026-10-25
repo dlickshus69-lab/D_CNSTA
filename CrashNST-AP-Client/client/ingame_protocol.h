@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 32, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 33, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -181,9 +181,12 @@ namespace ingame
         // the speeds between are even steps of his animation's pace (game_runtime.cpp, papu_stand_clock)
         unsigned boss_slam_ms = 450;
         // (V1.3.58 test, /boss_window) with the boss rules on: how long Papu Papu can be hit once his red ends, in ms, before
-        // he's red again until the slam after his next spin. V1.3.59: his time at 200% boss speed (V1.3.65, Eric: 1.3 s),
-        // longer by the same pace at lower speeds (game_runtime.cpp, papu_window)
-        unsigned boss_window_ms = 1300;
+        // he's red again until the slam after his next spin. V1.3.59: his time at 200% boss speed (V1.3.66, Eric: back to
+        // 1.5 s), longer by the same pace at lower speeds (game_runtime.cpp, papu_window)
+        unsigned boss_window_ms = 1500;
+        // (V1.3.66 test, /boss_lead) how far his slam's aim leads Crash, in percent of the way to where he'll be as it lands
+        // (game_runtime.cpp, papu_aim)
+        unsigned boss_lead_pct = 70;
         // (V1.3.61, the YAML's boss_slam_time and boss_hit_window) his slam's time after he stands and the hit window, in ms,
         // at any boss speed; 0: by the boss speed (boss_slam_ms and boss_window_ms are then the 200% ones)
         unsigned boss_slam_fixed_ms = 0, boss_window_fixed_ms = 0;
