@@ -5810,6 +5810,10 @@ namespace ingame
             unsigned slam_seen_steps = 0;
             float slam_rate_used = 1;
             bool slam_told = false;
+            // V1.3.54 (Eric's V1.3.53 run: his slam still came 0.9 s after he stood): what his stand's steps were, for the log
+            // (the stand told about, how many were, the counts as it started)
+            std::uint64_t slam_stand_told = 0;
+            unsigned slam_reports = 0, slam_from_steps = 0, slam_from_faster = 0, slam_from_hits = 0;
             // V1.3.36 (see papu_slam_rate): his slam's time from when he stands, as the game plays it (the shortest seen while
             // nothing of ours is set), and the stand a try was set in
             std::uint64_t slam_normal = 0, try_stand = 0;
@@ -8727,10 +8731,16 @@ namespace ingame
         // with rdx then the character's body slot ([rdx]: his physics' body, an object of type +0x181a628, see
         // papu_body_object). A hardware breakpoint there (debug register 2, in every thread, see slam_apply) makes that store
         // itself, with Papu Papu's step longer while he stands (slam_rate: /boss_speed), so his stand and slam play faster
+        // V1.3.54 (Eric's V1.3.53 run: his slam still came 0.9 s after he stood, and nothing said whether his steps were seen):
+        // his steps known by where they lead, as the game's copy does (the body slot's body +0x30, then the record, plus its
+        // 16-bit +0x14: his physics' data, slam_body, as steer_body), not by his parts' body (V1.3.53's, maybe another object);
+        // the body found that way is compared first after that (slam_seen); and what the steps were, for the log: all of
+        // them, his, his made longer, his last step and the frame's, and the layers they were for
         constexpr std::uint64_t slam_step = 0xf7e790;
-        std::atomic<std::uint64_t> slam_body{0}, slam_arm_address{0};
-        std::atomic<float> slam_rate{1.0f};
-        std::atomic_uint slam_steps{0}, slam_faster{0};
+        std::atomic<std::uint64_t> slam_body{0}, slam_arm_address{0}, slam_seen{0};
+        std::atomic<float> slam_rate{1.0f}, slam_dt{0}, slam_frame_dt{0};
+        std::atomic_uint slam_steps{0}, slam_faster{0}, slam_hits{0}, slam_layers{0};
+        void code_dump_tree(Address begin, Address end, std::set<Address> &done);
         unsigned steer_debug_register(std::uint64_t at, std::uint64_t step_at);
         // (V1.3.52) debug register 1 as a write watch on 8 bytes at `at`; (V1.3.53) debug register 2 as an execute breakpoint at
         // `step_at`; 0 for off; the others kept (debug register 0 is the research watch's, see who_debug_registers)
@@ -8810,7 +8820,7 @@ namespace ingame
             slam_rate = 1.0f;
             if (!slam_body.load() && !slam_arm_address.load())
                 return;
-            slam_body = 0;
+            slam_body = 0, slam_seen = 0;
             steer_debug_register(steer_arm_address.load(), 0);
         }
         void papu_steer_start(BossTuning &t)
@@ -8844,20 +8854,35 @@ namespace ingame
         {
             const unsigned speed = std::clamp(percent, 100u, 200u);
             slam_rate = s == 1 && speed > 100 && slam_body.load() ? static_cast<float>(speed) / 100.0f : 1.0f;
+            // (V1.3.54: as his stand ends, what its steps were, his first stands of a visit)
+            if (s != 1 && t.slam_stand && t.slam_stand_told != t.slam_stand && slam_body.load() && t.slam_reports < 4)
+            {
+                t.slam_stand_told = t.slam_stand, ++t.slam_reports;
+                std::ostringstream layers;
+                for (unsigned i = 0, l = slam_layers.load(); i < 32; ++i)
+                    if (l & (1u << i))
+                        layers << (layers.tellp() > 0 ? ", " : "") << i;
+                std::cout << "Boss speed research: his animation as he stood: " << slam_steps.load() - t.slam_from_steps << " of his steps seen ("
+                          << slam_faster.load() - t.slam_from_faster << " made longer; his last " << slam_dt.load() << " s, the frame's " << slam_frame_dt.load() << " s; layers "
+                          << (layers.tellp() > 0 ? layers.str() : std::string("none")) << "), " << slam_hits.load() - t.slam_from_hits << " steps of every character; his body there 0x"
+                          << std::hex << slam_seen.load() << " (his parts': 0x" << papu_body_object(t.papu) << ")" << std::dec << "\n" << std::flush;
+            }
             if (s != 1 || !t.stand_seen || t.slam_stand == t.stand_seen)
                 return;
             t.slam_stand = t.stand_seen;
-            const auto body = speed > 100 && t.papu && !IsDebuggerPresent() && code_is(slam_step, {0xf3, 0x0f, 0x11, 0x44, 0x24, 0x20}) ? papu_body_object(t.papu) : 0;
-            if (!body)
+            // (V1.3.54: his physics' data, see slam_body)
+            const auto data = speed > 100 && t.papu && !IsDebuggerPresent() && code_is(slam_step, {0xf3, 0x0f, 0x11, 0x44, 0x24, 0x20}) ? papu_body_record(t.papu) : 0;
+            if (!data)
             {
                 t.slam_rate_used = 1;
                 papu_slam_off();
                 return;
             }
             const auto steps = slam_steps.load();
+            t.slam_from_steps = steps, t.slam_from_faster = slam_faster.load(), t.slam_from_hits = slam_hits.load(), slam_layers = 0;
             unsigned threads = 2;
-            if (slam_body.load() != body || slam_arm_address.load() != base() + slam_step || steps == t.slam_seen_steps)
-                slam_body = body, threads = steer_debug_register(steer_arm_address.load(), base() + slam_step);
+            if (slam_body.load() != data || slam_arm_address.load() != base() + slam_step || steps == t.slam_seen_steps)
+                slam_body = data, slam_seen = 0, threads = steer_debug_register(steer_arm_address.load(), base() + slam_step);
             t.slam_seen_steps = steps, t.slam_rate_used = threads > 1 ? static_cast<float>(speed) / 100.0f : 1.0f;
             slam_rate = t.slam_rate_used;
             if (!t.slam_told)
@@ -8865,6 +8890,20 @@ namespace ingame
                 t.slam_told = true;
                 std::cout << "Boss speed: his stand and slam play at " << speed << "% (his animation stepped faster as he stands; a breakpoint in " << threads << " threads)\n"
                           << std::flush;
+                // (V1.3.54, once: the code around the step, for the log: what hands each character's animation its step and
+                // what steps it, in case the slam's own time is kept somewhere else)
+                static bool dumped = false;
+                if (!dumped)
+                {
+                    dumped = true;
+                    std::set<Address> done;
+                    for (const auto rva : {0xf7c2a0ULL, 0xf7dfa0ULL, 0xf7bb80ULL})
+                    {
+                        DWORD64 image = 0;
+                        if (const auto entry = RtlLookupFunctionEntry(base() + rva, &image, nullptr); entry && image == base())
+                            code_dump_tree(image + entry->BeginAddress, std::min<Address>(image + entry->EndAddress, image + entry->BeginAddress + 0x1000), done);
+                    }
+                }
             }
         }
         // V1.3.37 research, in case the game still turns him back: the places on him holding his facing (as an angle, in radians
@@ -11661,15 +11700,38 @@ namespace ingame
         // Papu's step longer as he stands, and on past it (so it doesn't stop there again)
         void slam_apply(CONTEXT &c)
         {
+            slam_hits.fetch_add(1, std::memory_order_relaxed);
             float dt = 0;
             std::memcpy(&dt, &c.Xmm0, sizeof dt);
-            const auto body = slam_body.load(std::memory_order_acquire);
-            if (body && c.Rdx >= 0x10000 && !(c.Rdx & 7) && *reinterpret_cast<const std::uint64_t *>(c.Rdx) == body)
+            const auto data = slam_body.load(std::memory_order_acquire);
+            std::uint64_t body = 0;
+            // (V1.3.54: his by where his slot's body leads, read safely; see slam_body)
+            if (data && read(static_cast<Address>(c.Rdx), body) && body >= 0x10000)
             {
-                slam_steps.fetch_add(1, std::memory_order_relaxed);
-                const float rate = slam_rate.load(std::memory_order_relaxed);
-                if (rate > 1.0f && rate <= 2.0f && std::isfinite(dt) && dt > 0)
-                    dt *= rate, slam_faster.fetch_add(1, std::memory_order_relaxed);
+                bool his = body == slam_seen.load(std::memory_order_relaxed);
+                if (!his)
+                {
+                    std::uint64_t holder = 0, record = 0;
+                    std::int16_t offset = 0;
+                    his = read(static_cast<Address>(body + 0x30), holder) && holder >= 0x10000 && read(static_cast<Address>(holder), record) && record >= 0x10000 &&
+                          read(static_cast<Address>(record + 0x14), offset) && record + static_cast<std::uint64_t>(static_cast<std::int64_t>(offset)) == data;
+                    if (his)
+                        slam_seen = body;
+                }
+                if (his)
+                {
+                    slam_steps.fetch_add(1, std::memory_order_relaxed);
+                    slam_dt.store(dt, std::memory_order_relaxed);
+                    float frame = 0;
+                    std::int32_t layer = -1;
+                    if (read(static_cast<Address>(c.R15 + 0x48), frame))
+                        slam_frame_dt.store(frame, std::memory_order_relaxed);
+                    if (read(static_cast<Address>(c.R15 + 0x4c), layer) && layer >= 0 && layer < 32)
+                        slam_layers.fetch_or(1u << layer, std::memory_order_relaxed);
+                    const float rate = slam_rate.load(std::memory_order_relaxed);
+                    if (rate > 1.0f && rate <= 2.0f && std::isfinite(dt) && dt > 0)
+                        dt *= rate, slam_faster.fetch_add(1, std::memory_order_relaxed);
+                }
             }
             *reinterpret_cast<float *>(c.Rsp + 0x20) = dt;
             c.Rip += 6;
