@@ -4,6 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
+- **Logic fixes from the Stable V1.3.1 run** (new seeds): Piston It Away needs Slide to finish, and High Time's bonus round needs Body Slam to get past its metal crates to the boxes.
 - **Another try at the jump as his spin starts.** V1.3.41's watch caught what puts Papu Papu back every frame: a step of the game that copies his facing from his physics onto his picture. So his physics holds his real facing, and his spin starts from it. Now, as he aims, his physics is turned too, so the game itself should turn him and his spin should start where he slammed. This works from his first aimed slam (no waiting for his third spin).
 - If his spin still jumps, the watch now goes on his physics, to catch what turns that back.
 - **The Bosses options in the YAML** (the same ones as Stable V1.3.1): `harder_bosses`, `boss_health` (100–200), `boss_speed` (100–200) and `harder_bosses_aku_aku`. In the Testing build the slam aim is part of `harder_bosses`, and the test commands (`/boss_rules`, `/boss_health`, `/boss_speed`) still work on top of the YAML.

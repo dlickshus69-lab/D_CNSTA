@@ -393,10 +393,13 @@ CLEAR_MOVES = {
     "L209": ("Slide",),                 # Crash Crush: slide under the electric gates
     "L212": ("Spin", "Crouch Jump"),    # Sewer or Later: break the crate walls, crawl under the low pipes
     "L220": ("Slide",),                 # Bee-Having: slide under the electric fence, slide-jump the long gaps
+    "L221": ("Slide",),                 # Piston It Away: can't be finished without Slide (Eric's Stable V1.3.1 run)
 }
 # boxes in a level's bonus round that need a move the rest of the level doesn't
 BONUS_MOVES = {
     "L210": ("Spin",),                  # The Eel Deal's bonus round (Spin or Slide; logic expects Spin)
+    "L313": ("Body Slam",),             # High Time's bonus round: its boxes are past metal crates only a Body Slam gets
+                                        # through (Eric's Stable V1.3.1 run)
 }
 # first chamber AFTER each boss's award
 C3_POWER_STAGES = (6, 11, 16, 21)
@@ -658,7 +661,10 @@ def move_requirements(level, event, spin_shuffled, jump_only_levels, relaxed=Fal
     # and some crates (arrow crates, iron-bound crates, tall stacks, ...) need one of their own
     way = CLEAR_MOVES.get(level.key, ())
     if event.startswith("box:"):
-        extra = (*BONUS_MOVES.get(level.key, ()),) if "@bonus:" in event else ()
+        # (a bonus round's crates: in their own bonus stage, or named Crate_Bonus_ where the bonus round is part of the
+        # level itself, as in Crash 3's High Time)
+        bonus = "@bonus:" in event or event.startswith("box:Crate_Bonus")
+        extra = (*BONUS_MOVES.get(level.key, ()),) if bonus else ()
         way = tuple(dict.fromkeys((*way, *extra, *CRATE_MOVES.get((level.key, event), ()))))
     if relaxed:
         if event in ("clear", "crystal"):
