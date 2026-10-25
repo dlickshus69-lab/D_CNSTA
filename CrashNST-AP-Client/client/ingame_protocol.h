@@ -181,9 +181,9 @@ namespace ingame
         // the speeds between are even steps of his animation's pace (game_runtime.cpp, papu_stand_clock)
         unsigned boss_slam_ms = 450;
         // (V1.3.58 test, /boss_window) with the boss rules on: how long Papu Papu can be hit once his red ends, in ms, before
-        // he's red again until the slam after his next spin. V1.3.59: his time at 200% boss speed (V1.3.64, Eric: 1 s),
+        // he's red again until the slam after his next spin. V1.3.59: his time at 200% boss speed (V1.3.65, Eric: 1.3 s),
         // longer by the same pace at lower speeds (game_runtime.cpp, papu_window)
-        unsigned boss_window_ms = 1000;
+        unsigned boss_window_ms = 1300;
         // (V1.3.61, the YAML's boss_slam_time and boss_hit_window) his slam's time after he stands and the hit window, in ms,
         // at any boss speed; 0: by the boss speed (boss_slam_ms and boss_window_ms are then the 200% ones)
         unsigned boss_slam_fixed_ms = 0, boss_window_fixed_ms = 0;

@@ -599,7 +599,7 @@ void ClientRuntime::handle_commands()
                 // test (V1.3.58, Eric: "we'll start with 5, and if it's too long, we'll drop it down"): with the boss rules on,
                 // how long Papu Papu can be hit once his red ends before he's red again. V1.3.59 (Eric: "the two second is good
                 // for 200% speed ... scale it based on the speed"): the time at 200% boss speed, longer by the same pace at lower
-                // speeds (twice as long at 100%); "off" goes back to the seed's (V1.3.64: 1 s at 200% unless its YAML sets boss_hit_window)
+                // speeds (twice as long at 100%); "off" goes back to the seed's (V1.3.65: 1.3 s at 200% unless its YAML sets boss_hit_window)
                 double seconds = -1;
                 try
                 {
@@ -613,7 +613,7 @@ void ClientRuntime::handle_commands()
                     boss_window_test = -1;
                 else if (seconds >= 0.5 && seconds <= 10)
                     boss_window_test = static_cast<int>(seconds * 1000 + 0.5);
-                const double at = (boss_window_test >= 0 ? boss_window_test : 1000) / 1000.0;
+                const double at = (boss_window_test >= 0 ? boss_window_test : 1300) / 1000.0;
                 // (V1.3.61: or the seed's own time at any speed, its YAML's boss_hit_window in tenths of a second)
                 const auto &yaml = session.slot_data()["boss_hit_window"];
                 std::ostringstream out;
@@ -624,7 +624,7 @@ void ClientRuntime::handle_commands()
                 else
                     out << "Boss window: with the boss rules on, Papu Papu can be hit for " << at << " s once his red ends at 200% boss speed" << (boss_window_test >= 0 ? " (test)" : "")
                         << "; at 175% " << at * 200 / 175 << " s, 150% " << at * 200 / 150 << " s, 125% " << at * 200 / 125 << " s, 100% " << at * 2
-                        << " s; then he's red again until the slam after his next spin. /boss_window 0.5 to 10 sets the 200% one, /boss_window off goes back to the seed's (1 at 200% unless its YAML sets one).";
+                        << " s; then he's red again until the slam after his next spin. /boss_window 0.5 to 10 sets the 200% one, /boss_window off goes back to the seed's (1.3 at 200% unless its YAML sets one).";
                 print_console(out.str());
             }
             else if (command == "/boss_rules")

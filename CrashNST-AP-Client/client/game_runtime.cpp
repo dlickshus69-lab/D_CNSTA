@@ -5549,7 +5549,7 @@ namespace ingame
             std::uint64_t slam_wait_since = 0, start_timer_at = 0;
             // V1.3.58 (see papu_window): once his red ends, how long he can be hit (ms, /boss_window), until when, whether
             // that's on, and a red begun in his spin waits for the next one's end (red_skip_spin)
-            unsigned window_ms = 1000, window_lines = 0, window_percent = 200;
+            unsigned window_ms = 1300, window_lines = 0, window_percent = 200;
             std::uint64_t window_until = 0;
             bool window_on = false, red_skip_spin = false, window_fixed = false;
             // V1.3.59 (Eric's V1.3.58 run: after some hits the game's immunity timer didn't run, so his red ended as his next
@@ -5605,6 +5605,22 @@ namespace ingame
             unsigned pushes = 0, push_held = 0, push_back = 0, push_lines = 0, reach_lines = 0;
             int push_way = 1, push_check = 0;
             std::array<float, 3> push_to{};
+            // V1.3.65 (see crash_places_find and papu_chair): the places around Crash that hold where he is (each with its scale,
+            // and whether its height and depth are swapped), the search's step (0 not yet, 1 found and checking that they follow
+            // him, 2 checked, 9 none), where he was then; the wall's pushes, how they went, and the last one's place
+            struct CrashPlace
+            {
+                Address at = 0;
+                std::string where;
+                float scale = 1;
+                bool swapped = false;
+            };
+            std::vector<CrashPlace> cplaces;
+            int cplace_step = 0;
+            std::array<float, 3> cplace_from{};
+            unsigned wall_pushes = 0, wall_held = 0, wall_back = 0, wall_lines = 0;
+            bool wall_check = false;
+            std::array<float, 2> wall_to{};
             Address ms_wait_seen = 0;
             float ms_wait_last = 0;
             unsigned slams_seen = 0;
@@ -9238,6 +9254,103 @@ namespace ingame
             const double span = newest[0] - (*from)[0];
             t.crash_v = {static_cast<float>((newest[1] - (*from)[1]) / span), static_cast<float>((newest[2] - (*from)[2]) / span)};
         }
+        // V1.3.65 (Eric's V1.3.64 run: "the chair, it didn't do anything": his place (+32) and his transform's matrix were put
+        // back by the game after every push): every place around Crash that holds where he is: his actor, his transform, his
+        // parts and the objects they point to, two levels down, read for three numbers in a row that are his place (within 1),
+        // his place in hundredths (physics may keep metres), or either with his height and depth swapped (physics may have its
+        // own up). They're kept if they follow him (see papu_chair)
+        bool crash_place_is(const float *f, const std::array<float, 3> &at, float scale, bool swapped, float tolerance)
+        {
+            const float x = at[0] * scale, y = (swapped ? at[2] : at[1]) * scale, z = (swapped ? at[1] : at[2]) * scale;
+            return std::abs(f[0] - x) <= tolerance && std::abs(f[1] - y) <= tolerance && std::abs(f[2] - z) <= tolerance;
+        }
+        void crash_places_find(BossTuning &t, Address crash, const std::array<float, 3> &at)
+        {
+            t.cplaces.clear();
+            ReadableRegions ok;
+            std::set<Address> seen;
+            std::vector<std::tuple<Address, unsigned, std::string>> regions;
+            std::size_t total = 0;
+            const auto add = [&](Address a, unsigned bytes, const std::string &where) {
+                if (regions.size() >= 1500 || total > 0x800000 || a < 0x10000 || (a & 7) || !seen.insert(a).second)
+                    return false;
+                while (bytes >= 0x100 && !ok(a, bytes))
+                    bytes /= 2;
+                if (bytes < 0x100)
+                    return false;
+                regions.emplace_back(a, bytes, where), total += bytes;
+                return true;
+            };
+            const auto object_type = [&](Address p) -> Address {
+                if (p < 0x10000 || (p & 7) || !ok(p, 16))
+                    return 0;
+                const auto vt = value<Address>(p);
+                return vt >= base() && vt < module_end() ? vt - base() : 0;
+            };
+            add(crash, 0x1000, "his actor");
+            if (const auto transform = value<Address>(crash + 48))
+                add(transform, 0x100, "his transform");
+            std::vector<std::pair<Address, std::string>> level, next;
+            for (const auto part : list(value<Address>(crash + 24), 128))
+                if (const auto type = object_type(part))
+                {
+                    const auto name = "his part " + hex(static_cast<unsigned>(type));
+                    if (add(part, 0x1000, name))
+                        level.emplace_back(part, name);
+                }
+            for (const unsigned bytes : {0x800u, 0x400u})
+            {
+                next.clear();
+                for (const auto &[object, name] : level)
+                {
+                    std::vector<Address> inner((bytes == 0x800 ? 0x400 : 0x200) / 8);
+                    if (!read(object, inner))
+                        continue;
+                    for (std::size_t i = 1; i < inner.size(); ++i)
+                    {
+                        const auto p = inner[i];
+                        const auto ptype = object_type(p);
+                        if (!ptype || p == crash || seen.count(p))
+                            continue;
+                        const auto where = name + " " + hex(static_cast<unsigned>(i * 8)) + " -> " + hex(static_cast<unsigned>(ptype));
+                        if (add(p, bytes, where))
+                            next.emplace_back(p, where);
+                    }
+                }
+                level.swap(next);
+            }
+            // (no region reaches into the next one read, so each number is in the one object it's really in)
+            std::sort(regions.begin(), regions.end(), [](const auto &a, const auto &b) { return std::get<0>(a) < std::get<0>(b); });
+            for (std::size_t i = 0; i + 1 < regions.size(); ++i)
+                if (std::get<0>(regions[i]) + std::get<1>(regions[i]) > std::get<0>(regions[i + 1]))
+                    std::get<1>(regions[i]) = static_cast<unsigned>((std::get<0>(regions[i + 1]) - std::get<0>(regions[i])) & ~Address(3));
+            for (const auto &[a, bytes, where] : regions)
+            {
+                if (bytes < 12)
+                    continue;
+                std::vector<float> f(bytes / 4);
+                if (!read(a, f))
+                    continue;
+                for (std::size_t i = 0; i + 2 < f.size() && t.cplaces.size() < 64; ++i)
+                {
+                    if (!std::isfinite(f[i]) || !std::isfinite(f[i + 1]) || !std::isfinite(f[i + 2]))
+                        continue;
+                    for (const float scale : {1.0f, 0.01f})
+                    {
+                        bool found = false;
+                        for (const bool swapped : {false, true})
+                            if (crash_place_is(&f[i], at, scale, swapped, scale == 1.0f ? 1.0f : 0.01f))
+                            {
+                                t.cplaces.push_back({a + i * 4, where + " +" + hex(static_cast<unsigned>(i * 4)), scale, swapped});
+                                found = true;
+                                break;
+                            }
+                        if (found)
+                            break;
+                    }
+                }
+            }
+        }
         // V1.3.64 (Eric: "let's start working on blocking the chair. So maybe we just put an invisible wall ... by the chair
         // too. So it basically is just a circle"): the chair is where he sits before the fight (state 6), the arena's middle
         // where he stands in it. Research for the wall: Crash's farthest from the arena's middle in 24 directions (0: toward the
@@ -9253,7 +9366,7 @@ namespace ingame
             if (s == 6 && t.speed < 10)
                 t.chair_at = {m[12], m[13], m[14]}, t.chair_known = true;
             if (s == 5)
-                t.arena_known = false; // (looked for again as he lands)
+                t.arena_known = false, t.cplace_step = 0; // (looked for again as he lands; V1.3.65: and Crash's places, after a death)
             if (s == 1 && !t.arena_known)
                 t.arena_at = {m[12], m[13], m[14]}, t.arena_known = true;
             if (!t.chair_known || !t.arena_known)
@@ -9281,8 +9394,8 @@ namespace ingame
                 for (std::size_t b = 0; b < t.reach.size(); ++b)
                     if (t.reach[b] > 0)
                         out << " " << static_cast<int>(b * 15) - 180 << ": " << static_cast<int>(t.reach[b]) << " " << static_cast<int>(t.reach_z[b]);
-                out << "; nearest the chair " << static_cast<int>(t.chair_near) << " (height " << static_cast<int>(t.chair_near_z) << "); pushes " << t.pushes << " (held "
-                    << t.push_held << ", put back " << t.push_back << ")";
+                out << "; nearest the chair " << static_cast<int>(t.chair_near) << " (height " << static_cast<int>(t.chair_near_z) << "); the wall's pushes " << t.wall_pushes
+                    << " (held " << t.wall_held << ", didn't " << t.wall_back << ")";
                 std::cout << out.str() << "\n" << std::flush;
             };
             if (s == 5 || s == 6)
@@ -9305,38 +9418,74 @@ namespace ingame
             if (to_chair < t.chair_near)
                 t.chair_near = to_chair, t.chair_near_z = h;
             told(false);
-            // (the push: how the last one went, then another while he's still on the chair)
-            if (t.push_check && now - t.push_at >= 30)
+            // V1.3.65: the places holding where Crash is, found once he's in the fight, and kept if they follow him once he's 40
+            // or more from where they were found (see crash_places_find)
+            if (t.cplace_step == 0)
             {
-                // (where he's seen now: his place, and his transform's matrix, what's drawn)
+                crash_places_find(t, crash, at);
+                t.cplace_from = at, t.cplace_step = t.cplaces.empty() ? 9 : 1;
+                if (t.cplaces.empty())
+                    std::cout << "Boss chair research: no place around Crash holds where he is: no wall\n" << std::flush;
+            }
+            else if (t.cplace_step == 1 && std::hypot(at[0] - t.cplace_from[0], at[1] - t.cplace_from[1]) >= 40)
+            {
+                std::vector<BossTuning::CrashPlace> kept;
+                std::ostringstream out;
+                for (const auto &p : t.cplaces)
+                {
+                    std::array<float, 3> f{};
+                    if (read(p.at, f) && crash_place_is(f.data(), at, p.scale, p.swapped, p.scale == 1.0f ? 2.0f : 0.02f))
+                    {
+                        kept.push_back(p);
+                        if (kept.size() <= 16)
+                            out << "\n  " << p.where << (p.scale != 1.0f ? " (in hundredths)" : "") << (p.swapped ? " (height and depth swapped)" : "");
+                    }
+                }
+                std::cout << "Boss chair research: " << t.cplaces.size() << " places around Crash held where he was, " << kept.size() << " followed him" << out.str() << "\n"
+                          << std::flush;
+                t.cplaces = std::move(kept), t.cplace_step = t.cplaces.empty() ? 9 : 2;
+                t.wall_check = false;
+            }
+            // (the last push: did it hold, as he's drawn?)
+            if (t.wall_check)
+            {
+                t.wall_check = false;
                 Matrix c{};
                 const bool drawn = entity_matrix(crash, c) && std::isfinite(c[12]) && std::isfinite(c[13]);
-                const float off_place = std::hypot(at[0] - t.push_to[0], at[1] - t.push_to[1]), off_drawn = drawn ? std::hypot(c[12] - t.push_to[0], c[13] - t.push_to[1]) : 1e9f;
-                const bool held = off_drawn < 0.05f * span || (!drawn && off_place < 0.05f * span);
-                ++(held ? t.push_held : t.push_back);
-                if (t.push_lines < 12)
-                    ++t.push_lines, std::cout << "Boss chair: Crash pushed off the chair by his " << (t.push_way == 1 ? "place" : "transform's matrix") << ": "
-                                              << (held ? "it held" : "the game put him back") << " (his place " << static_cast<int>(off_place) << " from where he was set, drawn "
-                                              << static_cast<int>(off_drawn) << " from it)\n" << std::flush;
-                if (!held && t.push_way == 1 && t.push_back >= 2 && !t.push_held)
-                    t.push_way = 2; // (his place didn't hold: his transform's matrix next)
-                t.push_check = 0;
+                const float off = drawn ? std::hypot(c[12] - t.wall_to[0], c[13] - t.wall_to[1]) : std::hypot(at[0] - t.wall_to[0], at[1] - t.wall_to[1]);
+                const bool held = off < 15;
+                ++(held ? t.wall_held : t.wall_back);
+                if (t.wall_lines < 16)
+                    ++t.wall_lines, std::cout << "Boss chair: the wall's push " << (held ? "held" : "didn't hold") << " (" << static_cast<int>(off) << " from where he was set)\n"
+                                              << std::flush;
             }
-            if (!state.boss_rules || to_chair > 0.3f * span || t.push_check || now - t.push_at < 400 || t.pushes >= 40)
+            // V1.3.65 (Eric: "an invisible wall ... by the chair too. So it basically is just a circle"): with the harder rules on,
+            // toward the chair Crash can't go farther from the arena's middle than 65% of the way to the chair (V1.3.64's run: he
+            // stood on it 66 to 72 from where Papu Papu sits, 126 to 168 high), from 30 degrees either side of it out to no wall at
+            // 50 degrees; past it, every place that follows him is set back onto it (as he's drawn too). (V1.3.64's push off the
+            // chair by his place or his transform's matrix alone is gone: the game put him back every time)
+            const float side = std::abs(angle), front = 0.65f * span; // (not "near": a Windows macro)
+            const float wall = side <= 0.5236f ? front : side >= 0.8727f ? 1e9f : front + (side - 0.5236f) / (0.8727f - 0.5236f) * 2.0f * span;
+            if (!state.boss_rules || t.cplace_step != 2 || d <= wall || d < 1 || crash_dead_now())
                 return;
-            const float k = 0.15f * span / std::max(1.0f, d);
-            t.push_to = {at[0] - ax * k, at[1] - ay * k, at[2]};
-            bool wrote = false;
-            if (t.push_way == 1)
-                wrote = write(crash + 32, std::array<float, 2>{t.push_to[0], t.push_to[1]});
-            else if (const auto transform = value<Address>(crash + 48))
-                wrote = write(transform + 32 + 48, std::array<float, 2>{t.push_to[0], t.push_to[1]});
-            if (!wrote)
-                return;
-            ++t.pushes, t.push_at = now, t.push_check = 1;
-            if (t.push_lines < 12)
-                ++t.push_lines, std::cout << "Boss chair: Crash is on the chair (" << static_cast<int>(to_chair) << " from it, height " << static_cast<int>(h)
-                                          << "): pushed toward the arena's middle by his " << (t.push_way == 1 ? "place" : "transform's matrix") << "\n" << std::flush;
+            const float k = wall / d;
+            t.wall_to = {t.arena_at[0] + ax * k, t.arena_at[1] + ay * k};
+            for (const auto &p : t.cplaces)
+            {
+                std::array<float, 3> f{};
+                if (!read(p.at, f))
+                    continue;
+                f[0] = t.wall_to[0] * p.scale;
+                (p.swapped ? f[2] : f[1]) = t.wall_to[1] * p.scale;
+                write(p.at, f);
+            }
+            if (const auto transform = value<Address>(crash + 48))
+                write(transform + 32 + 48, std::array<float, 2>{t.wall_to[0], t.wall_to[1]});
+            write(crash + 32, std::array<float, 2>{t.wall_to[0], t.wall_to[1]});
+            ++t.wall_pushes, t.wall_check = true;
+            if (t.wall_lines < 16)
+                ++t.wall_lines, std::cout << "Boss chair: Crash went past the wall by the chair (" << static_cast<int>(d) << " from the middle, the wall " << static_cast<int>(wall)
+                                          << ", height " << static_cast<int>(h) << "): set back onto it by " << t.cplaces.size() << " places\n" << std::flush;
         }
         void papu_aim(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
@@ -9523,10 +9672,11 @@ namespace ingame
             {
                 // V1.3.64 (Eric: "he'll kind of predict where you're going to be based on the movement ... But at the same time,
                 // you still have enough time to react"): aimed at where Crash will be as his slam lands if he keeps going as he
-                // is now (see papu_crash_motion), 80% of the way: keep running the same way and it lands on him, turn or stop
-                // and it doesn't (his aim is held from half the time to his slam, as before)
+                // is now (see papu_crash_motion): keep running the same way and it lands on him, turn or stop and it doesn't (his
+                // aim is held from half the time to his slam, as before). V1.3.65 (Eric: V1.3.64's 80% was "like a 50-50 ... I
+                // just want to make it where it's ... just possible still"): all the way
                 const float slam_s = t.sc_target > 0.1f ? t.sc_target : static_cast<float>(t.slam_normal ? t.slam_normal : 900) / 1000.0f / static_cast<float>(factor);
-                const float lead = 0.8f * std::clamp(slam_s - static_cast<float>(since) / 1000.0f, 0.0f, 0.6f);
+                const float lead = std::clamp(slam_s - static_cast<float>(since) / 1000.0f, 0.0f, 0.6f);
                 const float dx = c[12] + t.crash_v[0] * lead - m[12], dy = c[13] + t.crash_v[1] * lead - m[13];
                 t.aim_lead_last = std::hypot(t.crash_v[0], t.crash_v[1]) * lead, t.aim_speed_last = std::hypot(t.crash_v[0], t.crash_v[1]);
                 const float most = 15.708f * dt;
@@ -9724,8 +9874,9 @@ namespace ingame
         // own immunity as always; the fight starting over, or the rule off, ends it
         // V1.3.59 (Eric: "the two second is good for 200% speed ... scale it based on the speed"): /boss_window's time is his
         // time at 200%, and it's longer by the same pace at lower speeds. V1.3.61 (Eric: "make the hit window for 200% speed to
-        // 1.5 seconds"); V1.3.64 (Eric: "instead of ... the hit window being 1.5, let's make it 1 second"): 1 s at 200%, 1.14 s
-        // at 175%, 1.33 s at 150%, 1.6 s at 125%, 2 s at 100%; or the seed's own time at any speed (its YAML's boss_hit_window).
+        // 1.5 seconds"); V1.3.64 (Eric: "let's make it 1 second"); V1.3.65 (Eric: "1 second is too short, so let's make it 1.3
+        // seconds"): 1.3 s at 200%, 1.49 s at 175%, 1.73 s at 150%, 2.08 s at 125%, 2.6 s at 100%; or the seed's own time at
+        // any speed (its YAML's boss_hit_window).
         // V1.3.64 (Eric's V1.3.63 clips: after his slam he could be hit into his next spin, turned red in it, and that spin didn't
         // count, so he stayed red at the slam after it): his time to be hit also ends as his next spin starts, and that spin counts
         void papu_window(BossTuning &t, const Shared &state, int s, std::uint64_t now)
