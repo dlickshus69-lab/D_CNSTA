@@ -4,9 +4,13 @@ This is the **Stable build**, for playing seeds: everything finished so far. Wha
 
 Updating in the middle of a seed is fine: the client fixes work right away. The logic fixes change seeds generated with this release's `crash_nst.apworld`. A seed already running keeps its item placement, but since V1.3.4 the client shows the checks behind obstacles found since as needing their move (F10 still gives normal controls where a move is missing).
 
-## What's new in V1.3.5
+## What's new in V1.3.6
 
-- **Tomb Wader needs Spin** (Eric): right at the start, its first door only opens when you spin the wheel next to it. Logic expects Spin for everything there in new seeds, and on a running seed the client shows Tomb Wader's checks as needing Spin.
+- **Stormy Ascent: the crates shut in between iron crates need Spin** (Eric). Past the first platform, Crash crates sit between iron crates, and so does the "!" crate that brings out the outlined crates, so they all need Spin from the side. The crate data has no plain iron crates, so logic couldn't see it. New seeds expect Spin, and on a running seed the client shows these checks as needing Spin.
+
+## From V1.3.5
+
+- Tomb Wader needs Spin (its first door opens only when you spin the wheel next to it), in new seeds and shown on running ones.
 
 ## From V1.3.4
 
