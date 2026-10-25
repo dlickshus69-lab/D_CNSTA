@@ -395,6 +395,7 @@ CLEAR_MOVES = {
     "L212": ("Spin", "Crouch Jump"),    # Sewer or Later: break the crate walls, crawl under the low pipes
     "L220": ("Slide",),                 # Bee-Having: slide under the electric fence, slide-jump the long gaps
     "L221": ("Slide",),                 # Piston It Away: can't be finished without Slide (Eric's Stable V1.3.1 run)
+    "L320": ("Spin",),                  # Tomb Wader: right at the start a door opens only when its wheel is spun (Eric)
 }
 # boxes in a level's bonus round that need a move the rest of the level doesn't
 BONUS_MOVES = {
