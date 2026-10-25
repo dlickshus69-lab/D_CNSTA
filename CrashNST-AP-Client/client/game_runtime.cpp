@@ -5561,7 +5561,7 @@ namespace ingame
             };
             std::vector<FacingPlace> facing_places;
             std::map<Address, int> facing_unit;
-            float aim_from = 0;
+            float aim_from = 0, aim_prev = 0; // (and what was set the frame before last: the game may take a frame to follow)
             int aim_mode = 0;
             unsigned aim_mode_frames = 0, aim_mode_kept = 0, aim_modes = 0, facing_told = 0;
             // V1.3.36 (see papu_slam_rate): his slam's time from when he stands, as the game plays it (the shortest seen while
@@ -8083,9 +8083,9 @@ namespace ingame
         // slamming towards Crash last location"): V1.3.38's log, the game put him back every frame, so each frame's turn was a
         // new small one from the game's facing (15 degrees at most) and he never got around to Crash. Now the turn is kept from
         // frame to frame (from his facing as he stood, toward Crash), and his facing's own places in his parts are set too (see
-        // papu_facing_set), so the game itself has him facing Crash. If the game still puts him back every frame for 10 frames,
-        // only his matrix is set (what stayed after a hit in V1.3.36), and if it still does, he's let be for that slam (no
-        // flicker between the two facings)
+        // papu_facing_set), so the game itself has him facing Crash. If the game still puts him back to his own facing every
+        // frame for 10 frames, only his matrix is set (what stayed after a hit in V1.3.36), and if it still does, he's let be
+        // for that slam (no flicker between the two facings)
         void papu_aim(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
             // (half the time to his slam: the game's own, or shorter once his slam plays faster, see papu_slam_rate)
@@ -8110,7 +8110,7 @@ namespace ingame
                         std::cout << "Boss rule: he aimed his slam at Crash: turned " << static_cast<int>(wrap_angle(t.aim_lock - t.aim_from) * 57.29578f)
                                   << " degrees from his own facing and held it " << (slammed ? "until his slam" : "until he stopped standing") << " (" << t.aim_kept
                                   << " frames it stayed, " << t.aim_overridden << " the game moved him; "
-                                  << (t.aim_modes & 4 ? "the game kept putting him back: let be after " + std::to_string(t.aim_kept + t.aim_overridden - t.aim_mode_frames) + " frames"
+                                  << (t.aim_modes & 4 ? "the game kept putting him back: let be after " + std::to_string(t.aim_kept + t.aim_overridden) + " frames"
                                       : t.aim_modes & 2 ? std::string("his facing's places didn't hold him: then only his matrix")
                                                         : std::string("his facing's places and his matrix"))
                                   << ")" << (t.facing_places.empty() ? std::string("; none of his facing's places found on him") : places.str()) << "\n" << std::flush;
@@ -8135,7 +8135,8 @@ namespace ingame
             {
                 papu_yaw_research(t, yaw);
                 // (this stand's start: his facing as the game has it, and his facing's places on him)
-                t.aim_lock = t.aim_from = t.aim_yaw = yaw, t.aim_mode = 0, t.aim_mode_frames = t.aim_mode_kept = 0, t.aim_modes = 1;
+                // (nothing set yet: the first frame's look compares only with what this one sets)
+                t.aim_lock = t.aim_from = yaw, t.aim_yaw = std::nanf(""), t.aim_mode = 0, t.aim_mode_frames = t.aim_mode_kept = 0, t.aim_modes = 1;
                 t.facing_places = papu_facing_places(t.papu);
                 // (the first stands of a visit: what each of them holds, and what they are, from the game's own names)
                 if (t.facing_told < 2)
@@ -8150,17 +8151,27 @@ namespace ingame
                     std::cout << out.str() << "\n" << std::flush;
                 }
             }
-            else
+            else if (t.aim_mode < 2)
             {
-                const bool back = std::abs(wrap_angle(yaw - t.aim_yaw)) > 0.03f;
+                // (it stayed if he faces what was set last frame, or the frame before: the game may follow a frame late)
+                const auto faces = [&](float a) { return std::abs(wrap_angle(yaw - a)) <= 0.03f; }; // (false for nothing set yet)
+                const bool back = !faces(t.aim_yaw) && !faces(t.aim_prev);
                 ++(back ? t.aim_overridden : t.aim_kept);
                 ++t.aim_mode_frames, t.aim_mode_kept += !back;
-                // (10 frames and none stayed, while he's still turned away from his aim: the next way, see above)
-                if (t.aim_mode < 2 && t.aim_mode_frames >= 10 && !t.aim_mode_kept && std::abs(wrap_angle(yaw - t.aim_lock)) > 0.17f)
+                // (the next way, see above: after 10 frames where none stayed and the game had him back at his own facing, or
+                // 30 where none stayed, while he's still turned away from his aim. V1.3.40: a game that follows a frame late, or
+                // turns him toward what's set a little at a time, isn't given up on)
+                const bool undone = std::abs(wrap_angle(yaw - t.aim_from)) < 0.05f;
+                if (t.aim_mode_frames >= 10 && !t.aim_mode_kept && std::abs(wrap_angle(yaw - t.aim_lock)) > 0.17f && (undone || t.aim_mode_frames >= 30))
+                {
+                    // (his facing's places back as the game had them, so they can't be what puts him back now)
+                    if (t.aim_mode == 0)
+                        papu_facing_set(t, yaw, t.aim_from);
                     ++t.aim_mode, t.aim_mode_frames = t.aim_mode_kept = 0, t.aim_modes |= 1u << t.aim_mode;
+                }
             }
             const float dt = t.aim_wrote && t.aim_last ? std::clamp(static_cast<float>(now - t.aim_last) / 1000.0f, 0.005f, 0.05f) : 0.016f;
-            t.aim_last = now, t.aim_wrote = true, t.aim_yaw = yaw;
+            t.aim_prev = t.aim_yaw, t.aim_last = now, t.aim_wrote = true, t.aim_yaw = yaw;
             if (aiming)
             {
                 const float dx = c[12] - m[12], dy = c[13] - m[13];

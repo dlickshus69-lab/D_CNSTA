@@ -5,7 +5,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 ## What's new
 
 - **Every slam aimed at Crash, for real this time** (all but his first one as he comes into the arena). V1.3.38's log showed the game putting Papu Papu back to his own facing every single frame, so each frame's turn was a new little one (15 degrees at most) and he never got all the way around to Crash. Now his turn carries over from frame to frame, and it's also set in the two places the game keeps his facing (V1.3.38's search found them), so the game itself has him facing Crash, and his spin should start from where he slammed.
-- If the game still puts him back, the client tries the way that held after a hit in V1.3.36 (only his picture turned), and if that doesn't hold either, it leaves that one slam as the game has it instead of flickering between two facings.
+- If the game still puts him back to his own facing, the client tries the way that held after a hit in V1.3.36 (only his picture turned), and if that doesn't hold either, it leaves that one slam as the game has it instead of flickering between two facings.
+- New in V1.3.40 (V1.3.39 had everything else here first): it gives the game a frame to catch up and lets it turn him a little at a time before falling back, so a slam isn't given up on too early, and on a fallback it puts the game's own facing back where it was first, so the fallback works the way V1.3.36's did after a hit.
 - **No more dying after the last hit.** In V1.3.38's log the last hit landed just as his spin started, and 1.3 seconds after he was beaten his spinning staff still hit Crash. Once he's beaten, his attack can't hurt Crash.
 - The log now says for each slam which way held him, and names the two places that keep his facing (from the game's own names for them).
 - From V1.3.38: the freeze fix (the game froze as he stood up after his first spin in V1.3.37).
