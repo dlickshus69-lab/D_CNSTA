@@ -373,6 +373,55 @@ namespace crash_colors
         }
         return out;
     }
+    std::vector<std::string> already_colored(const std::vector<unsigned char> &fur, const std::vector<unsigned char> &cloth,
+                                             const std::vector<unsigned char> &hair)
+    {
+        // the share of a texture's block colors (full-size level only) that `pick` takes; -1 when it isn't laid out as expected
+        const auto share = [](const std::vector<unsigned char> &igz, const std::function<bool(std::size_t, const Hsv &)> &pick) {
+            const bool bc1 = image_start(igz, bc1_bytes) != 0;
+            const auto header = image_start(igz, bc1 ? bc1_bytes : bc3_bytes);
+            if (!header)
+                return -1.0;
+            const std::size_t block_bytes = bc1 ? 8 : 16, color_at = bc1 ? 0 : 8;
+            std::size_t all = 0, picked = 0;
+            for (std::size_t k = 0; k < 256 * 256; ++k)
+                for (int e = 0; e < 2; ++e)
+                {
+                    std::uint16_t c;
+                    std::memcpy(&c, igz.data() + header + k * block_bytes + color_at + e * 2, 2);
+                    double rgb[3];
+                    decode565(c, rgb);
+                    if (pick(k, hsv_of(rgb)))
+                        ++picked;
+                    ++all;
+                }
+            return all ? static_cast<double>(picked) / all : -1.0;
+        };
+        const auto fur_map = block_map(fur_block_runs, std::size(fur_block_runs), 256);
+        std::size_t fur_blocks = 0;
+        for (const bool b : fur_map)
+            fur_blocks += b;
+        // the fur's orange, over the fur's own blocks
+        const double orange = share(fur, [&](std::size_t k, const Hsv &c) { return fur_map[k] && c.h >= 0.015 && c.h <= 0.14 && c.s >= 0.35; }) *
+                              (256.0 * 256.0) / std::max<std::size_t>(fur_blocks, 1);
+        const double blue = share(cloth, [](std::size_t, const Hsv &c) { return c.h >= 0.5 && c.h <= 0.75 && c.s >= 0.3; });
+        const double red = share(cloth, [](std::size_t, const Hsv &c) {
+            return (c.h >= 0.75 || c.h <= 0.03) && c.s >= 0.15 && !(c.h >= 0.75 && c.h < 0.88 && c.v > 0.45 && c.s > 0.3);
+        });
+        // the mohawk: below the eyebrows' strip and its band
+        const double mohawk = share(hair, [](std::size_t k, const Hsv &c) { return k / 256 >= 61 && (c.h >= 0.9 || c.h <= 0.12) && c.s >= 0.2; }) *
+                              256.0 / (256.0 - 61.0);
+        std::vector<std::string> colored;
+        if (orange < 0.6)
+            colored.push_back("fur");
+        if (blue < 0.25)
+            colored.push_back("pants");
+        if (red < 0.12)
+            colored.push_back("shoes");
+        if (mohawk < 0.6)
+            colored.push_back("mohawk");
+        return colored;
+    }
     std::vector<unsigned char> recolor_hair(const std::vector<unsigned char> &igz, const std::optional<Rgb> &hair, const std::optional<Rgb> &eyebrows)
     {
         // CrashHair_C is BC3 (16-byte blocks, their colors at +8); CrashHair_Fruit_C is BC1 (8-byte blocks)

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from collections import Counter
 import hashlib
 import json
+import struct
 from pkgutil import get_data
 
 GAME = "Crash Bandicoot N. Sane Trilogy"
@@ -398,8 +399,15 @@ CLEAR_MOVES = {
 # boxes in a level's bonus round that need a move the rest of the level doesn't
 BONUS_MOVES = {
     "L210": ("Spin",),                  # The Eel Deal's bonus round (Spin or Slide; logic expects Spin)
-    "L313": ("Body Slam",),             # High Time's bonus round: its boxes are past metal crates only a Body Slam gets
-                                        # through (Eric's Stable V1.3.1 run)
+    "L313": ("Crouch Jump",),           # High Time's bonus round: its boxes are past a stack of four iron crates, too high
+                                        # without Crouch Jump (or Double Jump) (Eric's Stable V1.3.1 run)
+}
+# levels whose way is blocked part way through (V1.3.43): (moves, axis 0/1/2 for x/y/z, the coordinate past the obstacle,
+# whether the bonus round is past it too). The clear and the crystal need the moves, and so do the boxes past the obstacle.
+CLEAR_GATES = {
+    # Jungle Rollers: right after the first checkpoint a crate wall 4 wide and 3 high (y 13488) fills the path, and two
+    # of the three Tawna tokens for the bonus round are past it (Eric's Stable V1.3.1 run)
+    "L102": (("Spin",), 1, 13400, True),
 }
 # first chamber AFTER each boss's award
 C3_POWER_STAGES = (6, 11, 16, 21)
@@ -524,7 +532,9 @@ def _crate_moves():
     - arrow crates bounce Crash when he jumps on them: Spin breaks them
     - iron-bound crates (Crash 2 and 3) only break under a Body Slam
     - a crate sitting on a TNT or Nitro crate (often with an iron crate on top, as in The High Road and Heavy
-      Machinery) and every crate in a stack four or more high (Cold Hard Crash): Spin from the side
+      Machinery) and every crate in a stack three or more high (Cold Hard Crash; V1.3.43, three: Jungle Rollers' crate
+      wall): Spin from the side
+    - (V1.3.43) a crate right under an iron-bound crate, which doesn't break when landed on (The Pits' bonus round): Spin
     - Turtle Woods' underground room, below the floor Crash body slams through: Body Slam"""
     import struct
     from collections import defaultdict
@@ -556,12 +566,18 @@ def _crate_moves():
                 high += 1
             on_explosive = any(explosive(other) and abs(px - x) < 30 and abs(py - y) < 30 and 55 < z - pz < 105
                                for other, (px, py, pz) in members)
-            if high - low + 1 >= 4 or on_explosive:
+            under_iron_bound = any("IronBound" in other["name"] and abs(px - x) < 30 and abs(py - y) < 30 and 55 < pz - z < 105
+                                   for other, (px, py, pz) in members)
+            if high - low + 1 >= 3 or on_explosive or under_iron_bound:
                 moves[(crate["level"], crate_event(crate))].add("Spin")
     return {key: tuple(sorted(value)) for key, value in moves.items()}
 
 
 CRATE_MOVES = _crate_moves()
+# where each crate is, for CLEAR_GATES
+CRATE_SPOTS = {
+    (crate["level"], crate_event(crate)): struct.unpack("<3f", bytes.fromhex(crate["position_bits"])) for crate in CRATES
+}
 
 
 def crate_location(crate):
@@ -633,7 +649,7 @@ MOVE_OVERRIDES = {}
 def easiest_start(starting_levels):
     """with Spin shuffled, the one starting level logic expects you to clear by jumping alone.
     level shuffle can start you anywhere, so pick the earliest level by its own position in its game."""
-    regular = [key for key in starting_levels if key not in GIMMICK_LEVELS and key not in CLEAR_MOVES] or [
+    regular = [key for key in starting_levels if key not in GIMMICK_LEVELS and key not in CLEAR_MOVES and key not in CLEAR_GATES] or [
         key for key in starting_levels if key not in GIMMICK_LEVELS
     ] or list(starting_levels)
     return min(regular, key=lambda key: (int(key[2:]), key[1]))
@@ -660,11 +676,18 @@ def move_requirements(level, event, spin_shuffled, jump_only_levels, relaxed=Fal
     # a level that can't be cleared by jumping alone needs its move for everything past the obstacle; some bonus rounds
     # and some crates (arrow crates, iron-bound crates, tall stacks, ...) need one of their own
     way = CLEAR_MOVES.get(level.key, ())
+    gate = CLEAR_GATES.get(level.key)
+    if gate and event in ("clear", "crystal"):
+        way = tuple(dict.fromkeys((*way, *gate[0])))
     if event.startswith("box:"):
         # (a bonus round's crates: in their own bonus stage, or named Crate_Bonus_ where the bonus round is part of the
         # level itself, as in Crash 3's High Time)
         bonus = "@bonus:" in event or event.startswith("box:Crate_Bonus")
         extra = (*BONUS_MOVES.get(level.key, ()),) if bonus else ()
+        if gate:
+            spot = CRATE_SPOTS.get((level.key, event))
+            if (gate[3] if bonus else spot is not None and spot[gate[1]] > gate[2]):
+                extra = (*extra, *gate[0])
         way = tuple(dict.fromkeys((*way, *extra, *CRATE_MOVES.get((level.key, event), ()))))
     if relaxed:
         if event in ("clear", "crystal"):

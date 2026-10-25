@@ -9,6 +9,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <random>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -36,12 +37,60 @@ namespace crash_colors
         {
             return std::all_of(choice.begin(), choice.end(), [](const std::string &c) { return color_text(c) == "default"; });
         }
-        // the skin's name for a combination: colors_ and 8 hex digits of its FNV-1a hash
-        std::string skin_name(const Choice &choice)
+        // (V1.3.43) the game's own Crash.pak the colors are made from: the copy kept before the first skin went on, or the
+        // game's while it wears none; its textures, and a code for them. Made from a Crash.pak that already had colors in it
+        // (Eric's: CrashNSTAP\skins lost while the game wore an older seed's colors, so those were kept as the game's own),
+        // the new colors only partly took. The code goes into the colored Crash's name, so when that copy changes (after
+        // Steam verifies the game's files) the colors are made again, under a new name the next game start puts on.
+        struct Source
         {
-            // the recolor's version goes in too, so a client that colors differently makes the skin again
+            std::filesystem::path pak;
+            std::string code, problem;
+            std::vector<unsigned char> fur, cloth, hair;
+        };
+        Source game_source()
+        {
+            Source s;
+            std::error_code error;
+            s.pak = skins::folder() / "default" / "Crash.pak";
+            if (!std::filesystem::exists(s.pak, error))
+            {
+                const auto worn = skins::worn();
+                if (!worn.empty() && worn != "default")
+                {
+                    s.problem = "Crash colors: the game's own Crash.pak isn't saved (it wears " + skins::display(worn) +
+                                "). Use /skin default, restart the game, then /colors again.";
+                    return s;
+                }
+                s.pak = ingame::game_archives() / "Crash.pak";
+            }
+            try
+            {
+                s.fur = ingame::read_archive_member(s.pak, fur_texture);
+                s.cloth = ingame::read_archive_member(s.pak, cloth_texture);
+                s.hair = ingame::read_archive_member(s.pak, hair_texture);
+            }
+            catch (const std::exception &e)
+            {
+                s.problem = std::string("Crash colors: couldn't read Crash's textures in the game's Crash.pak: ") + e.what();
+                return s;
+            }
             std::uint32_t hash = 2166136261u;
-            for (const char c : std::string(recolor_version) + ";")
+            for (const auto *bytes : {&s.fur, &s.cloth, &s.hair})
+                for (const auto b : *bytes)
+                    hash = (hash ^ b) * 16777619u;
+            char text[16];
+            std::snprintf(text, sizeof(text), "%08x", hash);
+            s.code = text;
+            return s;
+        }
+        // the skin's name for a combination: colors_ and 8 hex digits of its FNV-1a hash
+        std::string skin_name(const Choice &choice, const std::string &source_code)
+        {
+            // the recolor's version goes in too, so a client that colors differently makes the skin again, and (V1.3.43)
+            // the code of the Crash.pak it's made from
+            std::uint32_t hash = 2166136261u;
+            for (const char c : std::string(recolor_version) + ";" + source_code + ";")
                 hash = (hash ^ static_cast<unsigned char>(c)) * 16777619u;
             for (int p = 0; p < PartCount; ++p)
             {
@@ -204,22 +253,29 @@ namespace crash_colors
                 skins::choose("default");
                 return {skins::worn() == "default" ? "Crash colors: back to the normal colors." : "Crash colors: back to the normal colors. Restart the game to see them."};
             }
-            const auto name = skin_name(choice);
+            const auto from = game_source();
+            if (!from.problem.empty())
+                return {from.problem};
+            const auto name = skin_name(choice, from.code);
             const auto folder = skins::folder();
             const auto pak = folder / name / "Crash.pak";
             const auto patches = folder / name / "patches";
             std::error_code error;
             if (!std::filesystem::exists(pak, error) || !std::filesystem::exists(patches / "members.txt", error))
             {
-                // the game's own Crash.pak: the copy kept before the first skin went on, or the game's while it wears none
-                auto source = folder / "default" / "Crash.pak";
-                if (!std::filesystem::exists(source, error))
+                const auto &source = from.pak;
+                // its textures must still have the game's own colors: the recolor finds each part by its color
+                if (const auto colored = already_colored(from.fur, from.cloth, from.hair); !colored.empty())
                 {
-                    const auto worn = skins::worn();
-                    if (!worn.empty() && worn != "default")
-                        return {"Crash colors: the game's own Crash.pak isn't saved (it wears " + skins::display(worn) +
-                                "). Use /skin default, restart the game, then /colors again."};
-                    source = ingame::game_archives() / "Crash.pak";
+                    std::string parts;
+                    for (std::size_t i = 0; i < colored.size(); ++i)
+                        parts += (i ? i + 1 == colored.size() ? " and " : ", " : "") + colored[i];
+                    return {"Crash colors: the game's own Crash.pak" +
+                            std::string(source.parent_path().filename() == "default" ? " (the copy kept in CrashNSTAP\\skins\\default)" : "") +
+                            " already has colors in it (its " + parts +
+                            ", from an earlier seed), so new ones would only partly take. Close the game, verify its files in Steam "
+                            "(right-click the game, Properties, Installed Files, Verify integrity of game files), then start it and connect: "
+                            "the colors are made again then, and show after one more restart."};
                 }
                 try
                 {
@@ -332,12 +388,50 @@ namespace crash_colors
     }
     std::vector<std::string> command(const std::string &argument)
     {
-        // V1.3.3: the colors come from the YAML only and stay for the whole seed, so /colors only shows them
+        // V1.3.3: the colors come from the YAML and stay for the whole seed. V1.3.43 (asked for): /colors random picks
+        // new ones anyway, kept until /colors seed or a new seed
+        const auto word = lowercase(trim(argument));
+        if (word == "random")
+        {
+            static std::random_device device;
+            std::mt19937 pick(device());
+            const auto &colors = palette();
+            Choice choice;
+            for (auto &part : choice)
+                part = colors[std::uniform_int_distribution<std::size_t>(0, colors.size() - 1)(pick)].first;
+            save(choice);
+            auto lines = prepare();
+            if (!lines.empty() && lines.front().rfind("Crash colors: ", 0) == 0 && lines.front().find("couldn't") == std::string::npos &&
+                lines.front().find("already has colors") == std::string::npos)
+                lines.front().insert(12, " (random)");
+            lines.push_back("They stay for this seed. /colors random again for others, /colors seed for your YAML's.");
+            return lines;
+        }
+        if (word == "seed" || word == "yaml")
+        {
+            // the YAML's colors, as the seed gave them: state\colors_seed.txt is "seed|fur|chest|..." (apply_seed_choice)
+            std::ifstream in(standalone::state_directory() / "colors_seed.txt");
+            std::string line;
+            const auto fields = in && std::getline(in, line) ? split(trim(line), '|') : std::vector<std::string>{};
+            if (fields.size() != 1 + PartCount)
+                return {"Crash colors: no seed's colors known yet. Connect to your seed first."};
+            Choice choice;
+            for (int p = 0; p < PartCount; ++p)
+                choice[p] = color_text(fields[1 + p]);
+            save(choice);
+            auto lines = prepare();
+            if (lines.empty())
+                lines.push_back("Crash colors: " + describe(choice) + " (from your YAML).");
+            else if (lines.front().rfind("Crash colors: ", 0) == 0 && lines.front().find("couldn't") == std::string::npos &&
+                     lines.front().find("already has colors") == std::string::npos)
+                lines.front().insert(12, " (from your YAML)");
+            return lines;
+        }
         std::vector<std::string> lines{"Crash colors: " + describe(chosen()) + "."};
-        lines.push_back(trim(argument).empty()
-                            ? "They come from your YAML (crash_fur_color, crash_chest_color, crash_pants_color, crash_shoes_color, crash_hair_color, "
-                              "crash_gloves_color, crash_eyebrows_color) and stay for the whole seed. Only a new seed changes them."
-                            : "Colors can't be changed during a seed: they come from your YAML and stay until a new seed.");
+        lines.push_back(word.empty() ? "They come from your YAML (crash_fur_color, crash_chest_color, crash_pants_color, crash_shoes_color, crash_hair_color, "
+                                       "crash_gloves_color, crash_eyebrows_color) and stay for the whole seed. /colors random picks random ones instead "
+                                       "(until /colors seed or a new seed)."
+                                     : "/colors random picks random colors, /colors seed goes back to your YAML's. Either shows from the next game start.");
         return lines;
     }
     bool has_colors() { return !all_default(chosen()); }
@@ -364,7 +458,11 @@ namespace crash_colors
     {
         const auto choice = chosen();
         const auto worn = skins::chosen();
-        if (!colors_skin(worn) || all_default(choice) || worn == skin_name(choice))
+        if (!colors_skin(worn) || all_default(choice))
+            return {};
+        // (V1.3.43) also when the game's own Crash.pak changed since (a Steam verify), or the colored Crash is gone
+        if (const auto from = game_source(); from.problem.empty() && worn == skin_name(choice, from.code) &&
+                                             std::filesystem::exists(skins::folder() / worn / "Crash.pak"))
             return {};
         auto lines = prepare();
         // the first line is about the colors themselves

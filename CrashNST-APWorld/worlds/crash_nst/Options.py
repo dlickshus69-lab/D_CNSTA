@@ -273,10 +273,11 @@ class AbilityLogic(Choice):
     can be jumped on or hit from below), so abilities can be on almost any of those. Bosses still need
     Spin, and gems and relics keep the cautious needs.
     Either way, levels that can't be cleared by jumping alone need their move for everything past the
-    obstacle: The Great Gate and Native Fortress need Spin; Crash Crush and Bee-Having need Slide; Sewer or Later needs Spin
-    and Crouch Jump; The Eel Deal's bonus round needs Spin. Some crates need a move of their own: arrow crates, crates
-    on a TNT or Nitro and crates in stacks four high need Spin; iron-bound crates and Turtle Woods' underground room
-    need Body Slam. Gimmick stages keep vanilla controls, so they need no moves.
+    obstacle: The Great Gate and Native Fortress need Spin, and Jungle Rollers needs it past its crate wall; Crash Crush,
+    Bee-Having and Piston It Away need Slide; Sewer or Later needs Spin and Crouch Jump; The Eel Deal's bonus round needs
+    Spin and High Time's needs Crouch Jump. Some crates need a move of their own: arrow crates, crates on a TNT or
+    Nitro, crates in stacks three high and crates right under an iron-bound crate need Spin; iron-bound crates and
+    Turtle Woods' underground room need Body Slam. Gimmick stages keep vanilla controls, so they need no moves.
     Gimmick stages need no moves either way.
     """
 
