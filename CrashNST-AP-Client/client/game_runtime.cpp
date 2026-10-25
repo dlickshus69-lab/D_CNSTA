@@ -5549,7 +5549,7 @@ namespace ingame
             std::uint64_t slam_wait_since = 0, start_timer_at = 0;
             // V1.3.58 (see papu_window): once his red ends, how long he can be hit (ms, /boss_window), until when, whether
             // that's on, and a red begun in his spin waits for the next one's end (red_skip_spin)
-            unsigned window_ms = 1500, window_lines = 0, window_percent = 200;
+            unsigned window_ms = 1800, window_lines = 0, window_percent = 200;
             std::uint64_t window_until = 0;
             bool window_on = false, red_skip_spin = false, window_fixed = false;
             // V1.3.59 (Eric's V1.3.58 run: after some hits the game's immunity timer didn't run, so his red ended as his next
@@ -5605,20 +5605,6 @@ namespace ingame
             unsigned pushes = 0, push_held = 0, push_back = 0, push_lines = 0, reach_lines = 0;
             int push_way = 1, push_check = 0;
             std::array<float, 3> push_to{};
-            // V1.3.65 (see crash_places_find and papu_chair): the places around Crash that hold where he is (each with its scale,
-            // and whether its height and depth are swapped), the search's step (0 not yet, 1 found and checking that they follow
-            // him, 2 checked, 9 none), where he was then; the wall's pushes, how they went, and the last one's place
-            struct CrashPlace
-            {
-                Address at = 0;
-                int kind = 0; // (see crash_scan_run)
-            };
-            std::vector<CrashPlace> cplaces;
-            int cplace_step = 0; // (V1.3.66: 0 not yet, 1 the game's memory being read, 2 read, 3 checked that they follow him, 9 none)
-            std::array<float, 3> cplace_from{};
-            unsigned wall_pushes = 0, wall_held = 0, wall_back = 0, wall_lines = 0;
-            std::uint64_t wall_check_at = 0;
-            float wall_last = 0;
             Address ms_wait_seen = 0;
             float ms_wait_last = 0;
             unsigned slams_seen = 0;
@@ -9255,96 +9241,6 @@ namespace ingame
             const double span = newest[0] - (*from)[0];
             t.crash_v = {static_cast<float>((newest[1] - (*from)[1]) / span), static_cast<float>((newest[2] - (*from)[2]) / span)};
         }
-        // V1.3.66 (Eric's V1.3.65 run: "there is no visible wall in the chair. I can just still jump on it": around Crash only
-        // his place (+32) and his transform's matrix held where he is, and the game put both back every frame, so it keeps him
-        // somewhere else, his physics' own most likely): all of the game's own memory is read, on a thread of its own, for
-        // where Crash stands while he stands still: three numbers in a row that are his place (within 1), in hundredths (physics
-        // may keep metres), either with his height and depth swapped (physics may have its own up), or three doubles; the
-        // height within 200 (physics may keep the middle of his body, not his feet). Kept are those that follow him once he
-        // moves (see papu_chair)
-        struct CrashScan
-        {
-            std::atomic<int> state{0}; // 0: not running, 1: running, 2: done
-            std::array<float, 3> at{};
-            std::mutex mutex;
-            std::vector<std::pair<Address, int>> found; // (where, kind: 0 floats, 1 floats y and z swapped, 2 and 3 the same in hundredths, 4 doubles)
-            std::size_t bytes = 0;
-            double seconds = 0;
-        } crash_scan;
-        bool crash_kind_is(const unsigned char *p, int kind, const std::array<float, 3> &at, float tolerance)
-        {
-            if (kind == 4)
-            {
-                double d[3];
-                std::memcpy(d, p, sizeof d);
-                return std::abs(d[0] - at[0]) <= tolerance && std::abs(d[1] - at[1]) <= tolerance && std::abs(d[2] - at[2]) <= 200;
-            }
-            float f[3];
-            std::memcpy(f, p, sizeof f);
-            const float scale = kind >= 2 ? 0.01f : 1.0f, x = at[0] * scale, y = at[1] * scale, z = at[2] * scale;
-            const float tol = kind >= 2 ? tolerance * 0.01f : tolerance, height = kind >= 2 ? 2.0f : 200.0f;
-            // (kinds 1 and 3: his height before his depth)
-            const float fy = kind & 1 ? f[2] : f[1], fz = kind & 1 ? f[1] : f[2];
-            return std::abs(f[0] - x) <= tol && std::abs(fy - y) <= tol && std::abs(fz - z) <= height && std::isfinite(fz);
-        }
-        void crash_scan_run()
-        {
-            const auto started = precise_seconds();
-            const auto at = crash_scan.at;
-            std::vector<std::pair<Address, int>> found;
-            std::vector<unsigned char> buffer(1 << 20);
-            std::size_t bytes = 0;
-            MEMORY_BASIC_INFORMATION info{};
-            for (Address a = 0x10000; a < 0x7fffffff0000ULL && VirtualQuery(reinterpret_cast<void *>(a), &info, sizeof info) == sizeof info;)
-            {
-                const auto from = reinterpret_cast<Address>(info.BaseAddress), size = static_cast<Address>(info.RegionSize);
-                a = from + size;
-                if (info.State != MEM_COMMIT || info.Type != MEM_PRIVATE || !(info.Protect & PAGE_READWRITE) || (info.Protect & PAGE_GUARD))
-                    continue;
-                for (Address chunk = from; chunk < from + size && found.size() < 20000; chunk += buffer.size() - 32)
-                {
-                    const auto n = static_cast<std::size_t>(std::min<Address>(buffer.size(), from + size - chunk));
-                    SIZE_T got = 0;
-                    if (n < 12 || !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(chunk), buffer.data(), n, &got) || got < 12)
-                        continue;
-                    bytes += got;
-                    for (std::size_t i = 0; i + 12 <= got; i += 4)
-                    {
-                        float x = 0;
-                        std::memcpy(&x, &buffer[i], 4);
-                        // (a quick first look at the first number: his x, or in hundredths)
-                        const bool whole = std::abs(x - at[0]) <= 1.0f, hundredths = std::abs(x - at[0] * 0.01f) <= 0.01f;
-                        if (whole || hundredths)
-                            for (const int kind : {0, 1, 2, 3})
-                                if ((kind < 2 ? whole : hundredths) && crash_kind_is(&buffer[i], kind, at, 1.0f))
-                                {
-                                    found.emplace_back(chunk + i, kind);
-                                    break;
-                                }
-                        if (!(i & 7) && i + 24 <= got)
-                        {
-                            double dx = 0;
-                            std::memcpy(&dx, &buffer[i], 8);
-                            if (std::abs(dx - at[0]) <= 1.0 && crash_kind_is(&buffer[i], 4, at, 1.0f))
-                                found.emplace_back(chunk + i, 4);
-                        }
-                    }
-                }
-                if (found.size() >= 20000)
-                    break;
-            }
-            std::lock_guard lock(crash_scan.mutex);
-            crash_scan.found = std::move(found), crash_scan.bytes = bytes, crash_scan.seconds = precise_seconds() - started;
-            crash_scan.state = 2;
-        }
-        void crash_scan_start(const std::array<float, 3> &at)
-        {
-            int idle = 0;
-            if (!crash_scan.state.compare_exchange_strong(idle, 1))
-                return;
-            crash_scan.at = at;
-            std::thread(crash_scan_run).detach();
-        }
         // V1.3.64 (Eric: "let's start working on blocking the chair. So maybe we just put an invisible wall ... by the chair
         // too. So it basically is just a circle"): the chair is where he sits before the fight (state 6), the arena's middle
         // where he stands in it. Research for the wall: Crash's farthest from the arena's middle in 24 directions (0: toward the
@@ -9360,7 +9256,7 @@ namespace ingame
             if (s == 6 && t.speed < 10)
                 t.chair_at = {m[12], m[13], m[14]}, t.chair_known = true;
             if (s == 5)
-                t.arena_known = false, t.cplace_step = 0; // (looked for again as he lands; V1.3.65: and Crash's places, after a death)
+                t.arena_known = false; // (looked for again as he lands)
             if (s == 1 && !t.arena_known)
                 t.arena_at = {m[12], m[13], m[14]}, t.arena_known = true;
             if (!t.chair_known || !t.arena_known)
@@ -9388,8 +9284,7 @@ namespace ingame
                 for (std::size_t b = 0; b < t.reach.size(); ++b)
                     if (t.reach[b] > 0)
                         out << " " << static_cast<int>(b * 15) - 180 << ": " << static_cast<int>(t.reach[b]) << " " << static_cast<int>(t.reach_z[b]);
-                out << "; nearest the chair " << static_cast<int>(t.chair_near) << " (height " << static_cast<int>(t.chair_near_z) << "); the wall's pushes " << t.wall_pushes
-                    << " (held " << t.wall_held << ", didn't " << t.wall_back << ")";
+                out << "; nearest the chair " << static_cast<int>(t.chair_near) << " (height " << static_cast<int>(t.chair_near_z) << ")";
                 std::cout << out.str() << "\n" << std::flush;
             };
             if (s == 5 || s == 6)
@@ -9412,88 +9307,10 @@ namespace ingame
             if (to_chair < t.chair_near)
                 t.chair_near = to_chair, t.chair_near_z = h;
             told(false);
-            // V1.3.66: the places in the game's memory that hold where Crash is (see crash_scan_run), read while he stands still
-            // (once each fight starts), and kept if they follow him once he's 40 or more from there
-            if (t.cplace_step == 0)
-            {
-                if (crash_scan.state.load() == 2)
-                {
-                    std::lock_guard lock(crash_scan.mutex);
-                    crash_scan.found.clear(), crash_scan.state = 0; // (one from before this fight)
-                }
-                if (std::hypot(t.crash_v[0], t.crash_v[1]) < 5 && crash_scan.state.load() == 0 && !crash_dead_now())
-                    crash_scan_start(at), t.cplace_step = 1, t.cplace_from = at;
-            }
-            else if (t.cplace_step == 1 && crash_scan.state.load() == 2)
-            {
-                std::lock_guard lock(crash_scan.mutex);
-                t.cplaces.clear();
-                std::set<Address> once;
-                for (const auto &[a, kind] : crash_scan.found)
-                    if (once.insert(a).second)
-                        t.cplaces.push_back({a, kind});
-                const bool moved = std::hypot(at[0] - crash_scan.at[0], at[1] - crash_scan.at[1]) > 1;
-                std::cout << "Boss chair research: all the game's memory read for where Crash stood (" << crash_scan.bytes / (1024 * 1024) << " MB in " << crash_scan.seconds
-                          << " s" << (moved ? ", and he moved before it was done" : "") << "): " << t.cplaces.size() << " places hold it\n" << std::flush;
-                crash_scan.found.clear(), crash_scan.state = 0;
-                t.cplace_step = t.cplaces.empty() ? 9 : 2;
-            }
-            else if (t.cplace_step == 2 && std::hypot(at[0] - t.cplace_from[0], at[1] - t.cplace_from[1]) >= 40)
-            {
-                std::vector<BossTuning::CrashPlace> kept;
-                std::ostringstream out;
-                static const char *const kinds[] = {"numbers", "numbers, height and depth swapped", "hundredths", "hundredths, height and depth swapped", "doubles"};
-                for (const auto &p : t.cplaces)
-                {
-                    std::array<unsigned char, 24> b{};
-                    if (read(p.at, b) && crash_kind_is(b.data(), p.kind, at, 2.0f))
-                    {
-                        kept.push_back(p);
-                        if (kept.size() <= 16)
-                            out << "\n  0x" << std::hex << p.at << std::dec << " (" << kinds[p.kind] << ")"
-                                << (p.at == crash + 32 ? " his place" : value<Address>(crash + 48) && p.at == value<Address>(crash + 48) + 32 + 48 ? " his transform's matrix" : "");
-                    }
-                }
-                std::cout << "Boss chair research: " << t.cplaces.size() << " places held where Crash stood, " << kept.size() << " followed him" << out.str() << "\n" << std::flush;
-                t.cplaces = std::move(kept), t.cplace_step = t.cplaces.empty() ? 9 : 3;
-                t.wall_check_at = 0;
-            }
-            // (the last push 0.1 s on: is he still at the wall, or past it as if nothing stopped him?)
-            if (t.wall_check_at && now >= t.wall_check_at)
-            {
-                t.wall_check_at = 0;
-                const bool held = d <= t.wall_last + 15;
-                ++(held ? t.wall_held : t.wall_back);
-                if (t.wall_lines < 16)
-                    ++t.wall_lines, std::cout << "Boss chair: 0.1 s after the wall's push he's " << static_cast<int>(d) << " from the middle (the wall " << static_cast<int>(t.wall_last)
-                                              << "): " << (held ? "it held" : "it didn't hold") << "\n" << std::flush;
-            }
-            // V1.3.65 (Eric: "an invisible wall ... by the chair too. So it basically is just a circle"): with the harder rules on,
-            // toward the chair Crash can't go farther from the arena's middle than 65% of the way to the chair (V1.3.64's run: he
-            // stood on it 66 to 72 from where Papu Papu sits, 126 to 168 high), from 30 degrees either side of it out to no wall at
-            // 50 degrees; past it, every place that follows him is set back onto it (V1.3.66: all those found in the game's memory)
-            const float side = std::abs(angle), front = 0.65f * span; // (not "near": a Windows macro)
-            const float wall = side <= 0.5236f ? front : side >= 0.8727f ? 1e9f : front + (side - 0.5236f) / (0.8727f - 0.5236f) * 2.0f * span;
-            if (!state.boss_rules || t.cplace_step != 3 || d <= wall || d < 1 || crash_dead_now())
-                return;
-            const float k = wall / d, to_x = t.arena_at[0] + ax * k, to_y = t.arena_at[1] + ay * k;
-            for (const auto &p : t.cplaces)
-            {
-                if (p.kind == 4)
-                {
-                    write(p.at, std::array<double, 2>{to_x, to_y});
-                    continue;
-                }
-                const float scale = p.kind >= 2 ? 0.01f : 1.0f;
-                write(p.at, to_x * scale);
-                write(p.at + (p.kind & 1 ? 8 : 4), to_y * scale);
-            }
-            ++t.wall_pushes, t.wall_last = wall;
-            if (!t.wall_check_at)
-                t.wall_check_at = now + 100;
-            if (t.wall_lines < 16)
-                ++t.wall_lines, std::cout << "Boss chair: Crash went past the wall by the chair (" << static_cast<int>(d) << " from the middle, the wall " << static_cast<int>(wall)
-                                          << ", height " << static_cast<int>(h) << "): set back onto it at " << t.cplaces.size() << " places\n" << std::flush;
+            // (V1.3.65 and V1.3.66's wall is gone (Eric's V1.3.66 run: "I'm still able to stand on the chair, but ... it was
+            // stuttering a lot"): none of the places holding where Crash is, around him (V1.3.65) or anywhere in the game's
+            // memory (V1.3.66: 54 that followed him), moved him when set; the game's physics put him back each frame, and
+            // what's drawn jumped between the two)
         }
         void papu_aim(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
@@ -9683,7 +9500,8 @@ namespace ingame
                 // is now (see papu_crash_motion): keep running the same way and it lands on him, turn or stop and it doesn't (his
                 // aim is held from half the time to his slam, as before). V1.3.65 (Eric: V1.3.64's 80% was "like a 50-50 ... I
                 // just want to make it where it's ... just possible still"): all the way. V1.3.66 (Eric: "still pretty hard to
-                // dodge ... maybe we could turn down the accuracy"): 70% of the way by default, /boss_lead (test) sets it
+                // dodge ... maybe we could turn down the accuracy"): /boss_lead (test) sets it. V1.3.67 (Eric: "I think the best
+                // accuracy is 55%"): 55% of the way by default
                 const float slam_s = t.sc_target > 0.1f ? t.sc_target : static_cast<float>(t.slam_normal ? t.slam_normal : 900) / 1000.0f / static_cast<float>(factor);
                 const float lead = static_cast<float>(std::min(state.boss_lead_pct, 120u)) / 100.0f * std::clamp(slam_s - static_cast<float>(since) / 1000.0f, 0.0f, 0.6f);
                 const float dx = c[12] + t.crash_v[0] * lead - m[12], dy = c[13] + t.crash_v[1] * lead - m[13];
@@ -9883,9 +9701,9 @@ namespace ingame
         // own immunity as always; the fight starting over, or the rule off, ends it
         // V1.3.59 (Eric: "the two second is good for 200% speed ... scale it based on the speed"): /boss_window's time is his
         // time at 200%, and it's longer by the same pace at lower speeds. V1.3.61 (Eric: "make the hit window for 200% speed to
-        // 1.5 seconds"); V1.3.64 (Eric: "let's make it 1 second"); V1.3.65 (1.3 s); V1.3.66 (Eric: "the hit window is a little
-        // too hard, so we'll change it back to ... 1.5"): 1.5 s at 200%, 1.7 s at 175%, 2 s at 150%, 2.4 s at 125%, 3 s at 100%;
-        // or the seed's own time at any speed (its YAML's boss_hit_window).
+        // 1.5 seconds"); V1.3.64 (1 s); V1.3.65 (1.3 s); V1.3.66 (1.5 s); V1.3.67 (Eric: "his hit window should be 1.8"): 1.8 s
+        // at 200%, 2.06 s at 175%, 2.4 s at 150%, 2.88 s at 125%, 3.6 s at 100%; or the seed's own time at any speed (its YAML's
+        // boss_hit_window).
         // V1.3.64 (Eric's V1.3.63 clips: after his slam he could be hit into his next spin, turned red in it, and that spin didn't
         // count, so he stayed red at the slam after it): his time to be hit also ends as his next spin starts, and that spin counts
         void papu_window(BossTuning &t, const Shared &state, int s, std::uint64_t now)

@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **His chair, third try:** while you stand still at a fight's start, the client finds every copy of where Crash is in the game's memory, and the wall in front of the chair moves all the ones that follow him. The log says if it holds.
-- **The rare slow slam fixed:** the speed-up threw out the right timing when it found it late.
-- **His slam aims 70% of the way** to where you'll be. `/boss_lead 0.5` tries another (0 = where you are, 1 = all the way).
-- **His hit window is back to 1.5 s at 200%** (3 s at 100%), over once his next spin starts.
+- **His slam aims 55% of the way** to where you'll be (your pick). `/boss_lead` still tries others.
+- **His hit window is 1.8 s at 200%** (3.6 s at 100%), over once his next spin starts.
+- **The stutter on his chair is gone:** the wall is off for now (it couldn't move Crash, and trying made him stutter).
+- From V1.3.66: the rare slow slam fixed.
 - From V1.3.64: 2 to 5 slams after a hit.
