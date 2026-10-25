@@ -581,10 +581,17 @@ void ClientRuntime::handle_commands()
                 else if (seconds >= 0.25 && seconds <= 0.9)
                     boss_slam_test = static_cast<int>(seconds * 1000 + 0.5);
                 const double at = (boss_slam_test >= 0 ? boss_slam_test : 450) / 1000.0, game = 0.9;
+                // (V1.3.61: or the seed's own time at any speed, its YAML's boss_slam_time in hundredths of a second)
+                const auto &yaml = session.slot_data()["boss_slam_time"];
                 std::ostringstream out;
-                out << std::fixed << std::setprecision(2) << "Boss slam: Papu Papu slams " << at << " s after he stands at 200% boss speed"
-                    << (boss_slam_test >= 0 ? " (test)" : "") << "; at 125% " << game / (1 + 0.25 * (game / at - 1)) << " s, 150% " << game / (1 + 0.5 * (game / at - 1))
-                    << " s, 175% " << game / (1 + 0.75 * (game / at - 1)) << " s, 100% " << game << " s (the game's). /boss_slam 0.25 to 0.9 sets the 200% one, /boss_slam off goes back to 0.45.";
+                out << std::fixed << std::setprecision(2);
+                if (boss_slam_test < 0 && yaml.isIntegral() && yaml.asInt64() > 0)
+                    out << "Boss slam: Papu Papu slams " << std::clamp<std::int64_t>(yaml.asInt64(), 25, 90) / 100.0
+                        << " s after he stands, at any boss speed (this seed's boss_slam_time). /boss_slam 0.25 to 0.9 tries a time at 200% boss speed instead (the speeds below follow it).";
+                else
+                    out << "Boss slam: Papu Papu slams " << at << " s after he stands at 200% boss speed" << (boss_slam_test >= 0 ? " (test)" : "") << "; at 125% "
+                        << game / (1 + 0.25 * (game / at - 1)) << " s, 150% " << game / (1 + 0.5 * (game / at - 1)) << " s, 175% " << game / (1 + 0.75 * (game / at - 1))
+                        << " s, 100% " << game << " s (the game's). /boss_slam 0.25 to 0.9 sets the 200% one, /boss_slam off goes back to the seed's (0.45 at 200% unless its YAML sets one).";
                 print_console(out.str());
             }
             else if (command == "/boss_window")
@@ -592,7 +599,7 @@ void ClientRuntime::handle_commands()
                 // test (V1.3.58, Eric: "we'll start with 5, and if it's too long, we'll drop it down"): with the boss rules on,
                 // how long Papu Papu can be hit once his red ends before he's red again. V1.3.59 (Eric: "the two second is good
                 // for 200% speed ... scale it based on the speed"): the time at 200% boss speed, longer by the same pace at lower
-                // speeds (4 s at 100%); "off" goes back to 2 s
+                // speeds (4 s at 100%); "off" goes back to the seed's (V1.3.61: 1.5 s at 200% unless its YAML sets boss_hit_window)
                 double seconds = -1;
                 try
                 {
@@ -606,11 +613,18 @@ void ClientRuntime::handle_commands()
                     boss_window_test = -1;
                 else if (seconds >= 0.5 && seconds <= 10)
                     boss_window_test = static_cast<int>(seconds * 1000 + 0.5);
-                const double at = (boss_window_test >= 0 ? boss_window_test : 2000) / 1000.0;
+                const double at = (boss_window_test >= 0 ? boss_window_test : 1500) / 1000.0;
+                // (V1.3.61: or the seed's own time at any speed, its YAML's boss_hit_window in tenths of a second)
+                const auto &yaml = session.slot_data()["boss_hit_window"];
                 std::ostringstream out;
-                out << std::fixed << std::setprecision(1) << "Boss window: with the boss rules on, Papu Papu can be hit for " << at << " s once his red ends at 200% boss speed"
-                    << (boss_window_test >= 0 ? " (test)" : "") << "; at 175% " << at * 200 / 175 << " s, 150% " << at * 200 / 150 << " s, 125% " << at * 200 / 125 << " s, 100% "
-                    << at * 2 << " s; then he's red again until the slam after his next spin. /boss_window 0.5 to 10 sets the 200% one, /boss_window off goes back to 2.";
+                out << std::fixed << std::setprecision(1);
+                if (boss_window_test < 0 && yaml.isIntegral() && yaml.asInt64() > 0)
+                    out << "Boss window: with the boss rules on, Papu Papu can be hit for " << std::clamp<std::int64_t>(yaml.asInt64(), 5, 100) / 10.0
+                        << " s once his red ends, at any boss speed (this seed's boss_hit_window); then he's red again until the slam after his next spin. /boss_window 0.5 to 10 tries a time at 200% boss speed instead (the speeds below follow it).";
+                else
+                    out << "Boss window: with the boss rules on, Papu Papu can be hit for " << at << " s once his red ends at 200% boss speed" << (boss_window_test >= 0 ? " (test)" : "")
+                        << "; at 175% " << at * 200 / 175 << " s, 150% " << at * 200 / 150 << " s, 125% " << at * 200 / 125 << " s, 100% " << at * 2
+                        << " s; then he's red again until the slam after his next spin. /boss_window 0.5 to 10 sets the 200% one, /boss_window off goes back to the seed's (1.5 at 200% unless its YAML sets one).";
                 print_console(out.str());
             }
             else if (command == "/boss_rules")

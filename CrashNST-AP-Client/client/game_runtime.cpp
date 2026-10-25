@@ -5549,9 +5549,9 @@ namespace ingame
             std::uint64_t slam_wait_since = 0, start_timer_at = 0;
             // V1.3.58 (see papu_window): once his red ends, how long he can be hit (ms, /boss_window), until when, whether
             // that's on, and a red begun in his spin waits for the next one's end (red_skip_spin)
-            unsigned window_ms = 2000, window_lines = 0, window_percent = 200;
+            unsigned window_ms = 1500, window_lines = 0, window_percent = 200;
             std::uint64_t window_until = 0;
-            bool window_on = false, red_skip_spin = false;
+            bool window_on = false, red_skip_spin = false, window_fixed = false;
             // V1.3.59 (Eric's V1.3.58 run: after some hits the game's immunity timer didn't run, so his red ended as his next
             // spin started and he could be hit at the slam after it): red after a hit is ours too, until the slam after his
             // next spin (hit_red); once the game's immunity of that hit is over before then (or its timer doesn't count
@@ -5573,6 +5573,9 @@ namespace ingame
             float rev_g_last = 0, rev_g_turned = 0, rev_meant = 0;
             int rev_laps = 0, rev_laps_at_switch = 0;
             unsigned rev_lines = 0;
+            // V1.3.61: how often a spin was turned back the first way (with Crash alive), and whether Crash was dead last frame
+            unsigned rev_backs = 0;
+            bool rev_dead = false;
             unsigned slams_seen = 0;
             float start_timer_set = 0;
             // V1.3.29 (see bar_count): the bar's own count of notches left (two copies), found at the fight's start and
@@ -5853,10 +5856,16 @@ namespace ingame
             // V1.3.59 (see papu_stand_clock): the tries in this stand, the next one when, and the failed tries told about
             unsigned sc_tries = 0, sc_fail_told = 0;
             std::uint64_t sc_retry_at = 0;
+            // V1.3.61 (see papu_stand_clock): the numbers found in this stand that went past his slam's time with no slam (not
+            // what his slam goes by), and how often that was
+            std::vector<Address> sc_bad;
+            unsigned sc_late_tries = 0;
             // V1.3.57 (Eric: "find the right scale for each speed"; 200% at 0.45 s to try, 0.5 if that's too fast): the boss
             // speed and the slam time at 200% (ms, /boss_slam), his stand clock's time at his slam as the game plays it (the
             // least seen, 0 until one is), and when this stand's slam was meant to come
             unsigned sc_percent = 100, sc_slam_ms = 450;
+            // V1.3.61: his slam's time after he stands at any boss speed (ms, the YAML's boss_slam_time; 0: by the speed)
+            unsigned sc_slam_fixed = 0;
             float sc_slam_clock = 0, sc_target = 0;
             // V1.3.36 (see papu_slam_rate): his slam's time from when he stands, as the game plays it (the shortest seen while
             // nothing of ours is set), and the stand a try was set in
@@ -8910,11 +8919,13 @@ namespace ingame
             const float at = static_cast<float>(std::clamp(slam_ms, 250u, 900u)) / 1000.0f, top = std::max(1.0f, game / at);
             return 1.0f + static_cast<float>(std::clamp(percent, 100u, 200u) - 100) / 100.0f * (top - 1.0f);
         }
-        void papu_slam_speed(BossTuning &t, int s, unsigned percent, unsigned slam_ms)
+        // (V1.3.61, the YAML's boss_slam_time: fixed_ms) or at that time after he stands, at any boss speed
+        void papu_slam_speed(BossTuning &t, int s, unsigned percent, unsigned slam_ms, unsigned fixed_ms)
         {
             const unsigned speed = std::clamp(percent, 100u, 200u);
-            t.sc_percent = speed, t.sc_slam_ms = slam_ms;
-            slam_rate = s == 1 && speed > 100 && slam_body.load() ? static_cast<float>(speed) / 100.0f : 1.0f;
+            t.sc_percent = speed, t.sc_slam_ms = slam_ms, t.sc_slam_fixed = fixed_ms ? std::clamp(fixed_ms, 250u, 900u) : 0u;
+            const bool faster = speed > 100 || (t.sc_slam_fixed && t.sc_slam_fixed < 900);
+            slam_rate = s == 1 && faster && slam_body.load() ? static_cast<float>(speed) / 100.0f : 1.0f;
             // (V1.3.54: as his stand ends, what its steps were, his first stands of a visit)
             if (s != 1 && t.slam_stand && t.slam_stand_told != t.slam_stand && slam_body.load() && t.slam_reports < 4)
             {
@@ -8932,7 +8943,7 @@ namespace ingame
                 return;
             t.slam_stand = t.stand_seen;
             // (V1.3.54: his physics' data, see slam_body)
-            const auto data = speed > 100 && t.papu && !IsDebuggerPresent() && code_is(slam_step, {0xf3, 0x0f, 0x11, 0x44, 0x24, 0x20}) ? papu_body_record(t.papu) : 0;
+            const auto data = faster && t.papu && !IsDebuggerPresent() && code_is(slam_step, {0xf3, 0x0f, 0x11, 0x44, 0x24, 0x20}) ? papu_body_record(t.papu) : 0;
             if (!data)
             {
                 t.slam_rate_used = 1;
@@ -8945,7 +8956,10 @@ namespace ingame
             if (slam_body.load() != data || slam_arm_address.load() != base() + slam_step || steps == t.slam_seen_steps)
                 slam_body = data, slam_seen = 0, threads = steer_debug_register(steer_arm_address.load(), base() + slam_step);
             t.slam_seen_steps = steps;
-            t.slam_rate_used = threads > 1 ? papu_slam_pace(speed, slam_ms, t.sc_slam_clock > 0 ? t.sc_slam_clock - t.sc_lead : 0.9f) : 1.0f;
+            const float game = t.sc_slam_clock > 0 ? t.sc_slam_clock - t.sc_lead : 0.9f;
+            t.slam_rate_used = threads <= 1        ? 1.0f
+                               : t.sc_slam_fixed ? std::max(1.0f, game / (static_cast<float>(t.sc_slam_fixed) / 1000.0f))
+                                                 : papu_slam_pace(speed, slam_ms, game);
             slam_rate = t.slam_rate_used;
             if (!t.slam_told)
             {
@@ -9070,13 +9084,27 @@ namespace ingame
         // His laps are watched after it: if none is counted while the game's own turn goes on by two whole turns, his laps may
         // count his turn's way (and his spin wouldn't end), so he turns back the first way and the switch is off for this
         // visit (the log says so)
+        // V1.3.61 (Eric's V1.3.60 run: "it was working for a bit and then it stopped working"; Crash died in a spin, his laps
+        // stopped counting then (they count against Crash), and the check took that for laps that don't count his way and
+        // turned the switch off for the visit): nothing turns while Crash is dead, the check doesn't count then, and when it
+        // does turn him back it's for that spin only (off for the visit only after three such spins); and the log says when
+        // Crash dies in a spin that turned the other way (does it still hit him?)
+        bool crash_dead_now()
+        {
+            const auto died = bound_player_died();
+            return died && reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60)(died);
+        }
         void papu_reverse(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
+            const bool dead = crash_dead_now(), died = dead && !t.rev_dead;
+            t.rev_dead = dead;
             if (s != 2 || !state.boss_rules || !t.steer_on || !t.spin_start_at)
             {
                 t.rev_spin = 0;
                 return;
             }
+            if (died && t.rev_done && t.rev_lines < 30)
+                ++t.rev_lines, std::cout << "Boss pattern: Crash died in his spin, " << seconds(now - t.rev_done_at) << " after it turned the other way\n" << std::flush;
             const float g = steer_game.load();
             const int laps = t.laps_at ? value<int>(t.papu_ai + t.laps_at) : 0;
             if (t.rev_spin != t.spin_start_at)
@@ -9092,13 +9120,13 @@ namespace ingame
                 t.rev_meant = std::max(0.25f, std::uniform_real_distribution<float>(0.3f, 0.7f)(rng) * expected);
                 t.rev_at = t.spin_start_at + static_cast<std::uint64_t>(t.rev_meant * 1000);
             }
-            // (the game's own turn since his last lap or the switch)
-            if (t.rev_g_known)
+            // (the game's own turn since his last lap or the switch, while Crash is alive)
+            if (t.rev_g_known && !dead)
                 t.rev_g_turned += std::abs(wrap_angle(g - t.rev_g_last));
             t.rev_g_last = g, t.rev_g_known = true;
             if (laps != t.rev_laps)
                 t.rev_laps = laps, t.rev_g_turned = 0;
-            if (!t.rev_done && t.rev_at && now >= t.rev_at && steer_mode.load() == 2)
+            if (!t.rev_done && t.rev_at && now >= t.rev_at && steer_mode.load() == 2 && !dead)
             {
                 steer_pivot = g, steer_mode = 3;
                 t.rev_done = true, t.rev_done_at = now, t.rev_g_turned = 0, t.rev_laps_at_switch = laps;
@@ -9110,9 +9138,10 @@ namespace ingame
             {
                 // (turned back the first way from where he is: his turn by steer_delta again, that much further)
                 steer_delta = wrap_angle(steer_delta.load() + 2 * wrap_angle(steer_pivot.load() - g)), steer_mode = 2;
-                t.rev_off = true;
+                t.rev_off = ++t.rev_backs >= 3;
                 std::cout << "Boss pattern: no lap of his counted while the game turned him two whole turns after he turned the other way (" << seconds(now - t.rev_done_at)
-                          << "): his laps may count his turn's way; turned back the first way, and no more turning the other way in this visit\n" << std::flush;
+                          << ", Crash alive): his laps may count his turn's way; this spin turned back the first way"
+                          << (t.rev_off ? " (the third time: no more turning the other way in this visit)" : "") << "\n" << std::flush;
             }
         }
         void papu_aim(BossTuning &t, const Shared &state, int s, std::uint64_t now)
@@ -9483,20 +9512,22 @@ namespace ingame
             // (V1.3.58: he can be hit for a while now, see papu_window)
             t.window_on = true, t.window_until = now + t.window_ms, t.red_skip_spin = false;
             if (t.window_lines < 40)
-                ++t.window_lines, std::cout << "Boss rule: he can be hit for " << seconds(t.window_ms) << " (at " << t.window_percent << "%), then he's red again\n" << std::flush;
+                ++t.window_lines, std::cout << "Boss rule: he can be hit for " << seconds(t.window_ms)
+                                            << (t.window_fixed ? std::string(" (the seed's time)") : " (at " + std::to_string(t.window_percent) + "%)") << ", then he's red again\n" << std::flush;
         }
         // V1.3.58 (Eric: "after his first spin, he's vulnerable maybe for like 5 seconds, and then he's ... red, and then you have
         // to wait for the other spin cycle"; 5 s to start, less if that's too long): with the boss rules on, once his red ends
         // he can be hit for /boss_window's time (5 s), then he's red again as at the fight's start (see papu_start_red), until
         // the slam after his next spin (a spin he's in then doesn't count: red_skip_spin). A hit in that time starts the game's
         // own immunity as always; the fight starting over, or the rule off, ends it
-        // V1.3.59 (Eric: "the two second is good for 200% speed ... scale it based on the speed"): /boss_window's time (2 s)
-        // is his time at 200%, and it's longer by the same pace at lower speeds: 2.3 s at 175%, 2.7 s at 150%, 3.2 s at 125%,
-        // 4 s at 100%
+        // V1.3.59 (Eric: "the two second is good for 200% speed ... scale it based on the speed"): /boss_window's time is his
+        // time at 200%, and it's longer by the same pace at lower speeds. V1.3.61 (Eric: "make the hit window for 200% speed to
+        // 1.5 seconds"): 1.5 s at 200%, 1.7 s at 175%, 2 s at 150%, 2.4 s at 125%, 3 s at 100%; or the seed's own time at any
+        // speed (its YAML's boss_hit_window)
         void papu_window(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
-            t.window_percent = std::clamp(state.boss_speed, 100u, 200u);
-            t.window_ms = std::clamp(state.boss_window_ms, 500u, 10000u) * 200u / t.window_percent;
+            t.window_percent = std::clamp(state.boss_speed, 100u, 200u), t.window_fixed = state.boss_window_fixed_ms != 0;
+            t.window_ms = t.window_fixed ? std::clamp(state.boss_window_fixed_ms, 500u, 10000u) : std::clamp(state.boss_window_ms, 500u, 10000u) * 200u / t.window_percent;
             if (!t.window_on)
                 return;
             if (!state.boss_rules || t.start_red || s == 3 || s == 4 || s == 5 || s == 6)
@@ -9752,7 +9783,7 @@ namespace ingame
 #ifndef CRASH_NST_STABLE
             // (not in the Stable build yet: his slam's speed (V1.3.53: his animation stepped faster as he stands, see
             // papu_slam_speed; V1.3.35's search for it only while that isn't on) and the slam aim)
-            papu_slam_speed(t, s, percent, state.boss_slam_ms);
+            papu_slam_speed(t, s, percent, state.boss_slam_ms, state.boss_slam_fixed_ms);
             papu_stand_clock(t, s, now); // (V1.3.56)
             papu_slam_rate(t, s, percent, now);
             papu_aim(t, state, s, now);
@@ -12398,7 +12429,7 @@ namespace ingame
                 return;
             if (t.sc_stand != t.stand_seen)
                 t.sc_stand = t.stand_seen, t.sc_step = 0, t.sc_cands.clear(), t.sc_clocks.clear(), t.sc_from.clear(), t.sc_written = false,
-                t.sc_frames = t.sc_held = t.sc_back = 0, t.sc_extra = 0, t.sc_target = 0, t.sc_tries = 0, t.sc_retry_at = 0;
+                t.sc_frames = t.sc_held = t.sc_back = 0, t.sc_extra = 0, t.sc_target = 0, t.sc_tries = 0, t.sc_retry_at = 0, t.sc_bad.clear(), t.sc_late_tries = 0;
             const bool slammed = t.slam_seen_at && t.slam_seen_at >= t.stand_seen;
             // (his slam, or his stand over: how it went; and his slam's time on his clock, the least seen)
             if (t.sc_step == 2 && (slammed || s != 1))
@@ -12407,17 +12438,27 @@ namespace ingame
                 const float at = value<float>(t.sc_clocks[0].first);
                 if (slammed && std::isfinite(at) && at > 0.5f && at < 1.5f)
                     t.sc_slam_clock = t.sc_slam_clock > 0 ? std::min(t.sc_slam_clock, at) : at;
-                if (t.sc_told < 12)
+                // (V1.3.61: a slam late by more than 0.1 s is told past the first 12 too, with what was moved on)
+                const float came = slammed ? static_cast<float>(t.slam_seen_at - t.stand_seen) / 1000.0f : 0.0f;
+                const bool late = slammed && came > t.sc_target + 0.1f;
+                if (t.sc_told < 12 || (late && t.sc_fail_told < 16))
                 {
                     std::ostringstream line;
-                    line << std::fixed << std::setprecision(2) << "Boss speed: his stand played faster (" << t.sc_percent << "%): ";
+                    line << std::fixed << std::setprecision(2) << "Boss speed: his stand played faster ("
+                         << (t.sc_slam_fixed ? "the seed's " + std::to_string(t.sc_slam_fixed) + " ms" : std::to_string(t.sc_percent) + "%") << "): ";
                     if (slammed)
-                        line << "his slam came " << static_cast<float>(t.slam_seen_at - t.stand_seen) / 1000.0f << " s after he stood (meant for " << t.sc_target << " s)";
+                        line << "his slam came " << came << " s after he stood (meant for " << t.sc_target << " s)";
                     else
                         line << "no slam in this stand";
                     line << "; his clock moved on " << t.sc_extra << " s more over " << t.sc_frames << " frames, at " << at << " s at his slam; the game went on from it "
                          << t.sc_held << " frames, put it back " << t.sc_back;
-                    ++t.sc_told, std::cout << line.str() << "\n" << std::flush;
+                    if (late)
+                    {
+                        line << "; late: moved on were";
+                        for (std::size_t i = 0; i < t.sc_clocks.size() && i < 8; ++i)
+                            line << (i ? ", " : " ") << t.sc_clocks[i].second;
+                    }
+                    ++(t.sc_told < 12 ? t.sc_told : t.sc_fail_told), std::cout << line.str() << "\n" << std::flush;
                 }
             }
             if (s != 1)
@@ -12430,7 +12471,8 @@ namespace ingame
             // behind the time since he stood count too (the game may have stopped a moment as his breakpoints were set), up
             // to 96 of them (V1.3.58 kept 24, and the second visit's first stand had that many); checked 50 ms later
             const auto retry = [&](const std::string &why) {
-                const bool again = t.sc_tries < 3 && since < 400;
+                // (V1.3.61: and after numbers that went past his slam's time, two more tries until 0.9 s in)
+                const bool again = (t.sc_tries < 3 && since < 400) || (t.sc_late_tries && t.sc_tries < 5 && since < 900);
                 if (t.sc_fail_told < 16)
                 {
                     std::ostringstream line;
@@ -12451,7 +12493,8 @@ namespace ingame
                     if (!read(o.first, f))
                         continue;
                     for (std::size_t i = 0; i < f.size() && t.sc_cands.size() < 96; ++i)
-                        if (std::isfinite(f[i]) && f[i] > 0.02f && f[i] < since_s + 0.06f && f[i] > since_s - 0.25f)
+                        if (std::isfinite(f[i]) && f[i] > 0.02f && f[i] < since_s + 0.06f && f[i] > since_s - 0.25f &&
+                            std::find(t.sc_bad.begin(), t.sc_bad.end(), o.first + i * 4) == t.sc_bad.end())
                             t.sc_cands.push_back({o.first + i * 4, o.second + " +" + hex(static_cast<unsigned>(i * 4))}), t.sc_from.push_back(f[i]);
                 }
                 t.sc_t0 = now, t.sc_step = 1;
@@ -12461,13 +12504,16 @@ namespace ingame
             }
             if (t.sc_step == 1 && now - t.sc_t0 >= 50)
             {
-                const float went = static_cast<float>(now - t.sc_t0) / 1000.0f;
+                const float went = static_cast<float>(now - t.sc_t0) / 1000.0f, searched = static_cast<float>(t.sc_t0 - t.stand_seen) / 1000.0f;
                 std::ostringstream found, missed;
                 unsigned shown = 0;
                 for (std::size_t i = 0; i < t.sc_cands.size(); ++i)
                 {
-                    const float v = value<float>(t.sc_cands[i].first);
-                    if (std::isfinite(v) && v - t.sc_from[i] > went * 0.5f && v - t.sc_from[i] < went * 1.6f)
+                    // (V1.3.61, Eric's V1.3.59 run: the first try missed them in the first stands of each visit, as they went on
+                    // faster than the time for a moment, catching up after the game stopped as his breakpoints were set (0.047
+                    // to 0.157 s in 0.063 s, 0.073 s behind): one behind the time since he stood may go on faster by as much)
+                    const float v = value<float>(t.sc_cands[i].first), behind = std::max(0.0f, searched - t.sc_from[i]);
+                    if (std::isfinite(v) && v - t.sc_from[i] > went * 0.5f && v - t.sc_from[i] < went * 1.6f + behind)
                         t.sc_clocks.push_back(t.sc_cands[i]), found << (t.sc_clocks.size() > 1 ? ", " : "") << t.sc_cands[i].second << " (" << v << ")";
                     else if (shown++ < 4)
                         missed << (shown > 1 ? ", " : "") << t.sc_cands[i].second << " " << t.sc_from[i] << " -> " << v;
@@ -12484,14 +12530,35 @@ namespace ingame
                 t.sc_step = 2, t.sc_last = now, t.sc_lead = value<float>(t.sc_clocks[0].first) - since_s;
                 return;
             }
-            if (t.sc_step != 2 || t.sc_percent <= 100)
+            if (t.sc_step != 2 || (t.sc_percent <= 100 && !t.sc_slam_fixed))
                 return;
             // (when his slam comes at his pace, and how fast his clock runs to have it then)
             const float game = t.sc_slam_clock > 0 ? t.sc_slam_clock - t.sc_lead : 0.9f, slam_at = t.sc_slam_clock > 0 ? t.sc_slam_clock : 0.9f + t.sc_lead;
             const float pace = papu_slam_pace(t.sc_percent, t.sc_slam_ms, game);
-            t.sc_target = game / pace;
+            t.sc_target = t.sc_slam_fixed ? std::min(game, static_cast<float>(t.sc_slam_fixed) / 1000.0f) : game / pace;
             const float clock = value<float>(t.sc_clocks[0].first), left = t.sc_target - since_s;
-            const float run = !std::isfinite(clock) ? 1.0f : left > 0.01f ? std::clamp((slam_at - clock) / left, 1.0f, 4.0f) : 4.0f;
+            // V1.3.61 (Eric's V1.3.59 run: "there was one time where it did take a while to catch up"; that stand's numbers were
+            // moved on to 3.08 s and his slam came at the game's 0.95 s: not what his slam goes by in that stand): none is moved
+            // on past his slam's time on it, and one past it by 0.15 s with no slam is looked for again without those (twice at
+            // most in a stand)
+            if (std::isfinite(clock) && clock > slam_at + 0.15f && t.sc_late_tries < 2)
+            {
+                ++t.sc_late_tries;
+                std::ostringstream names;
+                for (std::size_t i = 0; i < t.sc_clocks.size(); ++i)
+                    t.sc_bad.push_back(t.sc_clocks[i].first), names << (i ? ", " : "") << (i < 8 ? t.sc_clocks[i].second : std::string("..."));
+                if (t.sc_fail_told < 16)
+                {
+                    std::ostringstream line;
+                    line << std::fixed << std::setprecision(2) << "Boss speed: his stand's clocks went past his slam's time on them (" << clock << " of " << slam_at
+                         << ") with no slam, " << since_s << " s in: not what his slam goes by in this stand (" << names.str() << "); looked for again without them";
+                    ++t.sc_fail_told, std::cout << line.str() << "\n" << std::flush;
+                }
+                t.sc_cands.clear(), t.sc_from.clear(), t.sc_clocks.clear(), t.sc_step = 0, t.sc_retry_at = now;
+                t.sc_extra = 0, t.sc_written = false, t.sc_frames = t.sc_held = t.sc_back = 0;
+                return;
+            }
+            const float run = !std::isfinite(clock) || clock >= slam_at ? 1.0f : left > 0.01f ? std::clamp((slam_at - clock) / left, 1.0f, 4.0f) : 4.0f;
             const float dt = std::clamp(static_cast<float>(now - t.sc_last) / 1000.0f, 0.005f, 0.05f), extra = (run - 1.0f) * dt;
             t.sc_last = now;
             // (the first: did the game go on from what was set? Then it's ahead of the time since he stood by what was added; put

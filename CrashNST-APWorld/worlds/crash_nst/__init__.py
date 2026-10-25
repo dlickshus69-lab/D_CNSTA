@@ -1122,5 +1122,9 @@ class CrashWorld(World):
         result["boss_rules"] = harder
         result["boss_health"] = self.options.boss_health.value if harder else 100
         result["boss_speed"] = self.options.boss_speed.value if harder else 100
+        # (V1.3.61) his slam's time after he stands (hundredths of a second) and the hit window (tenths), at any boss
+        # speed; 0: by the boss speed
+        result["boss_slam_time"] = self.options.boss_slam_time.value if harder else 0
+        result["boss_hit_window"] = self.options.boss_hit_window.value if harder else 0
         result["boss_aku_aku"] = bool(self.options.harder_bosses_aku_aku.value)
         return result

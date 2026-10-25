@@ -9,6 +9,7 @@ from Options import (
     DefaultOnToggle,
     OptionDict,
     PerGameCommonOptions,
+    NamedRange,
     Range,
     Toggle,
     DeathLink,
@@ -678,12 +679,38 @@ class BossHealth(Range):
 
 class BossSpeed(Range):
     """How fast a harder boss fights, in percent of the game's (needs Harder Bosses): Papu Papu spins faster (each hit
-    still speeds him up, gentler near the top so the end stays beatable) and waits less before his spins."""
+    still speeds him up, gentler near the top so the end stays beatable), waits less before his spins, slams sooner after
+    he stands (unless Boss Slam Time sets it) and can be hit for less time once his red ends (unless Boss Hit Window sets
+    it)."""
 
     display_name = "Boss Speed"
     range_start = 100
     range_end = 200
     default = 150
+
+
+class BossSlamTime(NamedRange):
+    """How soon a harder boss slams after he stands up, in hundredths of a second (needs Harder Bosses; for now Papu
+    Papu). by_speed: from Boss Speed, the game's 0.9 s at 100% down to 0.45 s at 200%. 25 to 90: that time (0.25 to
+    0.9 s) at any Boss Speed."""
+
+    display_name = "Boss Slam Time"
+    range_start = 25
+    range_end = 90
+    default = 0
+    special_range_names = {"by_speed": 0}
+
+
+class BossHitWindow(NamedRange):
+    """How long a harder boss can be hit once his red ends, in tenths of a second (needs Harder Bosses; for now Papu
+    Papu); then he's red again until the slam after his next spin. by_speed: from Boss Speed, 3 s at 100% down to 1.5 s
+    at 200%. 5 to 100: that time (0.5 to 10 s) at any Boss Speed."""
+
+    display_name = "Boss Hit Window"
+    range_start = 5
+    range_end = 100
+    default = 0
+    special_range_names = {"by_speed": 0}
 
 
 class HarderBossesAkuAku(Toggle):
@@ -753,6 +780,8 @@ crash_option_groups = [
         HarderBosses,
         BossHealth,
         BossSpeed,
+        BossSlamTime,
+        BossHitWindow,
         HarderBossesAkuAku,
     ]),
     OptionGroup("Cosmetic", [
@@ -815,6 +844,8 @@ class CrashOptions(PerGameCommonOptions):
     harder_bosses: HarderBosses
     boss_health: BossHealth
     boss_speed: BossSpeed
+    boss_slam_time: BossSlamTime
+    boss_hit_window: BossHitWindow
     harder_bosses_aku_aku: HarderBossesAkuAku
     crash_fur_color: CrashFurColor
     crash_chest_color: CrashChestColor
