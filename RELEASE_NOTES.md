@@ -4,8 +4,11 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Red at the start, the first time in a visit.** In V1.3.33 the first fight after arriving had no "can't be hit" timer yet (the game only makes it at his first hit), so landing on red Papu Papu then was a real hit: he flinched and the bar lost a notch, even though Crash still died. Now, for that red, his health script's list of the attacks that hurt him is emptied and his "can't be hit" switch is held on, so the landing should be the game's own bounce: no hit, no flinch, no notch, and Crash still dies. The list goes back as soon as his red ends. If the game doesn't use that list the way it looks, the log says so and the landing is still V1.3.33's hit taken back.
-- **Speed, a first step** (`/boss_speed 150` or `/boss_speed 200`): every wait in Papu Papu's fight (his AI's own timers: before his slam, before his spin, after a hit) is cut by the speed as it starts, on top of his faster spin. His settings for those waits stay the game's, so no wait is cut twice, and the speed no longer stacks up from one visit to the next. The log lists each wait with its length, to tell which one is which.
+- **A faster spin** (`/boss_speed 150` or `/boss_speed 200`). V1.3.34's log showed his laps took the same 1.2 seconds at every speed: the number it changed isn't the one the game turns him with. The game takes his spin speed from a list in his settings (one speed for each hit he's taken), so now that list is sped up instead. It goes back to the game's own at 100%.
+- **A faster slam, found by itself.** His slam is a move the game plays, with no timer to shorten. So in his first two slams of a visit, the build looks around him for the clock that plays his moves (a number counting the seconds that starts over with each move). Then, with `/boss_speed` above 100, it tries the numbers next to that clock as its speed, one in each slam. The one that makes the clock run faster is kept, and from then on every slam plays at your speed. The log says what it found.
+- **His moves timed in the log**: for each cycle, how long from when he stands to his slam, from the slam to his spin, his spin, and each lap. At 100% that's his normal speed, to compare with.
+- The waits shortened in V1.3.34 (before his spin, and as he comes into the arena) stay shortened.
+- From V1.3.34: red at the start the first time in a visit is the game's bounce, with no flinch.
 - From V1.3.33: 9 hits at most, no Aku Aku masks in harder boss fights, red from the very start as he comes into the arena.
 - From V1.3.32: red ends after the slam that follows his spin.
 - From V1.3.31: red follows the game's own "can be hit" switch, so red always means he can't be hit.

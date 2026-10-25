@@ -5453,6 +5453,60 @@ namespace ingame
             };
             std::vector<AiTimer> ai_timers;
             unsigned speed_lines = 0;
+            // V1.3.35 research (see papu_spin_search): the places that held his spin speed at the last search (with how many
+            // searches in a row they did), the searches done, and when the next is due (a little into his spin)
+            struct SpinPlace
+            {
+                Address at = 0;
+                std::string where;
+                unsigned follows = 0;
+            };
+            std::vector<SpinPlace> spin_places;
+            unsigned spin_searches = 0;
+            std::uint64_t spin_search_due = 0;
+            // V1.3.35 (see papu_clocks and papu_slam_rate): the places looked at for what plays his moves (his parts and what they
+            // point to), their snapshots in his first two slams, the clocks found there (a number counting the seconds up and
+            // starting over with each move), and his slam's speed: the numbers next to a clock tried as its speed, the one found
+            struct ClockRegion
+            {
+                Address at = 0, type = 0; // (the object and its type then: it's checked to be the same before anything is set in it)
+                unsigned bytes = 0;
+                std::string where;
+                std::size_t first = 0; // where its words start in a snapshot
+            };
+            struct Clock
+            {
+                Address at = 0;
+                std::string where;
+                bool dbl = false;
+                float unit = 1;
+                double last = 0;
+                std::size_t region = 0;
+                bool confirmed = false;
+            };
+            struct RateCandidate
+            {
+                Address at = 0;
+                std::string where;
+                std::size_t region = 0, clock = 0;
+            };
+            std::vector<ClockRegion> clock_regions;
+            std::array<std::vector<std::uint32_t>, 3> clock_snap;
+            std::array<double, 3> clock_t{};
+            int clock_period = 0, clock_step = 0;
+            std::vector<Clock> clocks;
+            std::vector<RateCandidate> rate_candidates;
+            std::size_t rate_next = 0, rate_clock = 0;
+            bool rate_found = false, rate_trying = false, rate_written = false, rate_checked = false;
+            float rate_value = 0;
+            double rate_t0 = 0, rate_c0 = 0;
+            unsigned rate_lines = 0, rate_retries = 0, rate_uses = 0;
+            std::uint64_t stand_seen = 0, rate_stand = 0;
+            // V1.3.35 (Eric: "scan the speed of his normal speed and then add it to the logs"): his moves' times in each cycle
+            std::uint64_t stand_at = 0, slam_seen_at = 0, spin_start_at = 0, lap_at = 0;
+            int laps_last = 0;
+            std::string lap_times, cycle_head;
+            unsigned cycle_lines = 0, slams_cycle = 0;
         } boss_tuning;
         // V1.3.34 (see papu_list_block): the list emptied, outside the fight's own state so it's always put back (also after
         // the fight is left): the list, its items and type then, and its count before
@@ -7270,7 +7324,441 @@ namespace ingame
                                                << (percent > 100 ? ", cut to " + std::to_string(cut).substr(0, 4) + " s" : std::string()) << "\n" << std::flush;
             }
         }
-        // V1.3.31: each immunity of his as it starts (his can-be-hit flag clears): the timer's numbers then, and a third of a
+        // V1.3.35: seconds, finer than GetTickCount64's (how fast a clock of his counts, see papu_clocks)
+        double precise_seconds()
+        {
+            static const double frequency = [] {
+                LARGE_INTEGER f{};
+                QueryPerformanceFrequency(&f);
+                return static_cast<double>(f.QuadPart);
+            }();
+            LARGE_INTEGER c{};
+            QueryPerformanceCounter(&c);
+            return static_cast<double>(c.QuadPart) / frequency;
+        }
+        // V1.3.35 (Eric, V1.3.34: "im not seeing any speed changes"; V1.3.34's log: his laps took 1.2 s each at x1, x1.5 and x2,
+        // writing his AI's spin speed, currAttackSpinSpeedMultiplier, changed nothing, and only the game's own steps after his
+        // hits made his laps a little shorter). The game takes those steps from his settings' list of spin speeds, one for each
+        // hit (Float_List_id_2p8swjzh: 1, 1.08, ...; V1.3.34's log has it next to his deflect script's list), as it sets them. So
+        // /boss_speed goes into that list, worked out from the game's own numbers (as first seen while the game runs: the
+        // settings stay loaded from one visit to the next), and they're the game's again at 100%
+        std::vector<float> game_spin_list;
+        void papu_spin_list(BossTuning &t, Address c, unsigned percent)
+        {
+            const auto data = value<Address>(c + 16);
+            const auto field = typed(data, 0x13bbb10) ? field_named(value<Address>(data + 32), "Float_List_id_2p8swjzh") : 0;
+            if (!field || value<std::uint16_t>(field + 22) != 8)
+            {
+                tell_once(t, "spinlist", "Boss speed: his settings' list of spin speeds (Float_List_id_2p8swjzh) isn't there");
+                return;
+            }
+            const auto v = value<Address>(data + value<std::uint16_t>(field + 24));
+            Address list = 0;
+            for (const auto x : {v, resolve(v)})
+                if (x >= 0x10000 && readable(x, 0x30) && value<Address>(x) == base() + 0x17a6b28)
+                {
+                    list = x;
+                    break;
+                }
+            const unsigned count = list ? value<unsigned>(list + 0x10) : 0, room = list ? value<unsigned>(list + 0x14) : 0;
+            const auto items = list ? value<Address>(list + 0x20) : 0;
+            std::vector<float> now(std::clamp(count, 1u, 16u));
+            if (!list || count < 1 || count > 16 || room < count || items < 0x10000 || !readable(items, count * 4) || !read(items, now) ||
+                !std::all_of(now.begin(), now.end(), [](float f) { return std::isfinite(f) && f > 0.05f && f < 20.0f; }))
+            {
+                tell_once(t, "spinlist?", "Boss speed: his settings' list of spin speeds isn't a list of numbers as expected:" + qwords_text(list ? list : v, 0x40));
+                return;
+            }
+            if (game_spin_list.size() != count)
+                game_spin_list = now;
+            std::ostringstream from, to;
+            bool differs = false;
+            for (unsigned i = 0; i < count; ++i)
+            {
+                const float want = game_spin_list[i] * static_cast<float>(percent) / 100.0f;
+                differs = differs || std::abs(now[i] - want) > 0.0001f;
+                from << (i ? ", " : "") << game_spin_list[i];
+                to << (i ? ", " : "") << want;
+            }
+            if (!differs)
+                return;
+            for (unsigned i = 0; i < count; ++i)
+                write(items + i * 4, game_spin_list[i] * static_cast<float>(percent) / 100.0f);
+            boss_pace_changed = boss_pace_changed || percent != 100;
+            std::cout << "Boss speed: his spin speeds (one for each hit, his settings') " << from.str() << " -> " << to.str() << " (" << percent << "%)\n" << std::flush;
+        }
+        // V1.3.35: the places where what plays his moves may be: his actor, his parts (not his scripts) and what each of them
+        // points to, two steps deep. Each one's words start at `first` in a snapshot
+        void papu_clock_regions(BossTuning &t)
+        {
+            t.clock_regions.clear();
+            ReadableRegions ok;
+            std::set<Address> seen;
+            std::size_t first = 0;
+            const auto add = [&](Address at, unsigned bytes, const std::string &where) {
+                if (t.clock_regions.size() >= 600 || !seen.insert(at).second || !ok(at, bytes))
+                    return false;
+                BossTuning::ClockRegion r;
+                r.at = at, r.type = value<Address>(at), r.bytes = bytes, r.where = where, r.first = first;
+                t.clock_regions.push_back(r);
+                first += bytes / 4;
+                return true;
+            };
+            const auto object_type = [&](Address p) -> Address {
+                if (p < 0x10000 || (p & 7) || !ok(p, 16))
+                    return 0;
+                const auto vt = value<Address>(p);
+                return vt >= base() && vt < module_end() && vt != base() + 0x13bbbd0 ? vt - base() : 0;
+            };
+            const auto pointers = [&](Address p, unsigned bytes) {
+                std::vector<Address> out(bytes / 8);
+                if (!read(p, out))
+                    out.clear();
+                return out;
+            };
+            add(t.papu, 0x800, "his actor");
+            for (const auto part : list(value<Address>(t.papu + 24), 128))
+            {
+                const auto type = object_type(part);
+                if (!type)
+                    continue;
+                const auto name = "his part " + hex(static_cast<unsigned>(type));
+                if (!add(part, 0x400, name))
+                    continue;
+                const auto inner = pointers(part, 0x200);
+                for (std::size_t i = 1; i < inner.size(); ++i)
+                {
+                    const auto p = inner[i];
+                    const auto ptype = object_type(p);
+                    if (!ptype || p == t.papu)
+                        continue;
+                    const auto where = name + " " + hex(static_cast<unsigned>(i * 8)) + " -> " + hex(static_cast<unsigned>(ptype));
+                    if (!add(p, 0x300, where))
+                        continue;
+                    const auto deeper = pointers(p, 0x100);
+                    for (std::size_t j = 1; j < deeper.size(); ++j)
+                        if (const auto qtype = object_type(deeper[j]); qtype && deeper[j] != t.papu)
+                            add(deeper[j], 0x200, where + " " + hex(static_cast<unsigned>(j * 8)) + " -> " + hex(static_cast<unsigned>(qtype)));
+                }
+            }
+        }
+        void clock_snapshot(const BossTuning &t, std::vector<std::uint32_t> &out)
+        {
+            std::size_t total = 0;
+            for (const auto &r : t.clock_regions)
+                total += r.bytes / 4;
+            out.assign(total, 0x7fc00000u); // (not a number where a place couldn't be read)
+            for (const auto &r : t.clock_regions)
+            {
+                std::vector<std::uint32_t> words(r.bytes / 4);
+                if (read(r.at, words))
+                    std::copy(words.begin(), words.end(), out.begin() + static_cast<std::ptrdiff_t>(r.first));
+            }
+        }
+        double snap_value(const std::vector<std::uint32_t> &snap, std::size_t word, bool dbl)
+        {
+            if (word >= snap.size() || (dbl && word + 1 >= snap.size()))
+                return std::nan("");
+            if (dbl)
+            {
+                const std::uint64_t bits = snap[word] | (static_cast<std::uint64_t>(snap[word + 1]) << 32);
+                double d = 0;
+                std::memcpy(&d, &bits, 8);
+                return d;
+            }
+            float f = 0;
+            std::memcpy(&f, &snap[word], 4);
+            return f;
+        }
+        // the unit a number counts in, if it counts up with the time: 1 a second, or 30 or 60 (frames); 0 if it doesn't
+        float clock_unit(double from, double to, double seconds)
+        {
+            if (!std::isfinite(from) || !std::isfinite(to) || seconds <= 0.05 || std::abs(from) > 1e6)
+                return 0;
+            const double rate = (to - from) / seconds;
+            for (const float unit : {1.0f, 30.0f, 60.0f})
+                if (rate > unit * 0.8 && rate < unit * 1.25)
+                    return unit;
+            return 0;
+        }
+        double clock_now(const BossTuning::Clock &k)
+        {
+            return k.dbl ? value<double>(k.at) : static_cast<double>(value<float>(k.at));
+        }
+        // (his moves' speed once found, by where it is (see papu_slam_rate): tried first in the next visits)
+        std::string rate_found_where;
+        // V1.3.35 (Eric: "make... a detection... scan the speed of his normal speed and then add it to the logs and then go off on
+        // that"): what plays his moves. In his first two slams of a visit (he stands, and slams a second later), the places
+        // around him (see papu_clock_regions) are read as he stands, 0.3 s later and 0.6 s later: a number that counts the
+        // seconds up in both steps (or frames, 30 or 60 a second) is a clock; one that starts over by his next slam and counts
+        // again is a clock of his moves. To the log, and papu_slam_rate looks for its speed next to it
+        void papu_clocks(BossTuning &t, int s, std::uint64_t now)
+        {
+            if (t.clock_period >= 2 || !t.papu)
+                return;
+            if (s != 1)
+            {
+                t.clock_step = 0; // (a stand cut short: its snapshots are dropped)
+                return;
+            }
+            const auto since = now - t.stand_seen;
+            if ((t.clock_step == 0 && since > 100) || (t.clock_step > 0 && since < 300u * static_cast<unsigned>(t.clock_step)))
+                return;
+            if (t.clock_step == 0 && t.clock_regions.empty())
+                papu_clock_regions(t);
+            if (t.clock_regions.empty())
+                return;
+            clock_snapshot(t, t.clock_snap[static_cast<std::size_t>(t.clock_step)]);
+            t.clock_t[static_cast<std::size_t>(t.clock_step)] = precise_seconds();
+            if (++t.clock_step < 3)
+                return;
+            t.clock_step = 0;
+            const auto &a = t.clock_snap[0], &b = t.clock_snap[1], &c = t.clock_snap[2];
+            const double ab = t.clock_t[1] - t.clock_t[0], bc = t.clock_t[2] - t.clock_t[1];
+            std::ostringstream out;
+            unsigned shown = 0;
+            if (t.clock_period == 0)
+            {
+                // (his first slam: every number counting up with the time)
+                for (std::size_t r = 0; r < t.clock_regions.size() && t.clocks.size() < 48; ++r)
+                {
+                    const auto &region = t.clock_regions[r];
+                    const unsigned words = region.bytes / 4;
+                    for (unsigned i = 0; i < words && t.clocks.size() < 48; ++i)
+                        for (const bool dbl : {false, true})
+                        {
+                            if (dbl && (i % 2 || i + 1 >= words))
+                                continue;
+                            const auto w = region.first + i;
+                            const double va = snap_value(a, w, dbl), vb = snap_value(b, w, dbl), vc = snap_value(c, w, dbl);
+                            const float u1 = clock_unit(va, vb, ab), u2 = clock_unit(vb, vc, bc);
+                            if (u1 == 0 || u1 != u2)
+                                continue;
+                            BossTuning::Clock k;
+                            k.at = region.at + i * 4, k.where = region.where + " " + hex(i * 4) + (dbl ? " (8 bytes)" : ""), k.dbl = dbl, k.unit = u1, k.last = vc, k.region = r;
+                            t.clocks.push_back(k);
+                            if (shown++ < 16)
+                                out << "\n  " << k.where << ": " << va << " -> " << vb << " -> " << vc << (u1 != 1 ? " (" + whole(u1) + " a second)" : std::string());
+                        }
+                }
+                std::cout << "Boss speed research: in his first slam, " << t.clocks.size() << " numbers around him count up with the time (" << t.clock_regions.size()
+                          << " places looked at, " << ab + bc << " s)" << out.str() << "\n" << std::flush;
+            }
+            else
+            {
+                // (his second slam: the ones that started over, lower than at the end of the first, and count up again)
+                unsigned confirmed = 0;
+                for (auto &k : t.clocks)
+                {
+                    const auto w = t.clock_regions[k.region].first + static_cast<std::size_t>((k.at - t.clock_regions[k.region].at) / 4);
+                    const double va = snap_value(a, w, k.dbl), vb = snap_value(b, w, k.dbl), vc = snap_value(c, w, k.dbl);
+                    k.confirmed = va < k.last - 0.05 * k.unit && clock_unit(va, vb, ab) == k.unit && clock_unit(vb, vc, bc) == k.unit;
+                    if (k.confirmed && shown++ < 16)
+                        out << "\n  " << k.where << ": " << k.last << " at the end of his first slam, then " << va << " -> " << vb << " -> " << vc;
+                    confirmed += k.confirmed ? 1 : 0;
+                    k.last = vc;
+                }
+                // (the speed next to each of them that isn't his actor's own: the numbers that are 1 within 0x80 bytes of it, nearest
+                // first, 4 for each at most and 12 in all, see papu_slam_rate)
+                std::set<Address> taken;
+                for (std::size_t i = 0; i < t.clocks.size() && t.rate_candidates.size() < 12; ++i)
+                {
+                    const auto &k = t.clocks[i];
+                    if (!k.confirmed || k.where.rfind("his actor", 0) == 0)
+                        continue;
+                    const auto &region = t.clock_regions[k.region];
+                    std::vector<std::pair<Address, Address>> nearby;
+                    for (unsigned off = 0; off + 4 <= region.bytes; off += 4)
+                    {
+                        const Address at = region.at + off, dist = at > k.at ? at - k.at : k.at - at;
+                        if (dist == 0 || dist > 0x80 || (k.dbl && dist < 8) || b[region.first + off / 4] != 0x3f800000u || taken.count(at))
+                            continue;
+                        nearby.emplace_back(dist, at);
+                    }
+                    std::sort(nearby.begin(), nearby.end());
+                    unsigned added = 0;
+                    for (const auto &[dist, at] : nearby)
+                        if (t.rate_candidates.size() < 12 && added++ < 4)
+                        {
+                            BossTuning::RateCandidate rc;
+                            rc.at = at, rc.where = region.where + " " + hex(static_cast<unsigned>(at - region.at)), rc.region = k.region, rc.clock = i;
+                            t.rate_candidates.push_back(rc);
+                            taken.insert(at);
+                        }
+                }
+                // (the one found in an earlier visit first)
+                for (std::size_t i = 1; i < t.rate_candidates.size(); ++i)
+                    if (!rate_found_where.empty() && t.rate_candidates[i].where == rate_found_where)
+                        std::rotate(t.rate_candidates.begin(), t.rate_candidates.begin() + static_cast<std::ptrdiff_t>(i), t.rate_candidates.begin() + static_cast<std::ptrdiff_t>(i) + 1);
+                out << "\n  next to them: " << t.rate_candidates.size() << " numbers that are 1 (tried as his moves' speed with /boss_speed above 100)";
+                for (const auto &rc : t.rate_candidates)
+                    out << "\n    " << rc.where;
+                std::cout << "Boss speed research: in his second slam, " << confirmed << " of them started over and counted up again (clocks of his moves)" << out.str() << "\n"
+                          << std::flush;
+            }
+            ++t.clock_period;
+        }
+        // V1.3.35 (Eric: "I want the speed for the slam and spin to be faster"): his slam is a move the game plays (V1.3.34's log:
+        // a second from when he stands to the slam, with no timer of his AI in it). With /boss_speed above 100, once a clock of
+        // his moves is found (see papu_clocks), the numbers that are 1 next to it are tried as its speed, one in each stand: set
+        // to the speed as he stands, and if the clock then counts that much faster, that's the speed his moves play at. From
+        // then on each stand of his (his slam, and the wait after it) plays at the speed, and the 1 goes back as he spins (the
+        // game sets his spin's own, see papu_spin_list). One that doesn't make the clock faster goes back to 1 at once
+        void papu_slam_rate(BossTuning &t, int s, unsigned percent, std::uint64_t now)
+        {
+            const float factor = static_cast<float>(percent) / 100.0f;
+            // (as he stands: the next one to try, once a clock of his moves is known)
+            if (!t.rate_found && !t.rate_trying && s == 1 && percent > 100 && t.rate_stand != t.stand_seen && t.rate_next < t.rate_candidates.size())
+                t.rate_trying = true, t.rate_retries = 0;
+            const bool have = (t.rate_found || t.rate_trying) && t.rate_next < t.rate_candidates.size();
+            const auto &rc = have ? t.rate_candidates[t.rate_next] : BossTuning::RateCandidate{};
+            // (the object it's in still the one it was found in: nothing is set anywhere else)
+            const auto same = [&] {
+                return have && rc.region < t.clock_regions.size() && typed(t.clock_regions[rc.region].at, t.clock_regions[rc.region].type - base());
+            };
+            // (what we set goes back to 1, if it's still what we set)
+            const auto put_back = [&] {
+                if (t.rate_written && same() && std::abs(value<float>(rc.at) - t.rate_value) < 0.0001f)
+                    write(rc.at, 1.0f);
+                t.rate_written = false;
+            };
+            if (s != 1 || percent <= 100)
+            {
+                if (t.rate_written)
+                {
+                    put_back();
+                    // (a try cut short before it was checked: tried again in his next stand, twice at most)
+                    if (t.rate_trying && !t.rate_checked && ++t.rate_retries > 2)
+                        t.rate_trying = false, ++t.rate_next, t.rate_retries = 0;
+                }
+                return;
+            }
+            const auto since = now - t.stand_seen;
+            // as he stands: his moves' speed set (the one found, or the next to try)
+            if (t.rate_stand != t.stand_seen && since < 150)
+            {
+                t.rate_stand = t.stand_seen;
+                if (!have)
+                    return;
+                if (!same() || std::abs(value<float>(rc.at) - 1.0f) > 0.0001f)
+                {
+                    if (t.rate_lines < 30)
+                        ++t.rate_lines, std::cout << "Boss speed: " << (t.rate_found ? "his moves' speed" : "the number tried as his moves' speed") << " (" << rc.where << ") isn't 1 as he stands"
+                                                  << (same() ? " (" + std::to_string(value<float>(rc.at)) + ")" : std::string(" (its object is gone)")) << ": left as it is\n" << std::flush;
+                    if (!t.rate_found)
+                        t.rate_trying = false, ++t.rate_next;
+                    return;
+                }
+                write(rc.at, factor);
+                t.rate_written = true, t.rate_value = factor, t.rate_checked = false, t.rate_t0 = 0;
+                if (t.rate_found && t.rate_lines < 30 && t.rate_uses++ < 6)
+                    ++t.rate_lines, std::cout << "Boss speed: he stands; his slam plays at x" << factor << "\n" << std::flush;
+                return;
+            }
+            // a try: its clock read 0.1 s in and 0.4 s in
+            if (t.rate_found || !t.rate_trying || !t.rate_written || t.rate_checked || rc.clock >= t.clocks.size())
+                return;
+            const auto &k = t.clocks[rc.clock];
+            if (t.rate_t0 == 0 && since >= 100)
+                t.rate_t0 = precise_seconds(), t.rate_c0 = clock_now(k);
+            else if (t.rate_t0 != 0 && since >= 400)
+            {
+                t.rate_checked = true;
+                const double t1 = precise_seconds(), c1 = clock_now(k), rate = (c1 - t.rate_c0) / (t1 - t.rate_t0) / k.unit;
+                std::ostringstream line;
+                line << "Boss speed: " << rc.where << " tried as his moves' speed (x" << factor << "): his clock counted at x" << rate;
+                if (!std::isfinite(rate) || c1 < t.rate_c0)
+                {
+                    // (his clock started over: another move came; tried again in his next stand, twice at most)
+                    put_back();
+                    line << ", but it started over meanwhile: tried again";
+                    if (++t.rate_retries > 2)
+                        t.rate_trying = false, ++t.rate_next, t.rate_retries = 0, line << " (no: the next one)";
+                }
+                else if (rate > factor * 0.8 && rate < factor * 1.25 && rate > 1.12)
+                {
+                    t.rate_found = true, t.rate_trying = false, rate_found_where = rc.where;
+                    line << ": that's his moves' speed. From now on his slams play at the speed";
+                }
+                else
+                {
+                    put_back();
+                    t.rate_trying = false, ++t.rate_next, t.rate_retries = 0;
+                    line << ": not it (back to 1)";
+                }
+                if (t.rate_lines < 30)
+                    ++t.rate_lines, std::cout << line.str() << "\n" << std::flush;
+            }
+        }
+        // (a fight that starts over from his throne: his parts may be new, so what was found in them is looked for again)
+        void papu_clocks_reset(BossTuning &t)
+        {
+            t.clock_regions.clear(), t.clocks.clear(), t.rate_candidates.clear(), t.spin_places.clear();
+            t.clock_period = t.clock_step = 0, t.rate_next = t.rate_clock = 0;
+            t.rate_found = t.rate_trying = t.rate_written = t.rate_checked = false;
+        }
+        // V1.3.35 research: where his spin speed is, a little into each spin: the places around him (see papu_clock_regions)
+        // and his scripts holding that number, and how many of the last search's places hold the new one too (they follow his
+        // spin speed: what turns him). Not for 1, which too many numbers are
+        void papu_spin_search(BossTuning &t, float v)
+        {
+            if (t.spin_searches >= 6 || !t.papu || !(v > 0.05f) || std::abs(v - 1.0f) < 0.001f)
+                return;
+            ++t.spin_searches;
+            if (t.clock_regions.empty())
+                papu_clock_regions(t);
+            const auto close = [&](float f) { return std::abs(f - v) < 0.0005f; };
+            std::ostringstream follow;
+            unsigned following = 0;
+            std::vector<BossTuning::SpinPlace> found;
+            for (auto p : t.spin_places)
+                if (close(value<float>(p.at)))
+                {
+                    ++p.follows;
+                    if (following++ < 8)
+                        follow << "\n  follows it (" << p.follows + 1 << " spins in a row): " << p.where;
+                    found.push_back(p);
+                }
+            const auto known = [&](Address at) { return std::any_of(found.begin(), found.end(), [&](const BossTuning::SpinPlace &p) { return p.at == at; }); };
+            const auto scan = [&](Address at, unsigned bytes, const std::string &where) {
+                std::vector<float> words(bytes / 4);
+                if (!read(at, words))
+                    return;
+                for (unsigned i = 0; i < words.size() && found.size() < 400; ++i)
+                    if (close(words[i]) && at + i * 4 != t.papu_ai + t.spin_at && !known(at + i * 4))
+                    {
+                        BossTuning::SpinPlace p;
+                        p.at = at + i * 4, p.where = where + " " + hex(i * 4);
+                        found.push_back(p);
+                    }
+            };
+            for (const auto &r : t.clock_regions)
+                scan(r.at, r.bytes, r.where);
+            for (const auto &[c, script] : entity_scripts(t.papu))
+                scan(c, 0x200, "his script " + script);
+            std::ostringstream fresh;
+            unsigned shown = 0;
+            for (const auto &p : found)
+                if (!p.follows && shown++ < 10)
+                    fresh << "\n  " << p.where;
+            std::cout << "Boss speed research: his spin speed " << v << " (spin " << t.spin_searches << "): " << found.size() << " places around him hold it; "
+                      << following << " of them held his last spin speed too" << follow.str() << fresh.str() << "\n" << std::flush;
+            t.spin_places = std::move(found);
+        }
+        // V1.3.35 (Eric: "scan the speed of his normal speed and then add it to the logs"): his slams and laps as they come (the
+        // rest of each cycle's times, see papu_rule: from when he stands to his slam, from the slam to his spin, his spin)
+        void papu_cycle(BossTuning &t, int s, std::uint64_t now)
+        {
+            if (const auto n = papu_slams.load(); n != t.slams_cycle)
+                t.slams_cycle = n, t.slam_seen_at = now;
+            if (s == 2 && t.laps_at)
+            {
+                const int laps = value<int>(t.papu_ai + t.laps_at);
+                if (laps > t.laps_last)
+                    t.lap_times += (t.lap_times.empty() ? "" : ", ") + seconds(now - t.lap_at), t.lap_at = now;
+                t.laps_last = laps;
+            }
+        }
         // second later the ones that counted the time down (or up), for papu_cut; half a second after a cut, whether his
         // flag came back
         void papu_immune_watch(BossTuning &t, bool immune, int s, std::uint64_t now)
@@ -7437,24 +7925,19 @@ namespace ingame
                 }
                 t.sample = at, t.sample_at = now, t.yaw = yaw, t.yaw_known = true;
             }
-            // his spin speed, times /boss_speed (the game sets it as a spin starts: 1, then 0.075 more with each hit)
+            // his spin speed (currAttackSpinSpeedMultiplier: the game sets it at the fight's start and at each hit, from his settings'
+            // list of spin speeds). V1.3.35: /boss_speed goes into that list (see papu_spin_list); V1.3.34's log, writing this one
+            // changed nothing (his laps took 1.2 s at x1, x1.5 and x2). Its changes go to the log, with where else that number is
+            // found on him then (research, see papu_spin_search)
             const unsigned percent = std::clamp(state.boss_speed, 100u, 200u);
             if (t.spin_at)
             {
                 const float v = value<float>(t.papu_ai + t.spin_at);
                 if (v > 0 && std::abs(v - t.spin_written) > 0.0001f)
                 {
-                    // the game's own new value, or the game's added to ours (then its step is added to the game's)
-                    t.spin_game = v > t.spin_written && t.spin_written > 0 ? t.spin_game + (v - t.spin_written) : v;
-                    t.spin_written = t.spin_game * percent / 100.0f;
-                    if (percent != 100)
-                    {
-                        write(t.papu_ai + t.spin_at, t.spin_written);
-                        tell_once(t, "spin" + std::to_string(t.spin_game) + "/" + std::to_string(percent),
-                                  "Boss speed: Papu Papu's spin speed " + std::to_string(t.spin_game) + " -> " + std::to_string(t.spin_written));
-                    }
-                    else
-                        t.spin_written = v;
+                    t.spin_written = v;
+                    if (t.speed_lines < 40)
+                        ++t.speed_lines, std::cout << "Boss speed: his spin speed is now " << v << " (state " << s << ")\n" << std::flush;
                 }
             }
             const float spin = t.spin_at ? value<float>(t.papu_ai + t.spin_at) : 0.0f;
@@ -7533,6 +8016,22 @@ namespace ingame
                         t.health_words = std::move(words);
                     }
                 }
+                // V1.3.35: his cycles timed (see papu_cycle): as his spin ends, the cycle to the log; as it starts, from his stand to
+                // his slam and from the slam to the spin (and a search for his spin speed a little into it, see papu_spin_search)
+                if (t.state == 2 && s == 1 && t.spin_start_at && t.cycle_lines < 30)
+                    ++t.cycle_lines, std::cout << "Boss speed: his moves (" << percent << "%): " << t.cycle_head << "; his spin " << seconds(now - t.spin_start_at)
+                                               << " (laps: " << t.lap_times << (t.lap_times.empty() ? "" : ", ") << seconds(now - t.lap_at) << ")\n" << std::flush;
+                if (t.state == 1 && s == 2)
+                {
+                    t.cycle_head = t.stand_at && t.slam_seen_at >= t.stand_at
+                                       ? "his slam " + seconds(t.slam_seen_at - t.stand_at) + " after he stood, his spin " + seconds(now - t.slam_seen_at) + " after the slam"
+                                       : "no slam in this stand (" + seconds(now - t.stand_at) + ")";
+                    t.spin_start_at = t.lap_at = now, t.laps_last = 0, t.lap_times.clear(), t.spin_search_due = now + 150;
+                }
+                if (s != 2)
+                    t.spin_start_at = 0;
+                if (s == 1)
+                    t.stand_at = t.stand_seen = now;
                 t.state = s, t.state_since = now, t.top_speed = 0, t.turn_most = -1e9f, t.turn_least = 1e9f;
             }
             // V1.3.13: with more health his fight keeps the game's pace: his spin length (spinPlayerLapCount, a lap more with
@@ -7565,6 +8064,20 @@ namespace ingame
                 t.immune_until = 0; // the fight starts over (Crash died)
             if (s != 3)
                 t.forbidden = false;
+            // V1.3.35: his moves timed, what plays them looked for, his slam at the speed (see papu_cycle, papu_clocks and
+            // papu_slam_rate), his spin speed looked for a little into each spin (research, see papu_spin_search); and when the
+            // fight starts over from his throne, what was found in his parts is looked for again
+            papu_cycle(t, s, now);
+            papu_clocks(t, s, now);
+            papu_slam_rate(t, s, percent, now);
+            if (t.spin_search_due && now >= t.spin_search_due)
+            {
+                t.spin_search_due = 0;
+                if (s == 2 && t.spin_at)
+                    papu_spin_search(t, value<float>(t.papu_ai + t.spin_at));
+            }
+            if (s == 6 && !t.rate_written && (!t.clock_regions.empty() || t.clock_period))
+                papu_clocks_reset(t);
             papu_immune_watch(t, immune, s, now);
             if (t.slam_wait && papu_slams.load() != t.slams_seen)
                 papu_red_end(t, immune, now, "his slam");
@@ -7596,6 +8109,7 @@ namespace ingame
                         papu_list_block(t, true, now, !timer ? "no timer of his yet: his first fight in this visit" : "his timer didn't run again");
                     else
                         papu_list_block(t, false, now, came_hit ? "a hit came anyway (the game's own immunity runs now)" : !state.boss_rules ? "the red rule is off"
+                                                                                                                         : s == 6 ? "the fight starts over from his throne"
                                                                                                                          : !t.start_red ? "his red is over" : "his timer runs again");
                 }
                 if (list_block_now.list && typed(t.papu, 0x1592220))
@@ -7920,6 +8434,9 @@ namespace ingame
                                   << (speed > 100 ? ", each cut to " + std::to_string(10000 / speed) + "% as it starts" : std::string(", left as the game has them (speed 100%)")) << "\n"
                                   << std::flush;
                     }
+                    // V1.3.35: his spin speeds times /boss_speed (see papu_spin_list), before his fight starts and each half second
+                    if (boss == "B101" && script == "BossPapuPapu_AiHandler")
+                        papu_spin_list(t, c, speed);
                 }
             }
         }
