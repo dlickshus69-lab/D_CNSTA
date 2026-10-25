@@ -82,7 +82,7 @@ public:
     // Aku Aku Sanity is on in this seed: no free mask after deaths in a row, Aku Aku item or not (V1.3.46)
     void aku_sanity(bool on);
     // Harder bosses: health and speed in percent (100 the game's own), and the rules on bosses that can be hit any time
-    void boss_settings(unsigned health, unsigned speed, bool rules, bool bar_grow, bool masks);
+    void boss_settings(unsigned health, unsigned speed, bool rules, bool bar_grow, bool masks, unsigned slam_ms);
     void bar_try(unsigned target, float factor);
     void request_aku_give();
     // Crash's colors (research): log his model's parts; blend a color over him (amount 0 turns it off)

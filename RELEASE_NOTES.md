@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Papu Papu's faster slam, next try:** V1.3.55 found the clock in his animation that counts from when he stands up (his slam comes when it reaches about 0.9 s). This build runs that clock faster by `boss_speed` until his slam (his first stand plays as normal while the build watches it). Test: the test seed, `/boss papu`, 5 or 6 slams, then the log and a clip.
+- **Papu Papu's slam paced by boss speed:** his slam comes 0.9 s after he stands at 100%, 0.72 s at 125%, 0.6 s at 150%, 0.51 s at 175% and 0.45 s at 200%, on time from his first slam. `/boss_slam 0.5` sets the 200% time to try (the others follow it); `/boss_slam off` goes back. Test: the test seed, `/boss papu`, a few slams, then the log and a clip.
+- From V1.3.56: Papu Papu's slam comes faster with boss speed.
 - From V1.3.52: Papu Papu's spin starts where he slammed.
 - From V1.3.48: Stormy Ascent's crates shut in between iron crates need Spin.
 - From V1.3.47: Tomb Wader needs Spin (its first door opens with the wheel).
-- From V1.3.46: no free Aku Aku mask after deaths in a row (Aku Aku Sanity); DeathLink misses you during the box count; Un-Bearable strikes on foot.

@@ -5817,13 +5817,18 @@ namespace ingame
             // V1.3.56 (see papu_stand_clock): his stand's clocks: the stand they were looked for in, the step (0 not yet, 1
             // checking, 2 moved on faster, 3 his slam came, 8 watched, 9 none found), what was found and checked, when, what
             // the first was set to last frame, and how often the game kept that or put it back; the watch on one of them
-            std::uint64_t sc_stand = 0, sc_t0 = 0, sc_last = 0, sc_watch_at = 0;
-            int sc_step = 0, sc_watch = 0;
+            std::uint64_t sc_stand = 0, sc_t0 = 0, sc_last = 0;
+            int sc_step = 0;
             std::vector<std::pair<Address, std::string>> sc_cands, sc_clocks;
             std::vector<float> sc_from;
             float sc_wrote = 0, sc_extra = 0, sc_lead = 0;
-            bool sc_written = false, sc_watched = false;
+            bool sc_written = false;
             unsigned sc_frames = 0, sc_held = 0, sc_back = 0, sc_told = 0;
+            // V1.3.57 (Eric: "find the right scale for each speed"; 200% at 0.45 s to try, 0.5 if that's too fast): the boss
+            // speed and the slam time at 200% (ms, /boss_slam), his stand clock's time at his slam as the game plays it (the
+            // least seen, 0 until one is), and when this stand's slam was meant to come
+            unsigned sc_percent = 100, sc_slam_ms = 450;
+            float sc_slam_clock = 0, sc_target = 0;
             // V1.3.36 (see papu_slam_rate): his slam's time from when he stands, as the game plays it (the shortest seen while
             // nothing of ours is set), and the stand a try was set in
             std::uint64_t slam_normal = 0, try_stand = 0;
@@ -8865,9 +8870,17 @@ namespace ingame
         // (V1.3.53, see slam_step) as he stands, his animation stepped faster by /boss_speed (his own pace as he spins, is hit
         // or comes into the arena); the breakpoint set up at each stand (into every thread again when none of his steps was
         // seen since the last one), off at /boss_speed 100%
-        void papu_slam_speed(BossTuning &t, int s, unsigned percent)
+        // (V1.3.57) his pace at a boss speed: even steps from the game's own (100%) to his slam `slam_ms` after he stands at 200%
+        // (the game's own about 0.9 s: his pace at 200% then is 0.9 over that)
+        float papu_slam_pace(unsigned percent, unsigned slam_ms, float game)
+        {
+            const float at = static_cast<float>(std::clamp(slam_ms, 250u, 900u)) / 1000.0f, top = std::max(1.0f, game / at);
+            return 1.0f + static_cast<float>(std::clamp(percent, 100u, 200u) - 100) / 100.0f * (top - 1.0f);
+        }
+        void papu_slam_speed(BossTuning &t, int s, unsigned percent, unsigned slam_ms)
         {
             const unsigned speed = std::clamp(percent, 100u, 200u);
+            t.sc_percent = speed, t.sc_slam_ms = slam_ms;
             slam_rate = s == 1 && speed > 100 && slam_body.load() ? static_cast<float>(speed) / 100.0f : 1.0f;
             // (V1.3.54: as his stand ends, what its steps were, his first stands of a visit)
             if (s != 1 && t.slam_stand && t.slam_stand_told != t.slam_stand && slam_body.load() && t.slam_reports < 4)
@@ -8898,7 +8911,8 @@ namespace ingame
             unsigned threads = 2;
             if (slam_body.load() != data || slam_arm_address.load() != base() + slam_step || steps == t.slam_seen_steps)
                 slam_body = data, slam_seen = 0, threads = steer_debug_register(steer_arm_address.load(), base() + slam_step);
-            t.slam_seen_steps = steps, t.slam_rate_used = threads > 1 ? static_cast<float>(speed) / 100.0f : 1.0f;
+            t.slam_seen_steps = steps;
+            t.slam_rate_used = threads > 1 ? papu_slam_pace(speed, slam_ms, t.sc_slam_clock > 0 ? t.sc_slam_clock - t.sc_lead : 0.9f) : 1.0f;
             slam_rate = t.slam_rate_used;
             if (!t.slam_told)
             {
@@ -9570,7 +9584,7 @@ namespace ingame
 #ifndef CRASH_NST_STABLE
             // (not in the Stable build yet: his slam's speed (V1.3.53: his animation stepped faster as he stands, see
             // papu_slam_speed; V1.3.35's search for it only while that isn't on) and the slam aim)
-            papu_slam_speed(t, s, percent);
+            papu_slam_speed(t, s, percent, state.boss_slam_ms);
             papu_stand_clock(t, s, now); // (V1.3.56)
             papu_slam_rate(t, s, percent, now);
             papu_aim(t, state, s, now);
@@ -12180,60 +12194,61 @@ namespace ingame
         // V1.3.56 (Eric: "is it possible to speed up his slam"; V1.3.55's run: in his animation, the numbers that count the time
         // from his stand's start, 0.14 s at 0.12 s in and 1 a second, his root layer's node +0x140 and +0x144, its +0xd0 object's
         // +0x10, and some of his layers' nodes' +0x130; his slam comes when that time reaches about 0.9 s). As he stands: those
-        // found (0.1 s in, the numbers there that hold about the time since his stand began, checked 40 ms later to have gone
-        // on by about the time between), then moved on by (/boss_speed - 1) times each frame's time until his slam, so his
-        // stand plays faster; the log says how often the game went on from what was set, or put it back. The first stand
-        // they're found in, a watch on the first (debug register 0) instead, to see what moves it (in case it's put back)
+        // found (the numbers there that hold about the time since his stand began, checked 40 ms later to have gone on by about
+        // the time between), then moved on faster each frame until his slam, so his stand plays faster; the log says how often
+        // the game went on from what was set, or put it back (V1.3.56's run: it went on from it, every frame).
+        // V1.3.57 (Eric: "find the right scale for each speed"): his slam comes at his pace for the boss speed (papu_slam_pace:
+        // at 200% 0.45 s after he stands, or /boss_slam's), on time: each frame his clock runs at what's left to his slam's
+        // time on it over what's left of the real time (1 to 4 times the game's), so it makes up for the first 0.1 s found at
+        // the game's pace; his slam's time on the clock as the game plays it is the least seen at his slams (0.9 s past his
+        // stand's start until one is); found from 0.06 s in (V1.3.56: 0.1 s); and no more watch on it (V1.3.56's first stand)
         void papu_stand_clock(BossTuning &t, int s, std::uint64_t now)
         {
-            if (t.sc_watch == 1)
-            {
-                who_report();
-                if (who_count.load() >= 3 || now - t.sc_watch_at > 600 || s != 1)
-                {
-                    who_armed = false;
-                    who_debug_registers(0);
-                    who_target = 0, who_every = false, who_what = "the floor setting";
-                    who_state.mode = 0;
-                    t.sc_watch = 2;
-                    std::cout << "Boss speed research: the watch on his stand's clock is off (" << who_hits.load() << " writes seen, " << who_count.load() << " caught)\n" << std::flush;
-                }
-            }
             if (!slam_body.load() || !t.stand_seen)
                 return;
             if (t.sc_stand != t.stand_seen)
                 t.sc_stand = t.stand_seen, t.sc_step = 0, t.sc_cands.clear(), t.sc_clocks.clear(), t.sc_from.clear(), t.sc_written = false,
-                t.sc_frames = t.sc_held = t.sc_back = 0, t.sc_extra = 0;
+                t.sc_frames = t.sc_held = t.sc_back = 0, t.sc_extra = 0, t.sc_target = 0;
             const bool slammed = t.slam_seen_at && t.slam_seen_at >= t.stand_seen;
-            // (his slam, or his stand over: how it went)
+            // (his slam, or his stand over: how it went; and his slam's time on his clock, the least seen)
             if (t.sc_step == 2 && (slammed || s != 1))
             {
                 t.sc_step = 3;
+                const float at = value<float>(t.sc_clocks[0].first);
+                if (slammed && std::isfinite(at) && at > 0.5f && at < 1.5f)
+                    t.sc_slam_clock = t.sc_slam_clock > 0 ? std::min(t.sc_slam_clock, at) : at;
                 if (t.sc_told < 12)
-                    ++t.sc_told, std::cout << "Boss speed: his stand's clocks moved on " << t.sc_extra << " s more over " << t.sc_frames << " frames ("
-                                              << (slammed ? "his slam came " + seconds(t.slam_seen_at - t.stand_seen) + " after he stood" : std::string("no slam in this stand"))
-                                              << "; the game went on from what was set " << t.sc_held << " frames, put it back " << t.sc_back << ")\n" << std::flush;
+                {
+                    std::ostringstream line;
+                    line << std::fixed << std::setprecision(2) << "Boss speed: his stand played faster (" << t.sc_percent << "%): ";
+                    if (slammed)
+                        line << "his slam came " << static_cast<float>(t.slam_seen_at - t.stand_seen) / 1000.0f << " s after he stood (meant for " << t.sc_target << " s)";
+                    else
+                        line << "no slam in this stand";
+                    line << "; his clock moved on " << t.sc_extra << " s more over " << t.sc_frames << " frames, at " << at << " s at his slam; the game went on from it "
+                         << t.sc_held << " frames, put it back " << t.sc_back;
+                    ++t.sc_told, std::cout << line.str() << "\n" << std::flush;
+                }
             }
             if (s != 1)
                 return;
             const auto since = now - t.stand_seen;
-            const float rate = slam_rate.load();
-            if (t.sc_step == 0 && since >= 100)
+            const float since_s = static_cast<float>(since) / 1000.0f;
+            if (t.sc_step == 0 && since >= 60)
             {
                 // (the numbers that hold about the time since he stood)
-                const float time = static_cast<float>(since) / 1000.0f;
                 for (const auto &o : papu_anim_objects())
                 {
                     std::array<float, 0xc0> f{};
                     if (!read(o.first, f))
                         continue;
                     for (std::size_t i = 0; i < f.size() && t.sc_cands.size() < 24; ++i)
-                        if (std::isfinite(f[i]) && f[i] > 0.03f && std::abs(f[i] - time) < 0.06f)
+                        if (std::isfinite(f[i]) && f[i] > 0.03f && std::abs(f[i] - since_s) < 0.06f)
                             t.sc_cands.push_back({o.first + i * 4, o.second + " +" + hex(static_cast<unsigned>(i * 4))}), t.sc_from.push_back(f[i]);
                 }
                 t.sc_t0 = now, t.sc_step = t.sc_cands.empty() ? 9 : 1;
                 if (t.sc_cands.empty() && t.sc_told < 12)
-                    ++t.sc_told, std::cout << "Boss speed: his stand's clocks: none found (" << time << " s in)\n" << std::flush;
+                    ++t.sc_told, std::cout << "Boss speed: his stand's clocks: none found (" << since_s << " s in)\n" << std::flush;
                 return;
             }
             if (t.sc_step == 1 && now - t.sc_t0 >= 40)
@@ -12250,39 +12265,28 @@ namespace ingame
                         ++t.sc_told, std::cout << "Boss speed: his stand's clocks: none went on with the time (" << t.sc_cands.size() << " looked at)\n" << std::flush;
                     return;
                 }
-                if (t.sc_told < 12)
+                if (t.sc_told < 4)
                     ++t.sc_told, std::cout << "Boss speed: his stand's clocks: " << found.str() << "\n" << std::flush;
-                // (the first stand they're found in: a watch on the first, nothing moved on)
-                if (!t.sc_watched && !who_target.load() && t.watch_step != 1 && !IsDebuggerPresent())
-                {
-                    const Address target = t.sc_clocks[0].first & ~Address{7};
-                    for (auto &cap : who_captures)
-                        cap = {};
-                    who_count = 0, who_hits = 0;
-                    who_state = {};
-                    who_state.started = now;
-                    who_last = value<std::uint64_t>(target);
-                    who_what = "Papu Papu's stand's clock", who_every = true;
-                    who_target = target;
-                    who_armed = true;
-                    const auto threads = who_debug_registers(target);
-                    t.sc_watched = true, t.sc_watch = 1, t.sc_watch_at = now, t.sc_step = 8;
-                    std::cout << "Boss speed research: a watch on his stand's clock (" << t.sc_clocks[0].second << ", 0x" << std::hex << target << std::dec << ") in " << threads
-                              << " threads, to see what moves it (this stand plays as the game has it)\n" << std::flush;
-                    return;
-                }
                 // (how far the first is ahead of the time since he stood, before anything is moved on)
-                t.sc_step = 2, t.sc_last = now, t.sc_lead = value<float>(t.sc_clocks[0].first) - static_cast<float>(since) / 1000.0f;
+                t.sc_step = 2, t.sc_last = now, t.sc_lead = value<float>(t.sc_clocks[0].first) - since_s;
                 return;
             }
-            if (t.sc_step != 2 || rate <= 1.0f)
+            if (t.sc_step != 2 || t.sc_percent <= 100)
                 return;
-            const float dt = std::clamp(static_cast<float>(now - t.sc_last) / 1000.0f, 0.005f, 0.05f), extra = (rate - 1.0f) * dt;
+            // (when his slam comes at his pace, and how fast his clock runs to have it then)
+            const float game = t.sc_slam_clock > 0 ? t.sc_slam_clock - t.sc_lead : 0.9f, slam_at = t.sc_slam_clock > 0 ? t.sc_slam_clock : 0.9f + t.sc_lead;
+            const float pace = papu_slam_pace(t.sc_percent, t.sc_slam_ms, game);
+            t.sc_target = game / pace;
+            const float clock = value<float>(t.sc_clocks[0].first), left = t.sc_target - since_s;
+            const float run = !std::isfinite(clock) ? 1.0f : left > 0.01f ? std::clamp((slam_at - clock) / left, 1.0f, 4.0f) : 4.0f;
+            const float dt = std::clamp(static_cast<float>(now - t.sc_last) / 1000.0f, 0.005f, 0.05f), extra = (run - 1.0f) * dt;
             t.sc_last = now;
             // (the first: did the game go on from what was set? Then it's ahead of the time since he stood by what was added; put
             // back, by what it was before)
-            if (const float v = value<float>(t.sc_clocks[0].first); t.sc_written && std::isfinite(v))
-                ++(v - static_cast<float>(since) / 1000.0f > t.sc_lead + 0.5f * t.sc_extra ? t.sc_held : t.sc_back);
+            if (t.sc_written && std::isfinite(clock))
+                ++(clock - since_s > t.sc_lead + 0.5f * t.sc_extra ? t.sc_held : t.sc_back);
+            if (extra <= 0)
+                return;
             for (std::size_t i = 0; i < t.sc_clocks.size(); ++i)
                 if (const float v = value<float>(t.sc_clocks[i].first); std::isfinite(v) && v > 0 && v < 30)
                 {

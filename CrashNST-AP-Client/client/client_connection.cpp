@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <iostream>
+#include <iomanip>
 #include <sstream>
 #include <fstream>
 #include <array>
@@ -216,7 +217,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_bar, /bar_try (tests) | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_slam, /boss_bar, /bar_try (tests) | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -561,6 +562,30 @@ void ClientRuntime::handle_commands()
                 else
                     print_console(what + ": " + (test >= 0 ? std::to_string(test) + "% (test)" : std::string("the seed's")) + ". " + command +
                                   " 100 to 200 sets it for testing (" + (health ? "200 is double" : "125 is a quarter faster") + "), " + command + " off goes back.");
+            }
+            else if (command == "/boss_slam")
+            {
+                // test (V1.3.57, Eric: try 0.45 s at 200%, then 0.5 if that's too fast): Papu Papu's slam at 200% boss speed, in
+                // seconds after he stands; the speeds between follow it in even steps of his pace; "off" goes back to 0.45
+                double seconds = -1;
+                try
+                {
+                    if (!argument.empty() && argument != "off")
+                        seconds = std::stod(argument);
+                }
+                catch (const std::exception &)
+                {
+                }
+                if (argument == "off")
+                    boss_slam_test = -1;
+                else if (seconds >= 0.25 && seconds <= 0.9)
+                    boss_slam_test = static_cast<int>(seconds * 1000 + 0.5);
+                const double at = (boss_slam_test >= 0 ? boss_slam_test : 450) / 1000.0, game = 0.9;
+                std::ostringstream out;
+                out << std::fixed << std::setprecision(2) << "Boss slam: Papu Papu slams " << at << " s after he stands at 200% boss speed"
+                    << (boss_slam_test >= 0 ? " (test)" : "") << "; at 125% " << game / (1 + 0.25 * (game / at - 1)) << " s, 150% " << game / (1 + 0.5 * (game / at - 1))
+                    << " s, 175% " << game / (1 + 0.75 * (game / at - 1)) << " s, 100% " << game << " s (the game's). /boss_slam 0.25 to 0.9 sets the 200% one, /boss_slam off goes back to 0.45.";
+                print_console(out.str());
             }
             else if (command == "/boss_rules")
             {
