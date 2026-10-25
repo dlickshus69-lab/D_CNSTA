@@ -5576,6 +5576,17 @@ namespace ingame
             // V1.3.61: how often a spin was turned back the first way (with Crash alive), and whether Crash was dead last frame
             unsigned rev_backs = 0;
             bool rev_dead = false;
+            // V1.3.62: whether this spin started the other way
+            bool rev_started_other = false;
+            // V1.3.62 (see papu_multi_slam): his slams in this stand (how many, how many came; the stand's start they're for,
+            // and his slams seen then), his stand played again from its start for the next one (when), and his AI's wait after
+            // a slam held until then
+            int ms_total = 0, ms_done = 0;
+            std::uint64_t ms_stand = 0, ms_rewound_at = 0, ms_wait_tick_at = 0;
+            unsigned ms_slams_seen = 0, ms_lines = 0;
+            bool ms_holding = false;
+            Address ms_wait_seen = 0;
+            float ms_wait_last = 0;
             unsigned slams_seen = 0;
             float start_timer_set = 0;
             // V1.3.29 (see bar_count): the bar's own count of notches left (two copies), found at the fight's start and
@@ -8919,12 +8930,14 @@ namespace ingame
             const float at = static_cast<float>(std::clamp(slam_ms, 250u, 900u)) / 1000.0f, top = std::max(1.0f, game / at);
             return 1.0f + static_cast<float>(std::clamp(percent, 100u, 200u) - 100) / 100.0f * (top - 1.0f);
         }
-        // (V1.3.61, the YAML's boss_slam_time: fixed_ms) or at that time after he stands, at any boss speed
-        void papu_slam_speed(BossTuning &t, int s, unsigned percent, unsigned slam_ms, unsigned fixed_ms)
+        // (V1.3.61, the YAML's boss_slam_time: fixed_ms) or at that time after he stands, at any boss speed. (V1.3.62: his
+        // stand's clocks are looked for at any speed with the harder rules on, `clocks`: his slams in a row play his stand
+        // again from them, see papu_multi_slam)
+        void papu_slam_speed(BossTuning &t, int s, unsigned percent, unsigned slam_ms, unsigned fixed_ms, bool clocks)
         {
             const unsigned speed = std::clamp(percent, 100u, 200u);
             t.sc_percent = speed, t.sc_slam_ms = slam_ms, t.sc_slam_fixed = fixed_ms ? std::clamp(fixed_ms, 250u, 900u) : 0u;
-            const bool faster = speed > 100 || (t.sc_slam_fixed && t.sc_slam_fixed < 900);
+            const bool faster = speed > 100 || (t.sc_slam_fixed && t.sc_slam_fixed < 900) || clocks;
             slam_rate = s == 1 && faster && slam_body.load() ? static_cast<float>(speed) / 100.0f : 1.0f;
             // (V1.3.54: as his stand ends, what its steps were, his first stands of a visit)
             if (s != 1 && t.slam_stand && t.slam_stand_told != t.slam_stand && slam_body.load() && t.slam_reports < 4)
@@ -9103,14 +9116,23 @@ namespace ingame
                 t.rev_spin = 0;
                 return;
             }
-            if (died && t.rev_done && t.rev_lines < 30)
-                ++t.rev_lines, std::cout << "Boss pattern: Crash died in his spin, " << seconds(now - t.rev_done_at) << " after it turned the other way\n" << std::flush;
+            if (died && (t.rev_done || t.rev_started_other) && t.rev_lines < 30)
+                ++t.rev_lines, std::cout << "Boss pattern: Crash died in his spin, "
+                                         << (t.rev_done ? seconds(now - t.rev_done_at) + " after it turned around" : std::string("which started the other way")) << "\n" << std::flush;
             const float g = steer_game.load();
             const int laps = t.laps_at ? value<int>(t.papu_ai + t.laps_at) : 0;
+            // (V1.3.62: turned around from where he is, either way: the other way from the game's (steering mode 3), or back
+            // to its way (2, by as much further as he went the other way); no jump)
+            const auto flip = [&] {
+                if (steer_mode.load() == 2)
+                    steer_pivot = g, steer_mode = 3;
+                else
+                    steer_delta = wrap_angle(steer_delta.load() + 2 * wrap_angle(steer_pivot.load() - g)), steer_mode = 2;
+            };
             if (t.rev_spin != t.spin_start_at)
             {
-                // (a new spin: when it turns the other way)
-                t.rev_spin = t.spin_start_at, t.rev_done = false, t.rev_at = 0, t.rev_g_known = false, t.rev_g_turned = 0, t.rev_laps = laps;
+                // (a new spin: when it turns around)
+                t.rev_spin = t.spin_start_at, t.rev_done = false, t.rev_at = 0, t.rev_g_known = false, t.rev_g_turned = 0, t.rev_laps = laps, t.rev_started_other = false;
                 const int length = t.laps_total_at ? value<int>(t.papu_ai + t.laps_total_at) : 0;
                 const float spin = t.spin_at ? value<float>(t.papu_ai + t.spin_at) : 1.0f;
                 if (t.rev_off || length < 1 || length > 30 || !std::isfinite(spin))
@@ -9119,6 +9141,15 @@ namespace ingame
                 const float expected = static_cast<float>(length) * 1.3f / std::clamp(spin, 0.5f, 4.0f);
                 t.rev_meant = std::max(0.25f, std::uniform_real_distribution<float>(0.3f, 0.7f)(rng) * expected);
                 t.rev_at = t.spin_start_at + static_cast<std::uint64_t>(t.rev_meant * 1000);
+                // V1.3.62 (Eric: "when he starts spinning, it should either be counterclockwise in the beginning ... or
+                // clockwise, one or the other"): half his spins start the other way (and still turn around in the middle)
+                if (!dead && steer_mode.load() == 2 && std::bernoulli_distribution(0.5)(rng))
+                {
+                    flip();
+                    t.rev_started_other = true;
+                    if (t.rev_lines < 30)
+                        ++t.rev_lines, std::cout << "Boss pattern: his spin starts the other way\n" << std::flush;
+                }
             }
             // (the game's own turn since his last lap or the switch, while Crash is alive)
             if (t.rev_g_known && !dead)
@@ -9126,22 +9157,24 @@ namespace ingame
             t.rev_g_last = g, t.rev_g_known = true;
             if (laps != t.rev_laps)
                 t.rev_laps = laps, t.rev_g_turned = 0;
-            if (!t.rev_done && t.rev_at && now >= t.rev_at && steer_mode.load() == 2 && !dead)
+            const int mode = steer_mode.load();
+            if (!t.rev_done && t.rev_at && now >= t.rev_at && (mode == 2 || mode == 3) && !dead)
             {
-                steer_pivot = g, steer_mode = 3;
+                flip();
                 t.rev_done = true, t.rev_done_at = now, t.rev_g_turned = 0, t.rev_laps_at_switch = laps;
                 if (t.rev_lines < 30)
-                    ++t.rev_lines, std::cout << "Boss pattern: his spin turns the other way, " << seconds(now - t.spin_start_at) << " in (lap " << laps + 1 << " of "
-                                             << (t.laps_total_at ? value<int>(t.papu_ai + t.laps_total_at) : 0) << ")\n" << std::flush;
+                    ++t.rev_lines, std::cout << "Boss pattern: his spin turns around" << (mode == 3 ? " (back to the game's way)" : "") << ", " << seconds(now - t.spin_start_at)
+                                             << " in (lap " << laps + 1 << " of " << (t.laps_total_at ? value<int>(t.papu_ai + t.laps_total_at) : 0) << ")\n" << std::flush;
             }
-            else if (t.rev_done && steer_mode.load() == 3 && t.rev_g_turned > 4 * 3.14159265f)
+            else if (mode == 3 && t.rev_g_turned > 4 * 3.14159265f)
             {
-                // (turned back the first way from where he is: his turn by steer_delta again, that much further)
-                steer_delta = wrap_angle(steer_delta.load() + 2 * wrap_angle(steer_pivot.load() - g)), steer_mode = 2;
-                t.rev_off = ++t.rev_backs >= 3;
-                std::cout << "Boss pattern: no lap of his counted while the game turned him two whole turns after he turned the other way (" << seconds(now - t.rev_done_at)
-                          << ", Crash alive): his laps may count his turn's way; this spin turned back the first way"
-                          << (t.rev_off ? " (the third time: no more turning the other way in this visit)" : "") << "\n" << std::flush;
+                // (turned back to the game's way from where he is, and no more turning around in this spin)
+                flip();
+                t.rev_done = true, t.rev_off = ++t.rev_backs >= 3;
+                std::cout << "Boss pattern: no lap of his counted while the game turned him two whole turns with his spin the other way ("
+                          << seconds(now - (t.rev_done_at > t.spin_start_at ? t.rev_done_at : t.spin_start_at))
+                          << ", Crash alive): his laps may count his turn's way; this spin turned back to the game's way"
+                          << (t.rev_off ? " (the third time: no more turning around in this visit)" : "") << "\n" << std::flush;
             }
         }
         void papu_aim(BossTuning &t, const Shared &state, int s, std::uint64_t now)
@@ -9552,6 +9585,93 @@ namespace ingame
                 ++t.hit_hold_lines, std::cout << "Boss rule: " << why << " (" << seconds(now - t.hit_red_at) << " after his hit): his red goes on, held by us until the slam after his "
                                               << (t.red_spun ? "spin" : "next spin") << "\n" << std::flush;
         }
+        // V1.3.62 (Eric: "he can slam maybe 1 to 5 times and then start spinning ... it'll be random"): with the harder rules
+        // on, each stand of his has 1 to 5 slams (at random) before his spin. After each slam but the last, his stand plays
+        // again from its start: his stand's clocks (see papu_stand_clock) set back by as far as they went, so the game plays
+        // his stand and slam again, aimed and paced again as a new stand; his AI's wait after a slam (iftes1je, which ends in
+        // his spin) is held while it runs, until his last slam, and then it runs as the game has it (cut by his speed). If no
+        // slam comes 2.5 s after his stand was played again, or he stops standing (a hit), the wait is let go the same way.
+        // (Eric: "make sure the red invincibility glow doesn't get affected": only the first slam after a spin ends his red, as
+        // before, see papu_red_end; the others don't count)
+        void papu_multi_slam(BossTuning &t, const Shared &state, int s, std::uint64_t now)
+        {
+            // (his AI's wait after a slam, and whether it counts down now: only one that does is held or set, as writing into
+            // one that had ended kept the game from running it again, see papu_start_red)
+            Address wait = 0;
+            for (const auto &a : t.ai_timers)
+                if (a.id == "iftes1je")
+                    if (const auto timer = value<Address>(t.papu_ai + a.at); timer && typed(timer, 0x17610b8))
+                        wait = timer;
+            const float left = wait ? value<float>(wait + 0x50) : 0.0f, length = wait ? value<float>(wait + 0x48) : 0.0f;
+            if (wait != t.ms_wait_seen)
+                t.ms_wait_tick_at = 0;
+            else if (std::isfinite(left) && left < t.ms_wait_last - 0.0005f)
+                t.ms_wait_tick_at = now;
+            t.ms_wait_seen = wait, t.ms_wait_last = left;
+            const bool ticking = wait && t.ms_wait_tick_at && now - t.ms_wait_tick_at < 150 && std::isfinite(left) && left > 0.02f;
+            const unsigned percent = std::clamp(state.boss_speed, 100u, 200u);
+            const auto let_go = [&](const std::string &why) {
+                if (t.ms_holding && ticking && std::isfinite(length) && length > 0 && length < 60)
+                    write(wait + 0x50, std::min(left, length * 100.0f / static_cast<float>(percent)));
+                t.ms_holding = false;
+                if (!why.empty() && t.ms_lines < 40)
+                    ++t.ms_lines, std::cout << "Boss pattern: " << why << "\n" << std::flush;
+            };
+            if (s != 1 || !state.boss_rules || !t.papu_ai)
+            {
+                if (t.ms_holding)
+                    let_go(s == 1 ? "the harder rules are off: his wait after his slam let go" : "he stopped standing (state " + std::to_string(s) + "): his wait after his slam let go");
+                t.ms_stand = 0;
+                return;
+            }
+            if (t.ms_stand != t.state_since)
+            {
+                // (a stand of his: how many slams)
+                static std::mt19937 rng{std::random_device{}()};
+                t.ms_stand = t.state_since, t.ms_done = 0, t.ms_holding = false, t.ms_slams_seen = papu_slams.load();
+                t.ms_total = wait ? std::uniform_int_distribution<int>(1, 5)(rng) : 1;
+                if (t.ms_lines < 40)
+                    ++t.ms_lines, std::cout << "Boss pattern: " << t.ms_total << (t.ms_total == 1 ? " slam" : " slams") << " in this stand"
+                                            << (wait ? "" : " (his AI's wait after a slam isn't found yet: one)") << "\n" << std::flush;
+            }
+            if (const auto slams = papu_slams.load(); slams != t.ms_slams_seen)
+            {
+                t.ms_slams_seen = slams, ++t.ms_done;
+                if (t.ms_done >= t.ms_total)
+                {
+                    // (his last: his wait runs as the game has it)
+                    let_go(t.ms_total > 1 ? "his slam " + std::to_string(t.ms_done) + " of " + std::to_string(t.ms_total) + ": his spin next" : std::string());
+                    return;
+                }
+                // (his stand from its start again: his clocks set back by as far as the first went, to 0.02 s)
+                const float first = t.sc_clocks.empty() ? 0.0f : value<float>(t.sc_clocks[0].first);
+                if (!std::isfinite(first) || first < 0.3f || first > 5)
+                {
+                    t.ms_total = t.ms_done;
+                    let_go("his slam " + std::to_string(t.ms_done) + ": his stand's clocks aren't known in this stand, so no more slams; his spin next");
+                    return;
+                }
+                const float back = first - 0.02f;
+                for (const auto &c : t.sc_clocks)
+                    if (const float v = value<float>(c.first); std::isfinite(v) && v > 0 && v < 30)
+                        write(c.first, std::max(0.0f, v - back));
+                t.ms_holding = true, t.ms_rewound_at = now;
+                // (a new stand for his slam's pace and his aim, see papu_stand_clock and papu_aim, with the slam just seen before
+                // it; his red isn't touched)
+                t.stand_seen = t.stand_at = now, t.slam_seen_at = now - 1, t.aim_wrote = false;
+                if (t.ms_lines < 40)
+                    ++t.ms_lines, std::cout << "Boss pattern: his slam " << t.ms_done << " of " << t.ms_total << "; his stand plays again from its start (his clocks back "
+                                            << std::to_string(back).substr(0, 4) << " s)\n" << std::flush;
+            }
+            // (held while it counts down, until his next slam)
+            if (t.ms_holding && ticking && left < 2.0f)
+                write(wait + 0x50, 5.0f);
+            if (t.ms_holding && now - t.ms_rewound_at > 2500)
+            {
+                t.ms_total = t.ms_done;
+                let_go("no slam came 2.5 s after his stand was played again: his wait let go, his spin next");
+            }
+        }
         void papu_who(BossTuning &t, int s, std::uint64_t now);         // (V1.3.41, below the write watch it uses)
         void papu_stand_clock(BossTuning &t, int s, std::uint64_t now); // (V1.3.56, the same)
         void papu_who_off(BossTuning &t, const char *why);
@@ -9783,8 +9903,9 @@ namespace ingame
 #ifndef CRASH_NST_STABLE
             // (not in the Stable build yet: his slam's speed (V1.3.53: his animation stepped faster as he stands, see
             // papu_slam_speed; V1.3.35's search for it only while that isn't on) and the slam aim)
-            papu_slam_speed(t, s, percent, state.boss_slam_ms, state.boss_slam_fixed_ms);
-            papu_stand_clock(t, s, now); // (V1.3.56)
+            papu_slam_speed(t, s, percent, state.boss_slam_ms, state.boss_slam_fixed_ms, state.boss_rules != 0);
+            papu_stand_clock(t, s, now);        // (V1.3.56)
+            papu_multi_slam(t, state, s, now); // (V1.3.62)
             papu_slam_rate(t, s, percent, now);
             papu_aim(t, state, s, now);
             papu_reverse(t, state, s, now); // (V1.3.60)
