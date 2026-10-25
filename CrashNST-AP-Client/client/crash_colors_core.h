@@ -50,6 +50,12 @@ namespace crash_colors
     std::vector<unsigned char> recolor_cloth(const std::vector<unsigned char> &igz, const std::optional<Rgb> &pants, const std::optional<Rgb> &shoes,
                                              const std::optional<Rgb> &gloves = std::nullopt);
     std::vector<unsigned char> recolor_hair(const std::vector<unsigned char> &igz, const std::optional<Rgb> &hair, const std::optional<Rgb> &eyebrows = std::nullopt);
+    // (V1.3.43) whether CrashFur_C, CrashCloth_C and CrashHair_C still have the game's own colors, as the recolor needs
+    // them (it finds each part by its color): the parts that look already colored, empty when none does. In the game's
+    // textures 89% of the fur's block colors are its orange, 41% of the cloth's are the pants' blue and 23% the shoes'
+    // red, and 89% of the mohawk's are its red-brown; colored by the client they are all under 1%
+    std::vector<std::string> already_colored(const std::vector<unsigned char> &fur, const std::vector<unsigned char> &cloth,
+                                             const std::vector<unsigned char> &hair);
 
     // changes whenever the recolor or a color changes (V1.2.44: highlights ease off; V1.2.45: softer white; V1.2.48: the jaw's rim; V1.2.49: the lips; V1.2.52: the splashed variants too), so the
     // client makes each colored Crash again with the new one

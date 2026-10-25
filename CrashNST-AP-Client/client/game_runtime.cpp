@@ -927,6 +927,13 @@ namespace ingame
         }
     }
     bool campaign_menu_visible() { return campaign_menu_visible_at(value<Address>(base() + 0x1a8feb8)); }
+    // what the screen scan below last saw (it runs about ten times a second, from the frame's drawing): the game over
+    // screen ("ContinueText", Crash out of lives) and the level's HUD (its Wumpa counter's panels), for DeathLink
+    // (V1.3.43): DeathLinks that come at the game over screen are dropped, and one strikes only with the HUD up, once
+    // the level has opened (Eric's Stable V1.3.1 run: three that came at the game over screen all struck as the level
+    // opened again, and the screen stayed white until he restarted the level)
+    std::atomic_bool screen_game_over{false}, screen_level_hud{false};
+    std::atomic<std::uint64_t> screen_seen_at{0};
     bool pause_menu_visible()
     {
         const auto manager = value<Address>(base() + 0x1a8feb8);
@@ -974,6 +981,9 @@ namespace ingame
         static std::uint64_t next_log = 0;
         static unsigned lines = 0;
         const auto now = GetTickCount64();
+        screen_game_over = names.count("ContinueText") != 0;
+        screen_level_hud = names.count("DummyWumpa") || names.count("[Crash_Wumpa_Fruit1.vfx]");
+        screen_seen_at = now;
         if (names != logged && now >= next_log && lines < 60)
         {
             logged = names, next_log = now + 2000, ++lines;
@@ -1188,6 +1198,12 @@ namespace ingame
         std::array<std::set<std::string>, 4> trap_event_seen;
         std::mutex event_mutex;
         std::set<std::string> events_seen;
+        // (V1.3.43 research, Testing build: DeathLink on rides) the form ridden in a gimmick level (the hog, the polar bear,
+        // the jet ski, the jetpack, the jet board ...): each kind of message its scripts get goes to the log once, so the
+        // one the game sends when the ride crashes can be found, and later sent for a DeathLink. Only reads
+        std::atomic<Address> ride_research_actor{0};
+        std::atomic_uint ride_event_lines{0};
+        std::set<std::string> ride_events_seen; // under event_mutex
         // Harder bosses research (V1.3.5): the messages the boss and Crash's damage and Aku Aku scripts get during a boss
         // fight (each kind a few times), to find the one that hurts Crash the way a boss's attack does, and the one that
         // tells a boss he was hit
@@ -1580,6 +1596,27 @@ namespace ingame
         Address event_sent(Address event, Address context)
         {
             const auto crash = event_crash.load();
+#ifndef CRASH_NST_STABLE
+            if (const auto ride = ride_research_actor.load(); ride && event && context && ride_event_lines.load() < 160)
+                if (const auto component = value<Address>(context); component && value<Address>(component + 24) == ride)
+                {
+                    auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
+                    if (graph.rfind("Scripts.Graph.", 0) == 0)
+                        graph.erase(0, 14);
+                    const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                    bool fresh = false;
+                    {
+                        std::lock_guard lock(event_mutex);
+                        fresh = ride_events_seen.insert(graph + "|" + name).second;
+                    }
+                    if (fresh)
+                    {
+                        ++ride_event_lines;
+                        std::cout << "Ride research: " << string(value<Address>(ride + 128), 48) << " (" << graph << ") gets " << name << " from "
+                                  << event_object(value<Address>(event + 32)) << send_arguments(event) << "\n" << std::flush;
+                    }
+                }
+#endif
             if (crash && event && context)
             {
                 const auto component = value<Address>(context);
@@ -2081,6 +2118,57 @@ namespace ingame
                           << " has no PlayerDied; its deaths are seen when its health runs out. Graphs:" << graphs << "\n" << std::flush;
             }
         }
+#ifndef CRASH_NST_STABLE
+        // (V1.3.43 research, Testing build: DeathLink on rides) once per ride: the messages its damage, death, health and
+        // respawn scripts take (as Crash_DamageManager takes the falling death a DeathLink sends him), and the event
+        // research above is switched on for it
+        void ride_research(Address ride)
+        {
+            ride_research_actor = ride;
+            {
+                std::lock_guard lock(event_mutex);
+                ride_events_seen.clear();
+            }
+            ride_event_lines = 0;
+            if (!ride)
+                return;
+            const auto who = string(value<Address>(ride + 128), 48);
+            unsigned lines = 0;
+            for (const auto c : list(value<Address>(ride + 24), 128))
+            {
+                if (!typed(c, 0x13bbbd0) || value<Address>(c + 24) != ride)
+                    continue;
+                const auto meta = value<Address>(c + 56);
+                if (!typed(meta, 0x1745d78))
+                    continue;
+                const auto graph = string(value<Address>(meta + 16), 120);
+                if (graph.find("Damage") == std::string::npos && graph.find("Death") == std::string::npos && graph.find("Health") == std::string::npos &&
+                    graph.find("Respawn") == std::string::npos && graph.find("Die") == std::string::npos)
+                    continue;
+                std::string takes;
+                for (const auto delegator : list(value<Address>(meta + 160), 128))
+                {
+                    const auto message = value<Address>(delegator + 24);
+                    if (typed(delegator, 0x13bc268) && typed(message, 0x17b6578) && takes.size() < 1500)
+                        takes += " " + string(value<Address>(message + 16), 120);
+                }
+                std::cout << "Ride research: " << who << "'s " << graph << " takes:" << (takes.empty() ? std::string(" nothing") : takes) << "\n" << std::flush;
+                if (++lines >= 12)
+                    break;
+            }
+            if (!lines)
+                std::cout << "Ride research: " << who << " has no damage, death, health or respawn script\n" << std::flush;
+            try
+            {
+                event_hook.attach(0x767da0, {0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48, 0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0x00},
+                                  reinterpret_cast<Address>(event_sent));
+            }
+            catch (const std::exception &e)
+            {
+                std::cout << "Ride research: " << e.what() << "\n" << std::flush;
+            }
+        }
+#endif
         const BoxSpec flying_specs[]{
 #include "flying_crate_specs.inc"
         };
@@ -12695,11 +12783,38 @@ namespace ingame
             death_handle = 0;
             remote_death = false;
             state.death_ack = state.death_request;
+#ifndef CRASH_NST_STABLE
+            ride_research_actor = 0;
+#endif
             return;
         }
+        // (V1.3.43) at the game over screen the DeathLinks that come are dropped: Crash is already out, and kept they all
+        // struck as the level opened again. A DeathLink strikes only once the level is open: Crash able to move for 1.5 s
+        // (as the traps wait) with the level's HUD on screen, or after 6 s should a level show no HUD
+        const auto screen_now = GetTickCount64();
+        const bool screen_known = screen_now - screen_seen_at.load() < 1000;
+        if (state.death_request != state.death_ack && screen_known && screen_game_over.load())
+        {
+            state.death_ack = state.death_request;
+            std::cout << "DeathLink: Crash is at the game over screen, so the DeathLinks that came there are dropped.\n" << std::flush;
+        }
+        static std::uint64_t death_settled_since = 0, death_waiting_since = 0;
+        if (!state.player_settled)
+            death_settled_since = 0;
+        else if (!death_settled_since)
+            death_settled_since = screen_now;
+        const bool level_open = state.player_settled && (!screen_known || screen_level_hud.load() || screen_now - death_settled_since >= 6000);
+        if (state.death_request == state.death_ack)
+            death_waiting_since = 0;
+        else if (!death_waiting_since)
+            death_waiting_since = screen_now;
         // scripted deaths keep positive actor health. observe PlayerDied before the actor disappears
         // on foot that's Crash (or Coco); in hog, polar bear, jetpack and vehicle stages the form the player rides or flies
         const auto body = actor ? actor : controlled_actor();
+#ifndef CRASH_NST_STABLE
+        if (const Address ride = trap_gimmick_level(key) && body && body != actor ? body : 0; ride != ride_research_actor.load())
+            ride_research(ride);
+#endif
         if (!body)
             return;
         bind_player_death(body);
@@ -12743,13 +12858,21 @@ namespace ingame
             remote_death = false;
             copy(state.error, "DeathLink death was not observed after the game death script");
         }
-        if (state.death_request != state.death_ack && alive && !remote_death && !state.console_open &&
+        // (V1.3.43) in the Crash 2 jet-board levels (and anywhere else something is ridden) only on foot: the on-foot death
+        // script breaks a ride, so a DeathLink waits on the board for the next part on foot
+        const bool on_foot = !trap_gimmick_level(key) || (actor && body == actor && walking);
+        if (state.death_request != state.death_ack && alive && !remote_death && !state.console_open && level_open && on_foot &&
             death_controls_ready(body, scene().camera_active))
         {
             remote_death = true;
             remote_deadline = GetTickCount64() + 3000;
             if (request_scripted_death(body))
+            {
                 state.death_ack = state.death_request;
+                if (death_waiting_since && screen_now - death_waiting_since >= 2000)
+                    std::cout << "DeathLink: strikes now, once the level is open (it waited " << (screen_now - death_waiting_since) / 1000 << " s).\n"
+                              << std::flush;
+            }
             else
             {
                 remote_death = false;
@@ -12782,6 +12905,7 @@ namespace ingame
         death_handle = 0;
         death_hook.restore();
         event_crash = 0;
+        ride_research_actor = 0;
         event_hook.restore();
         observed_deaths = 0;
         last_actor = 0;

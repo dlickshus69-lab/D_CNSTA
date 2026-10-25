@@ -2,19 +2,25 @@
 
 This is the **Stable build**, for playing seeds: everything finished so far. What's still being worked on (more of Harder Bosses) is only in the **Testing build**, the other release on this page.
 
-To get the new options, install this release's `crash_nst.apworld` in place of the old one. Older YAMLs and seeds still work: without the new options, Papu Papu is as the game has him.
+Updating in the middle of a seed is fine: the client fixes work right away. The logic fixes only change seeds generated with this release's `crash_nst.apworld`; a seed already running keeps its logic (F10 still gives normal controls where a move is missing).
 
-## What's new in V1.3.1
+## What's new in V1.3.2
 
-- **Harder Papu Papu**, in a new **Bosses** section of the options. For now only Papu Papu (Crash 1's first boss); every other boss stays as the game has him.
-  - `harder_bosses` (default off) turns on his red rule. He glows red at the start of the fight and after each hit, until the slam that follows his next spin. Landing on him while he's red doesn't count as a hit: Crash bounces off and gets hurt (an Aku Aku mask takes it, or Crash dies).
-  - `boss_health` (100 to 200, default 150): one more hit every 25%. That's 5 hits at 100, 6 at 125, 7 at 150, 8 at 175 and 9 at 200, and his health bar gets a notch for each.
-  - `boss_speed` (100 to 200, default 150): he spins faster and waits less before his spins. Each hit still speeds him up, more gently near the top, so the end stays beatable.
-  - `harder_bosses_aku_aku` (default off): with it off, Crash has no Aku Aku mask in that fight (masks from crates and items there come in the next level). Turn it on to keep masks working as usual.
-  - Health and speed only count with `harder_bosses` on.
-  - Once he's beaten, his spin can't hurt Crash any more.
-- **Aku Aku Mask items in boss fights: one is enough.** In any boss fight, a mask item comes only while Crash has no mask, one per fight; the rest wait for the next level.
-- **`/skip_filler yes`**: after a seed's goal is done (when every item arrives at once), it counts every 1-Up, Wumpa Fruit and Aku Aku Mask received so far as given, so none of them comes. Ones received later come as usual.
+- **No more white screen after a game over (DeathLink).** DeathLinks that came while you were at the game over screen were kept, and all struck as the level opened again, which left the screen white until you restarted the level. Now the ones that come at the game over screen are dropped (Crash is already out), and a DeathLink only strikes once the level is open: Crash able to move for 1.5 seconds with the level's HUD on screen.
+- **DeathLink in Hang Eight, Air Crash and Plant Food:** these levels mix jet-board parts with parts on foot, and the whole level counted as a ride, so a DeathLink waited ("on a ride") even while walking. Now it strikes on foot as anywhere else, and waits only while Crash is on the board.
+- **Crash colors that only partly took are fixed.** If `CrashNSTAP\skins` was lost while Crash wore an older seed's colors, the client kept that colored Crash as the game's own and colored on top of it. Now it checks the copy it colors from: if it already has colors in it, the console says so, and verifying the game's files in Steam fixes it (the colors are made again at the next connection, then show after a restart). Everyone's colored Crash is made once more with this update, so restart the game when the console says so.
+- **`/colors random`**: random colors for this seed, kept until `/colors seed` (back to your YAML's colors) or a new seed. They show from the next game start.
+- **Box logic fixes** (new seeds, Ability Shuffle):
+  - Piston It Away needs Slide to finish.
+  - High Time's bonus round needs Crouch Jump (a stack of four iron crates is in the way).
+  - Jungle Rollers needs Spin for its crate wall after the first checkpoint, so for the clear, the boxes past the wall and the bonus round.
+  - Every crate in a stack three high needs Spin (was four).
+  - A crate right under an iron-bound crate needs Spin (The Pits' bonus round).
+  - A full pass over every level's boxes is coming in the next Stable build.
+
+## From V1.3.1
+
+- Harder Papu Papu in the **Bosses** options (`harder_bosses`, `boss_health`, `boss_speed`, `harder_bosses_aku_aku`), one Aku Aku Mask item per boss fight, and `/skip_filler yes`.
 
 ## From V1.3
 

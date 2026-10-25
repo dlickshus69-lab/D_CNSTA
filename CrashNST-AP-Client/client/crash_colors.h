@@ -14,7 +14,8 @@ namespace crash_colors
     Choice chosen();
     // "fur black, chest white, ..." (only the parts that aren't default), or "the normal colors"
     std::string describe(const Choice &choice);
-    // /colors: shows the colors (they can't be changed during a seed). Console lines
+    // /colors: shows the colors; /colors random picks random ones for this seed, /colors seed goes back to the YAML's
+    // (V1.3.43). Console lines
     std::vector<std::string> command(const std::string &argument);
     // whether this seed gave Crash any colors
     bool has_colors();
