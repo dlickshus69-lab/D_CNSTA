@@ -715,7 +715,7 @@ void BoxMarkers::aku_sanity(bool on)
     shared_->aku_sanity = on ? 1u : 0u;
     unlock();
 }
-void BoxMarkers::boss_settings(unsigned health, unsigned speed, bool rules, bool bar_grow, bool masks, unsigned slam_ms)
+void BoxMarkers::boss_settings(unsigned health, unsigned speed, bool rules, bool bar_grow, bool masks, unsigned slam_ms, unsigned window_ms)
 {
     lock();
     shared_->boss_health = std::clamp(health, 100u, 200u);
@@ -724,6 +724,7 @@ void BoxMarkers::boss_settings(unsigned health, unsigned speed, bool rules, bool
     shared_->boss_bar_grow = bar_grow ? 1u : 0u;
     shared_->boss_masks = masks ? 1u : 0u;
     shared_->boss_slam_ms = std::clamp(slam_ms, 250u, 900u);
+    shared_->boss_window_ms = std::clamp(window_ms, 1000u, 15000u);
     unlock();
 }
 void BoxMarkers::bar_try(unsigned target, float factor)

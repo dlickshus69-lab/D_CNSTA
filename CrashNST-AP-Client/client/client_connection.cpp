@@ -217,7 +217,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_slam, /boss_bar, /bar_try (tests) | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_slam, /boss_window, /boss_bar, /bar_try (tests) | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -585,6 +585,28 @@ void ClientRuntime::handle_commands()
                 out << std::fixed << std::setprecision(2) << "Boss slam: Papu Papu slams " << at << " s after he stands at 200% boss speed"
                     << (boss_slam_test >= 0 ? " (test)" : "") << "; at 125% " << game / (1 + 0.25 * (game / at - 1)) << " s, 150% " << game / (1 + 0.5 * (game / at - 1))
                     << " s, 175% " << game / (1 + 0.75 * (game / at - 1)) << " s, 100% " << game << " s (the game's). /boss_slam 0.25 to 0.9 sets the 200% one, /boss_slam off goes back to 0.45.";
+                print_console(out.str());
+            }
+            else if (command == "/boss_window")
+            {
+                // test (V1.3.58, Eric: "we'll start with 5, and if it's too long, we'll drop it down"): with the boss rules on,
+                // how long Papu Papu can be hit once his red ends before he's red again; "off" goes back to 5 s
+                double seconds = -1;
+                try
+                {
+                    if (!argument.empty() && argument != "off")
+                        seconds = std::stod(argument);
+                }
+                catch (const std::exception &)
+                {
+                }
+                if (argument == "off")
+                    boss_window_test = -1;
+                else if (seconds >= 1 && seconds <= 15)
+                    boss_window_test = static_cast<int>(seconds * 1000 + 0.5);
+                std::ostringstream out;
+                out << std::fixed << std::setprecision(1) << "Boss window: with the boss rules on, Papu Papu can be hit for " << (boss_window_test >= 0 ? boss_window_test : 5000) / 1000.0
+                    << " s once his red ends" << (boss_window_test >= 0 ? " (test)" : "") << ", then he's red again until the slam after his next spin. /boss_window 1 to 15 sets it, /boss_window off goes back to 5.";
                 print_console(out.str());
             }
             else if (command == "/boss_rules")

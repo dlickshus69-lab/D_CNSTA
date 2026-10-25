@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 30, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 31, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -180,6 +180,9 @@ namespace ingame
         // (V1.3.57 test, /boss_slam) Papu Papu's slam at 200% boss speed, in ms after he stands (the game's own is about 900);
         // the speeds between are even steps of his animation's pace (game_runtime.cpp, papu_stand_clock)
         unsigned boss_slam_ms = 450;
+        // (V1.3.58 test, /boss_window) with the boss rules on: how long Papu Papu can be hit once his red ends, in ms, before
+        // he's red again until the slam after his next spin
+        unsigned boss_window_ms = 5000;
         // (V1.3.25 test, /bar_try) 0 off (the blue, HealthBar, stretched to a bigger bar's length), 1 none (not stretched,
         // to compare), 3 BarParent's sideways scale times bar_try_factor (0: the bar's growth), kept until off
         unsigned bar_try_target = 0;

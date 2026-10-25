@@ -180,6 +180,8 @@ class ClientRuntime
     int boss_health_test = -1, boss_speed_test = -1, boss_rules_test = -1;
     // (V1.3.57 test, /boss_slam) Papu Papu's slam at 200% boss speed, in ms after he stands; -1: 450 (the speeds between follow it)
     int boss_slam_test = -1;
+    // (V1.3.58 test, /boss_window) how long Papu Papu can be hit once his red ends, in ms; -1: 5000
+    int boss_window_test = -1;
     bool boss_bar_grow = true; // /boss_bar (test; V1.3.22: grow by default, asked for)
     unsigned routing_start_count = 0, routing_secret_return_count = 0;
     std::string routing_error;

@@ -5547,6 +5547,11 @@ namespace ingame
             // timer run again for the fight's start (since when, for how long, checked to run)
             bool start_red = false, red_spun = false, slam_wait = false, start_timer = false, start_timer_checked = false, start_timer_ticks = false;
             std::uint64_t slam_wait_since = 0, start_timer_at = 0;
+            // V1.3.58 (see papu_window): once his red ends, how long he can be hit (ms, /boss_window), until when, whether
+            // that's on, and a red begun in his spin waits for the next one's end (red_skip_spin)
+            unsigned window_ms = 5000, window_lines = 0;
+            std::uint64_t window_until = 0;
+            bool window_on = false, red_skip_spin = false;
             unsigned slams_seen = 0;
             float start_timer_set = 0;
             // V1.3.29 (see bar_count): the bar's own count of notches left (two copies), found at the fight's start and
@@ -9352,11 +9357,15 @@ namespace ingame
         // after his first hit in this visit) it's run again for that long, and a landing on him is the game's own bounce.
         // Before that (V1.3.33: a landing then was a hit for the game, taken back, with his flinch) his health script's list
         // of the attacks that hurt him is emptied for that red instead (V1.3.34, see papu_list_block)
-        void papu_start_red(BossTuning &t, std::uint64_t now)
+        // V1.3.58: and again (why) once his time to be hit is over, see papu_window
+        void papu_start_red(BossTuning &t, std::uint64_t now, const char *why = nullptr)
         {
-            t.start_red = true, t.red_spun = false, t.slam_wait = false, t.start_timer = false, t.start_timer_ticks = false;
+            t.start_red = true, t.red_spun = false, t.slam_wait = false, t.start_timer = false, t.start_timer_ticks = false, t.window_on = false;
             std::ostringstream line;
-            line << "Boss rule: the fight starts; he's red until the slam after his first spin";
+            if (why)
+                line << "Boss rule: " << why << "; he's red again until the slam after his next spin";
+            else
+                line << "Boss rule: the fight starts; he's red until the slam after his first spin";
             if (const auto timer = papu_timer(t))
             {
                 const float length = papu_red_time(t);
@@ -9379,6 +9388,33 @@ namespace ingame
             if (immune || t.start_timer)
                 papu_cut(t, now);
             t.start_timer = false;
+            // (V1.3.58: he can be hit for a while now, see papu_window)
+            t.window_on = true, t.window_until = now + t.window_ms, t.red_skip_spin = false;
+            if (t.window_lines < 40)
+                ++t.window_lines, std::cout << "Boss rule: he can be hit for " << seconds(t.window_ms) << ", then he's red again\n" << std::flush;
+        }
+        // V1.3.58 (Eric: "after his first spin, he's vulnerable maybe for like 5 seconds, and then he's ... red, and then you have
+        // to wait for the other spin cycle"; 5 s to start, less if that's too long): with the boss rules on, once his red ends
+        // he can be hit for /boss_window's time (5 s), then he's red again as at the fight's start (see papu_start_red), until
+        // the slam after his next spin (a spin he's in then doesn't count: red_skip_spin). A hit in that time starts the game's
+        // own immunity as always; the fight starting over, or the rule off, ends it
+        void papu_window(BossTuning &t, const Shared &state, int s, std::uint64_t now)
+        {
+            t.window_ms = std::clamp(state.boss_window_ms, 1000u, 15000u);
+            if (!t.window_on)
+                return;
+            if (!state.boss_rules || t.start_red || s == 3 || s == 4 || s == 5 || s == 6)
+            {
+                t.window_on = false;
+                if ((s == 3 || s == 4) && t.window_lines < 40)
+                    ++t.window_lines, std::cout << "Boss rule: hit with " << seconds(t.window_until > now ? t.window_until - now : 0) << " of his time to be hit left\n" << std::flush;
+                return;
+            }
+            if (now < t.window_until || (s != 1 && s != 2))
+                return;
+            const bool spinning = s == 2;
+            papu_start_red(t, now, "his time to be hit is over");
+            t.red_skip_spin = spinning;
         }
         void papu_who(BossTuning &t, int s, std::uint64_t now);         // (V1.3.41, below the write watch it uses)
         void papu_stand_clock(BossTuning &t, int s, std::uint64_t now); // (V1.3.56, the same)
@@ -9485,7 +9521,10 @@ namespace ingame
                 if (s == 5 && t.state != 5 && state.boss_rules)
                     papu_start_red(t, now);
                 // V1.3.32: his first spin since he turned red is over: red ends with the slam after it (see papu_red_end)
-                if (t.state == 2 && s == 1 && (immune || t.start_red) && state.boss_rules && !t.red_spun)
+                // (V1.3.58: a spin he was in as he turned red again doesn't count, see papu_window)
+                if (t.state == 2 && s == 1 && (immune || t.start_red) && state.boss_rules && !t.red_spun && t.red_skip_spin)
+                    t.red_skip_spin = false;
+                else if (t.state == 2 && s == 1 && (immune || t.start_red) && state.boss_rules && !t.red_spun)
                     t.red_spun = true, t.slam_wait = true, t.slam_wait_since = now, t.slams_seen = papu_slams.load();
                 else if (t.state == 1 && s == 2 && t.slam_wait)
                     papu_red_end(t, immune, now, "his next spin started before a slam");
@@ -9603,6 +9642,7 @@ namespace ingame
                 papu_red_end(t, immune, now, "his slam");
             else if (t.slam_wait && now - t.slam_wait_since >= 2500)
                 papu_red_end(t, immune, now, "no slam 2.5 s after his spin");
+            papu_window(t, state, s, now); // (V1.3.58)
             if (t.start_timer && !t.start_timer_checked && now - t.start_timer_at >= 300)
             {
                 t.start_timer_checked = true;
