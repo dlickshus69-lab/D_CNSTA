@@ -334,9 +334,21 @@ void ClientRuntime::update_ownership(ClientTick &tick)
         try
         {
             const auto meta = find_crate_metadata(pid, crate_pointer);
-            if (meta && meta != crate_events->meta())
+            // (V1.3.43) also the same script set up afresh, or a new level or scene since it was attached: in MondoF's log
+            // (after a game over's Continue in N. Sanity Beach) and in Eric's (from the Crash 2 warp room into a level) no box
+            // counted any more, with nothing said: the level's crate script kept its place, but its breaks no longer went
+            // through the listener. What it already caught is counted first
+            const char *why = !meta ? nullptr
+                              : meta != crate_events->meta() ? "the level's crate script changed; attaching to the new one"
+                              : crate_epoch != zone_epoch     ? "a new level or scene; attaching to its crate script"
+                              : !crate_events->hooked()       ? "the level's crate script was set up again; attaching again"
+                                                              : nullptr;
+            if (why)
             {
-                std::cout << "Box observer: the level's crate script changed; attaching to the new one.\n" << std::flush;
+                const bool new_scene = meta == crate_events->meta() && crate_epoch != zone_epoch;
+                drain_crates(tick);
+                if (!new_scene || box_reattach_lines < 40)
+                    ++box_reattach_lines, std::cout << "Box observer: " << why << ".\n" << std::flush;
                 crate_events.reset();
                 next_crate_probe = std::chrono::steady_clock::now();
             }
@@ -355,6 +367,7 @@ void ClientRuntime::update_ownership(ClientTick &tick)
             {
                 crate_events =
                     std::make_unique<CrateEvents>(pid, meta, box_markers ? box_markers->crate_identity() : 0);
+                crate_epoch = zone_epoch;
                 crate_error.clear();
                 std::cout << "Box observer attached.\n" << std::flush;
             }
@@ -384,6 +397,7 @@ void ClientRuntime::update_ownership(ClientTick &tick)
                     {
                         crate_events = std::make_unique<CrateEvents>(pid, found.crate_meta,
                                                                      box_markers ? box_markers->crate_identity() : 0);
+                        crate_epoch = zone_epoch;
                         crate_error.clear();
                         std::cout << "Box observer attached.\n" << std::flush;
                     }

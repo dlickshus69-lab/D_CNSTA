@@ -172,6 +172,10 @@ class ClientRuntime
     std::uintptr_t zone_base = 0;
     ActiveZone previous_zone;
     std::uint64_t zone_epoch = 0, gate_epoch = 0, c1_epoch = 0, c3_epoch = 0;
+    // (V1.3.43) the zone_epoch the box observer was attached in (it attaches again in each new level or scene), and how
+    // many of its re-attaches went to the log
+    std::uint64_t crate_epoch = 0;
+    unsigned box_reattach_lines = 0;
     bool rediscover_c2 = true, rediscover_c3 = true;
     std::string zone_error;
     std::string previous_gate_error;

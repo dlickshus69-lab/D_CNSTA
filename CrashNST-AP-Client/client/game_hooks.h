@@ -70,6 +70,9 @@ public:
     std::vector<CrateBreak> drain();
     void detach();
     std::uintptr_t meta() const { return before_.meta; }
+    // (V1.3.43) whether the crate script still goes through this listener: a level that loads again (after a game over's
+    // Continue) can set its crate script up afresh in the same place, so its breaks bypass a listener left in place
+    bool hooked();
 
 private:
     HANDLE process_ = nullptr;

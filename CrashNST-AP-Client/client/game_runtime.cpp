@@ -12569,6 +12569,42 @@ namespace ingame
         else if (t.blend != want && write(t.bundle + 48, want))
             t.blend = want;
     }
+    // (V1.3.43) why the client thinks Crash can't move or can't be killed now, for the log: each check player_can_move
+    // and death_controls_ready make that fails (Guicho's DeathLinks didn't strike and his traps stood still, with
+    // nothing in the log to say why)
+    std::string readiness_note(Address actor, bool camera_active)
+    {
+        std::ostringstream o;
+        if (!camera_active)
+            o << " no live camera;";
+        if (!actor)
+            return o.str() + " no Crash found;";
+        if (!typed(actor, 0x1592220))
+            return o.str() + " not a player character;";
+        if (!(value<unsigned>(actor + 56) & 0x100))
+            o << " +56 without 0x100;";
+        if (value<unsigned char>(actor + 341) != 1)
+            o << " +341 is " << unsigned(value<unsigned char>(actor + 341)) << ";";
+        if (value<unsigned char>(actor + 342))
+            o << " +342 is " << unsigned(value<unsigned char>(actor + 342)) << ";";
+        if (value<unsigned>(actor + 336) & 0x30)
+            o << " +336 is 0x" << std::hex << value<unsigned>(actor + 336) << std::dec << ";";
+        if (!value<unsigned char>(actor + 568))
+            o << " +568 is 0;";
+        const auto input = value<Address>(actor + 424);
+        if (!typed(input, 0x1589128))
+            o << " its input is another kind;";
+        else if (const auto controls = value<Address>(input + 88); !typed(controls, 0x13eb4b8))
+            o << " no controls;";
+        else if (value<int>(controls + 16))
+            o << " controls locked (" << value<int>(controls + 16) << ");";
+        if (const auto invulnerable = value<Address>(actor + 264); typed(invulnerable, 0x13eb4b8) && value<int>(invulnerable + 16))
+            o << " invulnerable (" << value<int>(invulnerable + 16) << ");";
+        if (const auto died = bound_player_died(); died && reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60)(died))
+            o << " PlayerDied is on;";
+        const auto text = o.str();
+        return text.empty() ? " (every check passes)" : text;
+    }
     void update_gameplay(Shared &state)
     {
         const auto marker_world = value<Address>(base() + 0x1a64690);
@@ -12588,6 +12624,30 @@ namespace ingame
             else if (!ready_since)
                 ready_since = tick_now;
             state.player_settled = state.player_ready && tick_now - ready_since >= 1500 ? 1u : 0u;
+            // (V1.3.43) in a level, with a trap running, Crash counted as unable to move for 15 s on end: the log says why
+            // (once per stretch, a few times per level)
+            {
+                static std::uint64_t not_ready_since = 0;
+                static unsigned told = 0;
+                static std::string told_level;
+                const auto level = level_key(string(value<Address>(marker_world + 184)));
+                if (level != told_level)
+                    told_level = level, told = 0;
+                bool trap_running = false;
+                for (const auto until : {state.move_lock_until, state.reverse_until, state.freeze_until, state.slippery_until,
+                                         state.slow_until, state.darkness_until})
+                    trap_running = trap_running || until > tick_now;
+                if (!in_level || state.player_ready || state.menu_paused)
+                    not_ready_since = 0;
+                else if (!not_ready_since)
+                    not_ready_since = tick_now;
+                else if (trap_running && tick_now - not_ready_since > 15000 && told < 3)
+                {
+                    ++told, not_ready_since = tick_now;
+                    std::cout << "Traps wait: in " << level << " Crash has counted as unable to move for 15 s:"
+                              << readiness_note(actor ? actor : controlled_actor(), camera) << "\n" << std::flush;
+                }
+            }
             // running traps pause every frame Crash can't move (hubs, menus, loading, the pause menu, the level's
             // intro, dying, respawning): their end times move on by that time, so they pick up again at once
             static std::uint64_t last_frame = 0;
@@ -12808,6 +12868,17 @@ namespace ingame
             death_waiting_since = 0;
         else if (!death_waiting_since)
             death_waiting_since = screen_now;
+        // a DeathLink still waiting after 10 s says why in the log, once per wait (Guicho's didn't strike, and the log
+        // didn't say why)
+        static bool death_wait_told = false;
+        if (!death_waiting_since)
+            death_wait_told = false;
+        const auto tell_wait = [&](const std::string &why) {
+            if (death_wait_told || !death_waiting_since || screen_now - death_waiting_since < 10000)
+                return;
+            death_wait_told = true;
+            std::cout << "DeathLink: waiting " << (screen_now - death_waiting_since) / 1000 << " s:" << why << "\n" << std::flush;
+        };
         // scripted deaths keep positive actor health. observe PlayerDied before the actor disappears
         // on foot that's Crash (or Coco); in hog, polar bear, jetpack and vehicle stages the form the player rides or flies
         const auto body = actor ? actor : controlled_actor();
@@ -12816,7 +12887,10 @@ namespace ingame
             ride_research(ride);
 #endif
         if (!body)
+        {
+            tell_wait(" no Crash found");
             return;
+        }
         bind_player_death(body);
         update_aku_watch();
         if (!code_matches(0x4df230, std::array<unsigned char, 16>{0x48, 0x89, 0x5c, 0x24, 8, 0x57, 0x48, 0x83,
@@ -12824,7 +12898,10 @@ namespace ingame
             throw std::runtime_error("DeathLink health getter differs");
         const auto health = reinterpret_cast<int (*)(Address)>(base() + 0x4df230)(body);
         if (health < 0 || health > 10000)
+        {
+            tell_wait(" Crash's health reads " + std::to_string(health));
             return;
+        }
         const auto died_variable = bound_player_died();
         const bool scripted_death = died_variable && reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60)(died_variable);
         const bool alive = health > 0 && !(value<unsigned char>(body + 288) & 4) && !scripted_death;
@@ -12878,6 +12955,24 @@ namespace ingame
                 remote_death = false;
                 copy(state.error, "DeathLink waiting for the player's death script");
             }
+        }
+        if (state.death_request != state.death_ack)
+        {
+            std::string why;
+            const bool camera = scene().camera_active;
+            if (remote_death)
+                why += " a DeathLink death is still under way;";
+            if (state.console_open)
+                why += " the console is open;";
+            if (!state.player_settled)
+                why += " Crash can't move:" + readiness_note(body, camera);
+            else if (!level_open)
+                why += " the level's HUD isn't on screen;";
+            if (!on_foot)
+                why += " Crash is on a ride;";
+            if (state.player_settled && !death_controls_ready(body, camera))
+                why += " he can't be killed now:" + readiness_note(body, camera);
+            tell_wait(why.empty() ? " (no reason found)" : why);
         }
     }
     unsigned take_observed_deaths() { return observed_deaths.exchange(0); }
