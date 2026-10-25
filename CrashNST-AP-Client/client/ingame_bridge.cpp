@@ -559,6 +559,13 @@ bool BoxMarkers::player_ready()
     unlock();
     return ready;
 }
+bool BoxMarkers::aku_hold()
+{
+    lock();
+    const bool hold = shared_->aku_hold != 0;
+    unlock();
+    return hold;
+}
 bool BoxMarkers::player_settled()
 {
     lock();
@@ -679,6 +686,23 @@ void BoxMarkers::aku_lock(bool on)
 {
     lock();
     shared_->aku_lock = on ? 1u : 0u;
+    unlock();
+}
+void BoxMarkers::boss_settings(unsigned health, unsigned speed, bool rules, bool bar_grow, bool masks)
+{
+    lock();
+    shared_->boss_health = std::clamp(health, 100u, 200u);
+    shared_->boss_speed = std::clamp(speed, 100u, 200u);
+    shared_->boss_rules = rules ? 1u : 0u;
+    shared_->boss_bar_grow = bar_grow ? 1u : 0u;
+    shared_->boss_masks = masks ? 1u : 0u;
+    unlock();
+}
+void BoxMarkers::bar_try(unsigned target, float factor)
+{
+    lock();
+    shared_->bar_try_target = target;
+    shared_->bar_try_factor = factor;
     unlock();
 }
 void BoxMarkers::slow_tilt(float tilt)

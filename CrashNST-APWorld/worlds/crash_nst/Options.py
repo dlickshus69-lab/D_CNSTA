@@ -651,6 +651,43 @@ class CrashEyebrowsColor(CrashColor):
     display_name = "Crash Eyebrows Color"
 
 
+class HarderBosses(Toggle):
+    """Harder bosses. For now only Papu Papu (Crash 1's first boss); every other boss stays as the game has him.
+
+    Papu Papu's red rule: he glows red at the start of the fight and after each hit, until the slam that follows his next
+    spin. Landing on him while he's red doesn't count as a hit: Crash bounces off and gets hurt (an Aku Aku mask takes it,
+    or Crash dies). He also gets the health and speed set below. Without this, those settings do nothing."""
+
+    display_name = "Harder Bosses"
+
+
+class BossHealth(Range):
+    """How much health a harder boss has, in percent of the game's (needs Harder Bosses). One more hit every 25%: Papu
+    Papu has 5 hits at 100, 6 at 125, 7 at 150, 8 at 175 and 9 at 200. His health bar gets a notch for each hit."""
+
+    display_name = "Boss Health"
+    range_start = 100
+    range_end = 200
+    default = 150
+
+
+class BossSpeed(Range):
+    """How fast a harder boss fights, in percent of the game's (needs Harder Bosses): Papu Papu spins faster (each hit
+    still speeds him up, gentler near the top so the end stays beatable) and waits less before his spins."""
+
+    display_name = "Boss Speed"
+    range_start = 100
+    range_end = 200
+    default = 150
+
+
+class HarderBossesAkuAku(Toggle):
+    """Aku Aku masks in harder boss fights (needs Harder Bosses). Off: Crash has no mask in those fights (any mask he has
+    waits, and masks from crates and items there come in the next level). On: masks work there as usual."""
+
+    display_name = "Aku Aku in Harder Boss Fights"
+
+
 # sections on the options page and in generated YAMLs, in this order. Archipelago puts Progression Balancing and
 # Accessibility in "Game Options" first and adds "Item & Location Options" last.
 crash_option_groups = [
@@ -706,6 +743,12 @@ crash_option_groups = [
         DeathTrapWeight,
         TrapDuration,
         DeathLink,
+    ]),
+    OptionGroup("Bosses", [
+        HarderBosses,
+        BossHealth,
+        BossSpeed,
+        HarderBossesAkuAku,
     ]),
     OptionGroup("Cosmetic", [
         CrashFurColor,
@@ -764,6 +807,10 @@ class CrashOptions(PerGameCommonOptions):
     death_trap_weight: DeathTrapWeight
     trap_duration: TrapDuration
     death_link: DeathLink
+    harder_bosses: HarderBosses
+    boss_health: BossHealth
+    boss_speed: BossSpeed
+    harder_bosses_aku_aku: HarderBossesAkuAku
     crash_fur_color: CrashFurColor
     crash_chest_color: CrashChestColor
     crash_pants_color: CrashPantsColor

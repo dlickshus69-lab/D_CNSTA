@@ -43,6 +43,16 @@ string(REPLACE "std::string const datapkg_cache_path = \"APCpp_datapkg.cache\";"
 string(REPLACE "datapkg_cache_path" "nst_cache_path()" NST_APCPP_SOURCE "${NST_APCPP_SOURCE}")
 string(REPLACE "command != \"RoomInfo\" &&" "command != \"InvalidPacket\" && command != \"RoomInfo\" &&"
     NST_APCPP_SOURCE "${NST_APCPP_SOURCE}")
+# Testing build (V1.3.8): its apworld's game is "Crash Bandicoot N. Sane Trilogy (Testing)". The client connects as
+# whichever of the two the room has, so it plays Testing seeds and regular ones
+set(NST_ROOM_TIME "lib_room_info.time = root[i][\"time\"].asFloat();")
+string(FIND "${NST_APCPP_SOURCE}" "${NST_ROOM_TIME}" NST_ROOM_TIME_OFFSET)
+if(NST_ROOM_TIME_OFFSET EQUAL -1)
+    message(FATAL_ERROR "APCpp RoomInfo handling differs from the supported revision")
+endif()
+string(REPLACE "${NST_ROOM_TIME}"
+    "${NST_ROOM_TIME}\n            {\n                const std::string nst_testing = \" (Testing)\";\n                std::string nst_base = ap_game;\n                if (nst_base.size() > nst_testing.size() && nst_base.compare(nst_base.size() - nst_testing.size(), nst_testing.size(), nst_testing) == 0)\n                    nst_base.erase(nst_base.size() - nst_testing.size());\n                for (auto nst_game : root[i][\"games\"]) {\n                    if (nst_game.asString() == nst_base + nst_testing) { ap_game = nst_base + nst_testing; break; }\n                    if (nst_game.asString() == nst_base) ap_game = nst_base;\n                }\n            }"
+    NST_APCPP_SOURCE "${NST_APCPP_SOURCE}")
 string(REPLACE "printf(" "nst_ap_printf(" NST_APCPP_SOURCE "${NST_APCPP_SOURCE}")
 string(PREPEND NST_APCPP_SOURCE "int nst_ap_printf(const char*, ...);\n")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/nst_archipelago.cpp" "${NST_APCPP_SOURCE}")
@@ -52,6 +62,11 @@ set_target_properties(crash_nst_ingame PROPERTIES PREFIX "")
 target_compile_features(crash_nst_ingame PRIVATE cxx_std_17)
 target_include_directories(crash_nst_ingame PRIVATE "${APCPP_SOURCE_DIR}" "${APCPP_SOURCE_DIR}/jsoncpp/include" "${APCPP_SOURCE_DIR}/IXWebSocket")
 target_compile_definitions(crash_nst_ingame PRIVATE LZMA_API_STATIC=1)
+# the stable branch (it has STABLE_VERSION) builds the Stable client: what's still being tested is left out of it
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../STABLE_VERSION")
+    target_compile_definitions(crash_nst_ingame PRIVATE CRASH_NST_STABLE=1)
+    message(STATUS "Stable build: CRASH_NST_STABLE")
+endif()
 target_link_libraries(crash_nst_ingame PRIVATE jsoncpp_static ixwebsocket LibLZMA::LibLZMA d3d11 dxgi d3dcompiler dinput8 dxguid user32 gdi32 psapi advapi32 crypt32 ws2_32 winmm)
 if(MINGW)
     target_link_options(crash_nst_ingame PRIVATE -static -static-libstdc++ -static-libgcc)

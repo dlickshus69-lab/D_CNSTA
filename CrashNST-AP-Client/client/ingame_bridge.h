@@ -55,6 +55,7 @@ public:
     // a Nitro Trap is waiting (lets the game thread get a Nitro ready in levels without Nitro crates)
     void nitro_wanted(bool wanted);
     bool player_ready();
+    bool aku_hold();
     bool player_settled();
     void pause_traps(bool paused, std::uint64_t elapsed_ms);
     void c3_buttons(bool ready, const std::set<std::string> &allowed = {});
@@ -75,6 +76,9 @@ public:
     void tint_opacity(float opacity);
     void slow_tilt(float tilt);
     void aku_lock(bool on);
+    // Harder bosses: health and speed in percent (100 the game's own), and the rules on bosses that can be hit any time
+    void boss_settings(unsigned health, unsigned speed, bool rules, bool bar_grow, bool masks);
+    void bar_try(unsigned target, float factor);
     void request_aku_give();
     // Crash's colors (research): log his model's parts; blend a color over him (amount 0 turns it off)
     void request_crash_probe();

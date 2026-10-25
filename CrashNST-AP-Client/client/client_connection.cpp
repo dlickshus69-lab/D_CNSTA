@@ -202,7 +202,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_bar, /bar_try (tests) | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -418,6 +418,30 @@ void ClientRuntime::handle_commands()
                     print_console("Nitro Trap countdown volume: " + std::to_string(value) + ".");
                 }
             }
+            else if (command == "/aku_give")
+            {
+                // test (V1.3.20): one Aku Aku mask for Crash now, as the Aku Aku Mask item gives (in a level, once Crash can move)
+                if (box_markers)
+                {
+                    box_markers->request_aku_give();
+                    print_console("Aku Aku: one mask for Crash now (test; each use gives one more, up to three).");
+                }
+            }
+            else if (command == "/skip_filler")
+            {
+                // every 1-Up, Wumpa Fruit and Aku Aku Mask received so far counts as given, so none of them comes (a seed
+                // whose goal is done gets all its items at once: V1.3.12's log had 57 masks on the way). Later ones come
+                // as usual
+                if (argument != "yes")
+                    print_console("/skip_filler yes: every 1-Up, Wumpa Fruit and Aku Aku Mask received so far counts as given, so none of them "
+                                  "comes (ones received after that come as usual). It can't be undone for this seed.");
+                else
+                {
+                    const auto skipped = session.skip_filler();
+                    print_console("Filler skipped: " + std::to_string(skipped.masks) + " Aku Aku Masks, " + std::to_string(skipped.lives) + " 1-Ups and " +
+                                  std::to_string(skipped.wumpa) + " Wumpa Fruit rewards count as given; none of them will come.");
+                }
+            }
             else if (command == "/skin")
             {
                 // /skin lists the skins in CrashNSTAP\skins, /skin name picks one (from the next game start), /skin default
@@ -458,6 +482,109 @@ void ClientRuntime::handle_commands()
                                   (box_markers->toggle(command.substr(1), argument.empty() ? "toggle" : argument)
                                        ? "on"
                                        : "off"));
+            }
+            else if (command == "/boss")
+            {
+                // test (Harder bosses): the next level entrance loads this boss fight instead. Counts as beating it in
+                // this seed (the game saves it), so use a test seed
+                static const std::vector<std::pair<std::string, std::vector<std::string>>> bosses{
+                    {"B101", {"papu", "papupapu"}},       {"B102", {"ripper1", "ripperroo1"}}, {"B103", {"koala", "koalakong"}},
+                    {"B104", {"pinstripe"}},              {"B105", {"brio"}},                  {"B106", {"cortex1"}},
+                    {"B201", {"ripper2", "ripperroo2"}},  {"B202", {"komodo", "komodobros"}},  {"B203", {"tiny2"}},
+                    {"B204", {"ngin2"}},                  {"B205", {"cortex2"}},               {"B301", {"tiny3"}},
+                    {"B302", {"dingodile"}},              {"B303", {"tropy", "ntropy"}},       {"B304", {"ngin3"}},
+                    {"B305", {"cortex3"}}};
+                std::string wanted;
+                for (auto c : argument)
+                    if (std::isalnum(static_cast<unsigned char>(c)))
+                        wanted += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                std::string key;
+                for (const auto &[k, names] : bosses)
+                {
+                    std::string lower_key = k;
+                    std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), [](unsigned char c) { return std::tolower(c); });
+                    if (wanted == lower_key || std::find(names.begin(), names.end(), wanted) != names.end())
+                        key = k;
+                }
+                if (wanted == "off")
+                {
+                    boss_wanted.clear();
+                    print_console("Boss test off: entrances lead to their levels again.");
+                }
+                else if (key.empty())
+                    print_console("Boss test: /boss papu, ripper1, koala, pinstripe, brio, cortex1, ripper2, komodo, tiny2, ngin2, cortex2, tiny3, "
+                                  "dingodile, tropy, ngin3 or cortex3 (or a key like B204), /boss off. The next level you enter loads that boss "
+                                  "fight. Beating it counts in this seed, so use a test seed.");
+                else
+                {
+                    boss_wanted = key;
+                    print_console("Boss test: the next level you enter loads " + key + ". Beating it counts in this seed (use a test seed).");
+                }
+            }
+            else if (command == "/boss_health" || command == "/boss_speed")
+            {
+                // test (Harder bosses): the bosses' health or speed in percent, 100 to 200, from the next fight; "off" leaves it
+                // to the seed
+                const bool health = command == "/boss_health";
+                auto &test = health ? boss_health_test : boss_speed_test;
+                const auto what = std::string(health ? "Boss health" : "Boss speed");
+                int value = -2;
+                try
+                {
+                    if (argument == "off")
+                        value = -1;
+                    else if (!argument.empty())
+                        value = std::stoi(argument);
+                }
+                catch (const std::exception &)
+                {
+                }
+                if (value == -1)
+                    test = -1, print_console(what + " test off: the seed's setting again.");
+                else if (value >= 100 && value <= 200)
+                    test = value, print_console(what + " test: " + std::to_string(value) + "%, from now" +
+                                                (health ? " (not N. Gin, Cortex in Crash 2, or Brio's first phase)." : " (so far Papu Papu, N. Gin in Crash 3 and Brio)."));
+                else
+                    print_console(what + ": " + (test >= 0 ? std::to_string(test) + "% (test)" : std::string("the seed's")) + ". " + command +
+                                  " 100 to 200 sets it for testing (" + (health ? "200 is double" : "125 is a quarter faster") + "), " + command + " off goes back.");
+            }
+            else if (command == "/boss_rules")
+            {
+                // test (Harder bosses): Papu Papu glows red while he can't be hit; landing on him then costs a life
+                if (argument == "on" || argument == "off")
+                    boss_rules_test = argument == "on" ? 1 : 0;
+                else if (argument == "seed")
+                    boss_rules_test = -1;
+                print_console(std::string("Boss rules: ") + (boss_rules_test == 1 ? "on (test)" : boss_rules_test == 0 ? "off (test)" : "the seed's") +
+                              ". With them on, Papu Papu glows red after each hit, until the end of his next spin, and can't be hit then; "
+                              "landing on him while he's red is a hit for Crash (the game's own: Aku Aku takes it, or a life without him) "
+                              "and doesn't count. /boss_rules on, off, or seed.");
+            }
+            else if (command == "/bar_try")
+            {
+                // test (V1.3.25): the blue's stretch for a bigger bar off to compare (none), or the whole fill stretched
+                // sideways to look at (scale; by the bar's growth unless a factor is given)
+                std::istringstream in(argument);
+                std::string what;
+                float factor = 0;
+                in >> what >> factor;
+                const unsigned target = what == "none" ? 1 : what == "scale" ? 3 : 0;
+                if (!(factor > 0.1f && factor < 10))
+                    factor = 0;
+                if (box_markers)
+                    box_markers->bar_try(target, factor);
+                print_console(target == 1   ? std::string("Bar try: none (the blue isn't stretched, to compare; it shows from the next hit or death). /bar_try off puts the stretch back.")
+                              : target      ? "Bar try: " + what + " (the whole fill stretched sideways, from the next hit or death; kept until /bar_try off)."
+                                            : std::string("Bar try: off (the blue is stretched to the bar's length). Tests: /bar_try none, /bar_try scale."));
+            }
+            else if (command == "/boss_bar")
+            {
+                // test (V1.3.21): with more health, grow the bar's notches (the fill doesn't grow with them yet) or keep the game's
+                if (argument == "grow" || argument == "keep")
+                    boss_bar_grow = argument == "grow";
+                print_console(std::string("Boss bar: ") + (boss_bar_grow ? "grow" : "keep") +
+                              " (test). grow (the default): more notches (V1.3.25 stretches the blue to the bar's length: being tested). keep: "
+                              "the game's notches, full at the start, each hit takes part of one (works). From the next fight. /boss_bar grow or keep.");
             }
             else if (command == "/clear")
                 feed_history.clear();

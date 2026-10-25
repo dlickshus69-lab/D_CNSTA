@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 23, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 28, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -164,6 +164,23 @@ namespace ingame
         // set by the game thread: Crash has been able to move for 1.5 seconds without a break. Traps start only then
         // (V1.3: right after a level loads the game can already report him movable while he is still arriving)
         unsigned player_settled = 0;
+        // set by the game thread: Aku Aku Mask items wait (V1.3.13: one mask is enough in a boss fight; Crash has one
+        // there, or one was given in this fight already). They come in the next level
+        unsigned aku_hold = 0;
+        // set by the client (Harder bosses, V1.3.4 test commands; later the YAML): the bosses' health and speed in
+        // percent (100 is the game's own), and the rules on bosses that can be hit any time (Papu Papu glows red while
+        // he can't be; landing on him then costs a life)
+        unsigned boss_health = 100, boss_speed = 100, boss_rules = 0;
+        // (V1.3.21 test, /boss_bar) with more health: 1 grows the bar's notches with it (its fill doesn't grow yet), 0 keeps
+        // the game's notches (each hit takes part of one)
+        unsigned boss_bar_grow = 0;
+        // (V1.3.42 and Stable V1.3.1, the YAML's harder_bosses_aku_aku) 1: Aku Aku masks still come in harder boss fights;
+        // 0: Crash has none there (V1.3.33)
+        unsigned boss_masks = 0;
+        // (V1.3.25 test, /bar_try) 0 off (the blue, HealthBar, stretched to a bigger bar's length), 1 none (not stretched,
+        // to compare), 3 BarParent's sideways scale times bar_try_factor (0: the bar's growth), kept until off
+        unsigned bar_try_target = 0;
+        float bar_try_factor = 0;
         // set by the game thread every frame it runs (GetTickCount64)
         std::uint64_t heartbeat_game = 0;
         // set by the client: trap time is accounted for up to here while the game thread wasn't running

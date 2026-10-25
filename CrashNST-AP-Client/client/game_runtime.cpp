@@ -22,9 +22,11 @@
 #include <thread>
 #include <chrono>
 #include <unordered_map>
+#include <unordered_set>
 #include <string_view>
 #include <cctype>
 #include <map>
+#include <functional>
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
@@ -179,8 +181,11 @@ namespace ingame
                 return {};
             const auto keys = value<Address>(table + 40), lists = value<Address>(table + 24);
             Address events = 0;
+            // (V1.3.27: the keys read at once, not one by one)
+            std::vector<Address> all(static_cast<std::size_t>(bytes / 8));
+            const bool at_once = !all.empty() && read(keys, all);
             for (unsigned i = 0; i < bytes / 8; ++i)
-                if (value<Address>(keys + i * 8) == meta)
+                if ((at_once ? all[i] : value<Address>(keys + i * 8)) == meta)
                 {
                     events = value<Address>(lists + i * 8);
                     break;
@@ -581,6 +586,23 @@ namespace ingame
             out << "): " << before << " -> " << after << "\n";
             std::cout << out.str() << std::flush;
         }
+        // (V1.3.27) a yes/no game variable Crash's damage script uses, by its name (DamagedInvulnerable: he's blinking
+        // after a hit): 1 or 0, or -1 when it isn't known
+        int crash_game_flag(const char *name)
+        {
+            const auto count = std::min<unsigned>(death_watch_count.load(), 32);
+            for (unsigned i = 0; i < count; ++i)
+                if (std::strcmp(death_watch[i].name, name) == 0)
+                {
+                    const auto variable = death_watch[i].variable.load();
+                    const auto type = variable ? value<Address>(variable) : 0;
+                    if (!type || type < base() || type >= base() + 0x2000000 ||
+                        !code_matches(0x4e5c60, std::array<unsigned char, 5>{0xe9, 0xab, 0xe9, 0xff, 0xff}))
+                        return -1;
+                    return reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60)(variable) != 0 ? 1 : 0;
+                }
+            return -1;
+        }
         void player_died_set(Address variable, unsigned char requested)
         {
             const bool in_level = !level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))).empty();
@@ -690,6 +712,8 @@ namespace ingame
             last_state = state, last_mask = mask;
         }
         std::pair<int, bool> aku_manager_state(Address actor);
+        std::string hex(unsigned offset);
+        std::string pointer_brief(Address v);
         // a filler mask is out: from the hand-over until Aku's manager shows no mask (after a 2 s grace for it to appear)
         bool filler_mask_out()
         {
@@ -705,7 +729,23 @@ namespace ingame
             std::cout << "Aku Aku Mask: the filler mask is gone; Aku Aku Sanity's lock is back\n" << std::flush;
             return false;
         }
-        void update_aku_lock(bool locked)
+        // V1.3.33: a boss fight with any of the harder bosses' settings on (more health, more speed, the red rule)
+        bool hard_boss_fight(const Shared &state, const std::string &boss)
+        {
+#ifdef CRASH_NST_STABLE
+            // (Stable V1.3.1: harder bosses are Papu Papu's alone; every other boss is as the game has him)
+            if (boss != "B101")
+                return false;
+#endif
+            return !boss.empty() && (state.boss_rules != 0 || state.boss_health > 100 || state.boss_speed > 100);
+        }
+        // (V1.3.42 / Stable V1.3.1) a harder boss fight where Crash has no Aku Aku mask: unless the YAML lets masks still come
+        // there (harder_bosses_aku_aku)
+        bool hard_boss_no_masks(const Shared &state, const std::string &boss)
+        {
+            return hard_boss_fight(state, boss) && !state.boss_masks;
+        }
+        void update_aku_lock(bool locked, bool strict = false)
         {
             static Address forced = 0;
             static Address announced = 0;
@@ -714,7 +754,8 @@ namespace ingame
             static bool ever = false;
             // with a filler mask out (or being handed over), the lock doesn't clear masks, keep them from protecting or
             // keep Aku's manager from the messages that bring a mask out (a hand-over can take a few of them)
-            const bool hold = locked && !filler_mask_out();
+            // (V1.3.33: a harder boss fight takes even a filler mask)
+            const bool hold = strict || (locked && !filler_mask_out());
             aku_messages_blocked = hold;
             watch_aku_manager(hold);
             const auto variable = no_aku_variable.load();
@@ -1062,7 +1103,10 @@ namespace ingame
             }
             return 0;
         }
-        bool request_scripted_death(Address actor)
+        // (V1.3.15) with a death of the game's kind, behavior (as a boss's attack names it, e.g. Papu Papu's
+        // "Death_Common_Spin": the angel flying up), set as the death message's parameter when that parameter is of the
+        // behavior's type; without one, the falling death DeathLink uses. note gets what was done
+        bool request_scripted_death(Address actor, Address behavior = 0, Address behavior_type = 0, std::string *note = nullptr)
         {
             if (!event_hook.installed && !code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
                                                                                                 0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0}))
@@ -1089,6 +1133,36 @@ namespace ingame
                     // CrashFallingDeath runs the normal respawn script. 
                     // KillEntity leaves this reused actor at zero health so we can't use it :(
                     std::array<Address, 11> sender{base() + 0x13bc390, 0, message, target};
+                    if (behavior)
+                    {
+                        Address param_type = 0;
+                        const auto count = value<unsigned>(message + 24);
+                        const auto fields = value<Address>(message + 40);
+                        for (unsigned i = 0; fields && count <= 64 && i < count; ++i)
+                        {
+                            const auto field = value<Address>(fields + i * 8);
+                            if (string(value<Address>(field + 48)) == "GraphEvent_id_snc05c5g_Definition_Parameter")
+                                param_type = value<Address>(field);
+                        }
+                        const bool same = param_type && param_type == behavior_type;
+                        if (same)
+                            sender[7] = behavior; // (the parameter's place: +56)
+                        if (note)
+                        {
+                            std::ostringstream out;
+                            const auto at = [](Address a) {
+                                std::ostringstream o;
+                                if (a > base() && a < base() + 0x2000000)
+                                    o << "+0x" << std::hex << (a - base());
+                                else
+                                    o << "0x" << std::hex << a;
+                                return o.str();
+                            };
+                            out << (same ? "the death the boss's attack gives" : "the falling death") << " (the death message's parameter is type " << at(param_type)
+                                << ", the boss's death " << at(behavior_type) << ")";
+                            *note = out.str();
+                        }
+                    }
                     std::array<Address, 6> context{component};
                     reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(
                         reinterpret_cast<Address>(sender.data()), reinterpret_cast<Address>(context.data()));
@@ -1114,6 +1188,175 @@ namespace ingame
         std::array<std::set<std::string>, 4> trap_event_seen;
         std::mutex event_mutex;
         std::set<std::string> events_seen;
+        // Harder bosses research (V1.3.5): the messages the boss and Crash's damage and Aku Aku scripts get during a boss
+        // fight (each kind a few times), to find the one that hurts Crash the way a boss's attack does, and the one that
+        // tells a boss he was hit
+        std::array<std::atomic<Address>, 4> boss_event_targets{};
+        // Papu Papu's rule (V1.3.11): while he's red, the messages his scripts send when Crash lands on him (the hit's:
+        // his deflect script's ppfqleko and his health script's alo0v4l5 start it, V1.3.5's log) are kept for a tenth of
+        // a second, so the hit doesn't happen: no hit reaction, no bounce for Crash
+        std::atomic<Address> boss_block_actor{0};
+        std::atomic_bool boss_block_red{false};
+        std::atomic<std::uint64_t> boss_block_until{0};
+        std::atomic_uint boss_blocked{0};
+        std::mutex boss_block_mutex;
+        std::vector<std::string> boss_blocked_names;
+        // (V1.3.28) a landing on Papu Papu, as his scripts see it: his deflect script bounces Crash off a stomp while he
+        // can't be hit (week322p from the stomp's damage, then Crash's bounce), or lets the stomp through (ppfqleko), and
+        // his health script takes it as a hit (alo0v4l5). When each last happened, and the deflect script's own bounce for
+        // Crash (its sepnt7rb sender) to bounce him off the same way when nothing else does
+        std::atomic<Address> papu_entity{0};
+        // (V1.3.39, see event_sent) what his attack script sent after he was beaten, kept from going through: how many
+        std::atomic_uint papu_beaten_blocks{0};
+        std::atomic<std::uint64_t> papu_deflect_at{0}, papu_stomp_at{0}, papu_hit_at{0};
+        std::atomic_uint papu_deflects{0}, papu_stomps{0}, papu_hits{0};
+        // (V1.3.29) V1.3.28's log: while he can't be hit, a stomp is bounced off by his health script itself (only its
+        // bounce for Crash, sepnt7rb, no hit): when it last did and how many times
+        std::atomic<std::uint64_t> papu_hh_bounce_at{0};
+        std::atomic_uint papu_hh_bounces{0};
+        std::atomic<Address> papu_bounce_node{0}, papu_bounce_component{0}, papu_bounce_message{0};
+        // V1.3.31 research (the probe in event_sent): what each message to Papu Papu changes while the game handles it:
+        // his health, the bar's count of notches left, his immunity's timer (his health script's TimerAction), his
+        // can-be-hit flag and his AI's state. Where to read the count, the timer's pointer and the state (set by
+        // papu_rule), and how deep in other messages a message came
+        std::atomic<Address> probe_count_at{0}, probe_timer_at{0}, probe_state_at{0}, probe_damage_at{0};
+        // V1.3.32: his slam (his AI's 3rnyv3pq: V1.3.30's clips, his club hits the ground as it's sent, a second after he
+        // stands still: after he gets up, and after each spin), when it last came and how many
+        std::atomic<std::uint64_t> papu_slam_at{0};
+        std::atomic_uint papu_slams{0};
+        std::atomic_uint probe_lines{0};
+        // (V1.3.34) the same for the messages of anyone else (Crash's): the lines written
+        std::atomic_uint other_probe_lines{0};
+        thread_local int probe_depth = 0;
+        struct PapuProbe
+        {
+            int damage = 0, count = -1, state = -1;
+            Address timer = 0;
+            std::uint32_t t48 = 0, t50 = 0, flags = 0;
+            bool operator==(const PapuProbe &o) const
+            {
+                return damage == o.damage && count == o.count && state == o.state && timer == o.timer && t48 == o.t48 && t50 == o.t50 && flags == o.flags;
+            }
+        };
+        // V1.3.32: a message one of Papu Papu's scripts (or Crash's) takes, as another of his scripts sends it: the message
+        // and where it goes (from the taker's list), and the values the sender's own node gives it, sent from a node of our
+        // own (as the hit for Crash is: see boss_real_hit)
+        struct PapuSend
+        {
+            Address message = 0, target = 0, args = 0, sender = 0;
+            bool searched = false;
+        };
+        PapuProbe papu_probe_read(Address papu)
+        {
+            PapuProbe p;
+            if (const auto at = probe_damage_at.load())
+                p.damage = value<int>(at);
+            if (const auto at = probe_count_at.load())
+                p.count = value<int>(at);
+            if (const auto at = probe_state_at.load())
+                p.state = value<int>(at);
+            if (const auto at = probe_timer_at.load())
+                if ((p.timer = value<Address>(at)))
+                    p.t48 = value<std::uint32_t>(p.timer + 0x48), p.t50 = value<std::uint32_t>(p.timer + 0x50);
+            p.flags = value<std::uint32_t>(papu + 0x7c);
+            return p;
+        }
+        std::string probe_float(std::uint32_t bits)
+        {
+            float f = 0;
+            std::memcpy(&f, &bits, 4);
+            std::ostringstream out;
+            out << f;
+            return out.str();
+        }
+        // research (V1.3.17) for the angel death: the death Crash's damage script plays (its 0xblwcwf's parameter,
+        // ug0b8lyr) each time he dies in a boss fight, and the parameter of the hit Papu Papu's attack gives him
+        // (ha5y20l3's x9pcuxft). V1.3.16 changed the first to Papu Papu's attack's death (from his settings) for a landing
+        // while red, and the game crashed right then: only read now
+        std::atomic<Address> death_value{0}, hit_value{0};
+        std::atomic_uint death_values{0}, hit_values{0};
+        // V1.3.18: what that parameter is (V1.3.17's log): not the death's name (Papu Papu's setting, which V1.3.16 put there)
+        // but an object that starts with the code that plays it. His spin's death (the angel) starts with +0xca4180, every
+        // time the same object; DeathLink's falling death with +0xca31a0. So for a landing on red: DeathLink's death, with
+        // that falling death object swapped for an angel one, in Crash's own 0xblwcwf, for 2 seconds
+        // V1.3.20: V1.3.18 tried to borrow the angel death object itself, but it only exists during a real death (V1.3.18's
+        // log). V1.3.19's log showed where the death to play comes from: Crash's damage script's deathClip (and
+        // defaultDeathClip) setting. After his spin's death it holds Papu Papu's own "Death_Common_Spin" (the very same text
+        // his attack setting points to), after DeathLink's death a falling one. So while DeathLink's death runs: when
+        // Crash's script sends a0rx8wy2 (after it has set deathClip, before it makes the death for 0xblwcwf), deathClip
+        // says Papu Papu's, only if both settings are of the same kind; when 0xblwcwf goes, it's put back as it was, so the
+        // game never keeps our value
+        constexpr Address angel_death_code = 0xca4180; // what the angel death object starts with: to tell it worked
+        std::atomic<Address> red_death_name{0}, red_death_type{0};
+        std::atomic<std::uint64_t> red_death_until{0};
+        std::atomic<Address> red_clip_at{0}, red_clip_old{0}, red_default_at{0}, red_default_old{0};
+        std::atomic_uint red_death_changed{0}, red_death_angel{0}, red_death_skipped{0};
+        // V1.3.21: V1.3.20's log: when a0rx8wy2 goes, deathClip still holds the empty text it starts with (V1.3.20 left
+        // it alone then, waiting for the game's). The guess now: the game fills in a death of its own only when there's
+        // none (after his spin hits Crash, deathClip already holds Papu Papu's death), so ours goes in while it's empty.
+        // What it held, for the log
+        std::atomic<Address> red_clip_seen{0};
+        // V1.3.22: the angel death, sixth try. V1.3.21's log: the falling death puts a death text of its own into
+        // deathClip (it overwrote Papu Papu's), and the second time it sent 0xblwcwf from another node, with its death
+        // text as a constant (+0x1755b20) in the message itself. So the texts themselves: every "Death..." text constant
+        // around Crash's damage script says Papu Papu's death while DeathLink's death runs, and goes back right after (at
+        // 0xblwcwf, or 2.5 seconds later)
+        // V1.3.24: the angel death, seventh try. V1.3.22's log: the death texts made no difference: the falling death makes
+        // a death of its own kind (+0xca31a0), whatever its text, and his spin's death is another kind (+0xca4180), made
+        // from his attack's damage. So the real hit: when Papu Papu's attack hits Crash for real (his attack script sends
+        // Crash ha5y20l3), what that script holds then (the damage, Crash, the attack's name and death) is kept; for a
+        // landing on red without a mask, those go back into his attack script for a moment and the game's own hit message
+        // is sent from it (V1.3.13 sent it with them empty: Crash's script ignored it). Each kept object's first word
+        // (its type) is kept too, and checked before use
+        struct HitCapture
+        {
+            Address component = 0;                            // his attack script
+            std::vector<std::pair<unsigned, Address>> fields; // (offset in it, value)
+            std::vector<Address> types;                       // each value's first word then
+            std::uint64_t at = 0;
+        };
+        std::mutex hit_capture_mutex;
+        HitCapture hit_capture;
+        std::atomic_uint hit_captures{0};
+        std::atomic_bool own_hit_send{false};
+        // deaths of the angel's kind (the death object 0xblwcwf carries starts with angel_death_code)
+        std::atomic_uint angel_deaths{0};
+        // (V1.3.27) how many times Crash's damage script took the step from a hit to his death (it sends itself sdoxdefr,
+        // then a0rx8wy2 and 0xblwcwf), ours included
+        std::atomic_uint die_steps{0};
+        std::mutex red_constant_mutex;
+        std::vector<std::pair<Address, Address>> red_constants; // (where, the text it held)
+        std::atomic_uint red_constants_out{0};
+        void restore_death_constants()
+        {
+            std::lock_guard lock(red_constant_mutex);
+            const auto clip = red_death_name.load();
+            for (const auto &[at, old] : red_constants)
+                if (value<Address>(at) == clip)
+                {
+                    SIZE_T done = 0;
+                    WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(at), &old, sizeof(old), &done);
+                }
+            red_constants.clear();
+            red_constants_out = 0;
+        }
+        // a message's field by part of its name: its offset if it's 8 bytes, or 0
+        unsigned event_field(Address meta, const char *part)
+        {
+            const auto count = value<unsigned>(meta + 24);
+            const auto fields = value<Address>(meta + 40);
+            for (unsigned i = 0; fields && count <= 64 && i < count; ++i)
+            {
+                const auto field = value<Address>(fields + i * 8);
+                const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                if (bytes == 8 && offset >= 32 && string(value<Address>(field + 48), 64).find(part) != std::string::npos)
+                    return offset;
+            }
+            return 0;
+        }
+        std::atomic<std::uint64_t> boss_event_since{0};
+        std::atomic_uint boss_event_lines{0};
+        std::map<std::string, unsigned> boss_event_counts;
         // Aku Aku lock: the game's NoAkuAkuMasks switch stops masks from protecting Crash and crates from giving them,
         // but the game still shows the mask it brings back at a level's start (a mask carried in from the last level)
         // and when Crash respawns. While the lock is on, Crash's Aku Aku manager doesn't get the messages that hand him
@@ -1262,6 +1505,26 @@ namespace ingame
             }
             return out.str();
         }
+        // (V1.3.26 research) which settings of the sending script a send node's values read: a field description of the
+        // script's type among each value's (or what it points to's) first words
+        std::string value_reads(Address node, Address component)
+        {
+            const auto args = value<Address>(node + 32);
+            const auto meta = component ? value<Address>(component + 56) : 0;
+            if (!args || !typed(args, 0x1745070) || !meta)
+                return {};
+            const auto values = list(args, 16);
+            const auto count = value<unsigned>(meta + 24);
+            const auto fields = value<Address>(meta + 40);
+            std::ostringstream out;
+            for (std::size_t k = 0; k < values.size(); ++k)
+                for (const auto place : {values[k], value<Address>(values[k] + 24)})
+                    for (unsigned off = 0; place && off < 0x40; off += 8)
+                        for (unsigned i = 0; fields && count <= 512 && i < count; ++i)
+                            if (const auto field = value<Address>(fields + i * 8); field && value<Address>(place + off) == field)
+                                out << " [value " << k << " reads " << string(value<Address>(field + 48), 64) << "]";
+            return out.str();
+        }
         // a send node's target (+24): the kind of value source and what it holds (V1.2.61 research: where a trap Nitro's
         // messages go when it explodes, to find the one that adds a box to the level's count)
         std::string send_target(Address node)
@@ -1343,6 +1606,163 @@ namespace ingame
                     }
                 if (blocked)
                     return 0;
+                if (const auto since = boss_event_since.load(); since && target && boss_event_lines.load() < 900)
+                {
+                    bool boss = false;
+                    for (const auto &b : boss_event_targets)
+                        boss = boss || b.load() == target;
+                    if (boss || target == crash)
+                    {
+                        auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
+                        if (graph.rfind("Scripts.Graph.", 0) == 0)
+                            graph.erase(0, 14);
+                        if (boss || graph == "Crash_DamageManager" || graph == "Crash_AkuAkuManager")
+                        {
+                            const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                            const auto who = boss ? string(value<Address>(target + 128), 64) : std::string("Crash");
+                            // (V1.3.26 research, for a landing on him that doesn't hurt him: Papu Papu's health, deflect and AI
+                            // scripts' messages, more of each, with which settings they read; not the deflect script's frequent ppfqleko)
+                            const bool papu_more = boss && name.find("ppfqleko") == std::string::npos &&
+                                                   (graph == "common_BossHealthHandler" || graph == "common_BossInvulnerableDeflectPlayerHandler" || graph == "BossPapuPapu_AiHandler");
+                            bool show = false;
+                            {
+                                std::lock_guard lock(event_mutex);
+                                show = ++boss_event_counts[who + "|" + graph + "|" + name] <= (papu_more ? 14u : 4u);
+                            }
+                            if (show)
+                            {
+                                ++boss_event_lines;
+                                std::ostringstream out;
+                                out << "Boss event +" << (GetTickCount64() - since) / 100 / 10.0 << " s: " << who << " (" << graph << ") gets " << name
+                                    << " from " << event_object(value<Address>(event + 32)) << send_arguments(event) << (papu_more ? value_reads(event, component) : std::string());
+                                std::cout << out.str() << "\n" << std::flush;
+                            }
+                        }
+                    }
+                }
+                // (V1.3.28) Papu Papu's stomps and deflects (see papu_entity)
+                if (const auto papu = papu_entity.load(); papu && target == papu)
+                {
+                    const auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
+                    const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                    const auto now = GetTickCount64();
+                    // V1.3.39 (Eric: "I also died at the end. I don't know if that's because I got hit by him"): V1.3.38's log, his
+                    // last hit landed just as a spin started, and 1.3 s after he was beaten (his AI's state 4) his attack script
+                    // still hit Crash with that spin (its ha5y20l3 for Crash's damage script, and Crash died). Once he's beaten,
+                    // nothing his attack script sends goes through
+                    if (graph == "Scripts.Graph.common_BossAttackDamageHandler")
+                        if (const auto state_at = probe_state_at.load(); state_at && value<int>(state_at) == 4)
+                        {
+                            if (papu_beaten_blocks++ < 4)
+                            {
+                                auto brief = name;
+                                if (const auto id = brief.find("_id_"); id != std::string::npos)
+                                    brief = brief.substr(id + 4);
+                                if (const auto def = brief.find("_Definition"); def != std::string::npos)
+                                    brief.erase(def);
+                                std::cout << "Boss rule: he's beaten, and his attack script sent " << brief << ": kept from going through (his spin can't hurt Crash now)\n"
+                                          << std::flush;
+                            }
+                            return 0;
+                        }
+                    if (graph == "Scripts.Graph.common_BossInvulnerableDeflectPlayerHandler")
+                    {
+                        if (name.find("week322p") != std::string::npos && send_arguments(event).find("Damage_Instance") != std::string::npos)
+                            papu_deflect_at = now, ++papu_deflects;
+                        else if (name.find("ppfqleko") != std::string::npos)
+                            papu_stomp_at = now, ++papu_stomps;
+                        else if (name.find("Crash_BounceManager") != std::string::npos && name.find("sepnt7rb") != std::string::npos)
+                            papu_bounce_node = event, papu_bounce_component = component, papu_bounce_message = value<Address>(event + 16);
+                    }
+                    else if (graph == "Scripts.Graph.common_BossHealthHandler" && name.find("alo0v4l5") != std::string::npos)
+                        papu_hit_at = now, ++papu_hits;
+                    else if (graph == "Scripts.Graph.BossPapuPapu_AiHandler" && name.find("3rnyv3pq") != std::string::npos)
+                        papu_slam_at = now, ++papu_slams;
+                    else if (graph == "Scripts.Graph.common_BossHealthHandler" && name.find("Crash_BounceManager") != std::string::npos &&
+                             name.find("sepnt7rb") != std::string::npos)
+                        papu_hh_bounce_at = now, ++papu_hh_bounces;
+                }
+                if (const auto papu = boss_block_actor.load(); papu && target == papu && boss_block_red.load())
+                {
+                    const auto now = GetTickCount64();
+                    const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                    if (name.find("ppfqleko") != std::string::npos || name.find("alo0v4l5") != std::string::npos)
+                        boss_block_until = now + 100;
+                    if (now < boss_block_until.load())
+                    {
+                        ++boss_blocked;
+                        std::lock_guard lock(boss_block_mutex);
+                        if (boss_blocked_names.size() < 24)
+                            boss_blocked_names.push_back(name);
+                        return 0;
+                    }
+                }
+                if (target && boss_event_since.load())
+                {
+                    const auto meta = value<Address>(event + 16);
+                    const auto name = string(value<Address>(meta + 16), 120);
+                    if (target == crash && name.find("sdoxdefr") != std::string::npos)
+                        ++die_steps;
+                    if (target == crash && name.find("0xblwcwf") != std::string::npos)
+                    {
+                        if (const auto at = event_field(meta, "ug0b8lyr"))
+                        {
+                            const auto v = value<Address>(event + at);
+                            death_value = v, ++death_values;
+                            // (V1.3.24: it's a handle to the death object, as the logs show it: "-> [type +0xca4180]")
+                            const auto death = resolve(v) ? resolve(v) : v;
+                            const bool angel = death && value<Address>(death) == base() + angel_death_code;
+                            if (angel)
+                                ++angel_deaths;
+                            if (red_constants_out.load() && angel)
+                                ++red_death_angel;
+                        }
+                        // the death texts back as they were
+                        if (red_constants_out.load())
+                            restore_death_constants(), red_death_until = 0;
+                    }
+                    if (name.find("ha5y20l3") != std::string::npos)
+                    {
+                        if (const auto at = event_field(meta, "x9pcuxft"))
+                            hit_value = value<Address>(event + at), ++hit_values;
+                        // (V1.3.24) the attack script's state as it hits Crash for real (not our own send)
+                        const auto script = component ? value<Address>(component + 56) : 0;
+                        if (!own_hit_send.load() && script && string(value<Address>(script + 16), 120) == "Scripts.Graph.common_BossAttackDamageHandler")
+                        {
+                            HitCapture capture;
+                            capture.component = component, capture.at = GetTickCount64();
+                            const auto count = value<unsigned>(script + 24);
+                            const auto fields = value<Address>(script + 40);
+                            for (unsigned i = 0; fields && count <= 512 && i < count; ++i)
+                            {
+                                const auto field = value<Address>(fields + i * 8);
+                                const auto field_name = string(value<Address>(field + 48), 64);
+                                const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                                const bool wanted = field_name == "localDamage" || field_name == "localCrash" || field_name == "localAttackIdentifier" ||
+                                                    field_name == "currCrashDeathBehaviorEvent" || field_name.rfind("Damage_Instance_id_", 0) == 0;
+                                if (!wanted || bytes != 8 || offset < 0x40)
+                                    continue;
+                                const auto v = value<Address>(component + offset);
+                                capture.fields.emplace_back(offset, v);
+                                capture.types.push_back(v ? value<Address>(v) : 0);
+                            }
+                            if (!capture.fields.empty())
+                            {
+                                // (the first few go to the log: what his attack script holds as it hits Crash)
+                                if (hit_captures.load() < 3)
+                                {
+                                    std::ostringstream kept;
+                                    for (std::size_t i = 0; i < capture.fields.size(); ++i)
+                                        kept << " " << hex(capture.fields[i].first) << "=" << pointer_brief(capture.fields[i].second);
+                                    std::cout << "Boss rule: his attack's hit on Crash kept:" << kept.str() << "\n" << std::flush;
+                                }
+                                std::lock_guard lock(hit_capture_mutex);
+                                hit_capture = std::move(capture);
+                                ++hit_captures;
+                            }
+                        }
+                    }
+                }
                 if (aku_messages_blocked.load() && !own_aku_message.load() && component && target && aku_manager(component, target))
                 {
                     const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
@@ -1420,6 +1840,81 @@ namespace ingame
                         ++near_crate_lines, log_event(event, component, "near an Aku Aku crate: " + event_object(target), context);
                 }
             }
+            // V1.3.31 research: what each message to Papu Papu changes while the game handles it (see PapuProbe), to
+            // find what starts his immunity (for red from the fight's start) and what steps the bar down (to keep a hit
+            // off it). A message inside another one shows inside its own line and its outer one's
+            if (const auto papu = papu_entity.load(); papu && event && context && probe_lines.load() < 80)
+                if (const auto component = value<Address>(context); component && value<Address>(component + 24) == papu && typed(papu, 0x1592220))
+                {
+                    const auto before = papu_probe_read(papu);
+                    const int depth = probe_depth++;
+                    const auto result = reinterpret_cast<Address (*)(Address, Address)>(event_hook.original)(event, context);
+                    --probe_depth;
+                    const auto after = papu_probe_read(papu);
+                    PapuProbe moved = after;
+                    moved.state = before.state;
+                    if (!(moved == before) && probe_lines.load() < 80)
+                    {
+                        ++probe_lines;
+                        auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
+                        if (graph.rfind("Scripts.Graph.", 0) == 0)
+                            graph.erase(0, 14);
+                        auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                        if (const auto id = name.find("_id_"); id != std::string::npos)
+                            name = name.substr(id + 4);
+                        if (const auto def = name.find("_Definition"); def != std::string::npos)
+                            name.erase(def);
+                        std::ostringstream out;
+                        out << "Boss probe: his " << graph << " gets " << name << (depth ? " (inside " + std::to_string(depth) + ")" : std::string()) << ":";
+                        if (after.damage != before.damage)
+                            out << " his damage " << before.damage << " -> " << after.damage << ";";
+                        if (after.count != before.count)
+                            out << " bar count " << before.count << " -> " << after.count << ";";
+                        if (after.timer != before.timer)
+                            out << " timer 0x" << std::hex << before.timer << " -> 0x" << after.timer << std::dec << ";";
+                        if (after.t48 != before.t48 || after.t50 != before.t50)
+                            out << " timer +0x48 " << probe_float(before.t48) << " -> " << probe_float(after.t48) << ", +0x50 " << probe_float(before.t50) << " -> "
+                                << probe_float(after.t50) << ";";
+                        if (after.flags != before.flags)
+                            out << " flags " << before.flags << " -> " << after.flags << ";";
+                        if (after.state != before.state)
+                            out << " AI state " << before.state << " -> " << after.state << ";";
+                        std::cout << out.str() << "\n" << std::flush;
+                    }
+                    return result;
+                }
+            // V1.3.34 research: the probe above takes only his own scripts' messages, and the game's hit on him never showed
+            // inside one of them. Whether a message of anyone else's (Crash's) hurts him or makes him flinch: his damage and his
+            // AI's state before and after it, while he's fought (up to 16 lines)
+            if (const auto papu = papu_entity.load(); papu && event && context && other_probe_lines.load() < 16)
+                if (const auto damage_at = probe_damage_at.load())
+                    if (const auto component = value<Address>(context); component && value<Address>(component + 24) != papu)
+                    {
+                        const auto state_at = probe_state_at.load();
+                        const int d0 = value<int>(damage_at), s0 = state_at ? value<int>(state_at) : -1;
+                        const auto result = reinterpret_cast<Address (*)(Address, Address)>(event_hook.original)(event, context);
+                        const int d1 = value<int>(damage_at), s1 = state_at ? value<int>(state_at) : -1;
+                        if ((d0 != d1 || s0 != s1) && other_probe_lines.load() < 16)
+                        {
+                            ++other_probe_lines;
+                            const auto sender = value<Address>(component + 24);
+                            auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
+                            if (graph.rfind("Scripts.Graph.", 0) == 0)
+                                graph.erase(0, 14);
+                            auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                            if (const auto id = name.find("_id_"); id != std::string::npos)
+                                name = name.substr(id + 4);
+                            std::ostringstream out;
+                            out << "Boss probe: " << (sender == event_crash.load() ? std::string("Crash") : string(value<Address>(sender + 128), 64)) << "'s "
+                                << (graph.empty() ? std::string("?") : graph) << " sends " << name << ":";
+                            if (d0 != d1)
+                                out << " his damage " << d0 << " -> " << d1 << ";";
+                            if (s0 != s1)
+                                out << " his AI state " << s0 << " -> " << s1 << ";";
+                            std::cout << out.str() << "\n" << std::flush;
+                        }
+                        return result;
+                    }
             return reinterpret_cast<Address (*)(Address, Address)>(event_hook.original)(event, context);
         }
         // research: the yes/no and number game variables' function tables, side by side, marking the yes/no getter
@@ -2220,6 +2715,30 @@ namespace ingame
             const auto end = reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize;
             return at + size <= end || readable(end, at + size - end);
         }
+        // readable() for a search through many objects: Windows is asked about each block of memory once, not about every
+        // pointer (V1.3.26's log: the bar searches asked tens of thousands of times, and the game stopped for 2 to 5 seconds)
+        struct ReadableRegions
+        {
+            std::map<Address, std::pair<Address, bool>> regions; // start -> (end, readable)
+            bool at(Address a)
+            {
+                if (a < 0x10000)
+                    return false;
+                if (auto it = regions.upper_bound(a); it != regions.begin())
+                    if (--it; a < it->second.first)
+                        return it->second.second;
+                MEMORY_BASIC_INFORMATION info{};
+                if (!VirtualQuery(reinterpret_cast<void *>(a), &info, sizeof(info)))
+                    return false;
+                const auto start = reinterpret_cast<Address>(info.BaseAddress), end = start + info.RegionSize;
+                const bool ok = info.State == MEM_COMMIT && !(info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) &&
+                                (info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE));
+                if (end > a)
+                    regions[start] = {end, ok};
+                return ok;
+            }
+            bool operator()(Address a, std::size_t size) { return at(a) && at(a + size - 1); }
+        };
         // copies of a position: x and y exact, height within a hop. a crate stacked on this one is a full crate
         // height (about 78) above, so it never matches
         bool crate_copy(const float *v, const std::array<float, 3> &t)
@@ -4281,9 +4800,10 @@ namespace ingame
                     pages.insert(p);
             }
             std::vector<Address> found, words(512);
+            ReadableRegions ok;
             for (const auto page : pages)
             {
-                if (!readable(page, 0x1000) || !read(page, words))
+                if (!ok(page, 0x1000) || !read(page, words))
                     continue;
                 for (unsigned i = 0; i < words.size(); ++i)
                 {
@@ -4621,9 +5141,4317 @@ namespace ingame
                     ++damage_dumps, log_graph_fields(c, "Damage manager");
             }
         }
+        // Harder bosses research (V1.3.2, test): in a boss fight, the boss's own scripts and their settings go to the log
+        // once, a few seconds in (and any that turn up later, every 5 seconds), then every change of their whole-number
+        // and on/off settings while you fight: what counts the hits, what changes the phase, what changes the pace. Only
+        // reads. (Writing ~200 lines at once can hitch the game for a moment 3 seconds into the fight.)
+        // V1.3.3: also the bosses' shared scripts (common_BossHealthHandler holds the hits; common_BossInvulnerable-
+        // DeflectPlayerHandler bounces Crash off), with their decimal settings watched too; things the boss throws or
+        // spawns (mine carts, TNT, rocks) only once per kind and not watched (V1.3.2 read them after they were gone)
+        struct BossWatchField
+        {
+            Address at = 0, owner = 0;
+            unsigned bytes = 0;
+            bool decimal = false;
+            std::string name;
+            int last = 0;
+            float last_f = 0;
+            unsigned changes = 0; // a timer that changes all the time stops being logged after 60
+        };
+        struct BossWatch
+        {
+            std::string level;
+            std::uint64_t entered = 0, next = 0, next_scan = 0;
+            std::set<Address> seen;
+            std::set<std::string> kinds;
+            std::vector<BossWatchField> fields;
+            unsigned lines = 0, logged = 0;
+        } boss_watch;
+        // the bosses' shared scripts worth reading (not the crates', the camera's or the spawn cleanup)
+        bool boss_common_script(const std::string &script)
+        {
+            return script.rfind("common_Boss", 0) == 0 && script != "common_BossAttackSpawnCleanup";
+        }
+        bool boss_related(const std::string &text)
+        {
+            for (const char *word : {"Boss", "boss", "Papu", "Ripper", "Koala", "Pinstripe", "Brio", "Cortex", "Komodo", "Tiny", "Gin", "Dingodile", "Tropy"})
+                if (text.find(word) != std::string::npos)
+                    return true;
+            return false;
+        }
+        // the boss fight Crash is in ("B204"), from the zone's path (".../bosses/b204_ngin/..."), or empty. (level_key()
+        // gives "Boss" for every boss fight.)
+        std::string boss_zone_key()
+        {
+            auto zone = string(value<Address>(value<Address>(base() + 0x1a64690) + 184), 120);
+            std::transform(zone.begin(), zone.end(), zone.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            const auto at = zone.find("bosses/b");
+            if (at == std::string::npos || zone.size() < at + 11)
+                return {};
+            auto key = zone.substr(at + 7, 4);
+            if (!std::all_of(key.begin() + 1, key.end(), [](char c) { return c >= '0' && c <= '9'; }))
+                return {};
+            key[0] = 'B';
+            return key;
+        }
+        void update_boss_research(const std::string &level)
+        {
+            auto &w = boss_watch;
+            if (level.size() != 4 || level[0] != 'B')
+            {
+                if (!w.level.empty())
+                    w = {};
+                return;
+            }
+            const auto now = GetTickCount64();
+            if (w.level != level)
+            {
+                w = {};
+                w.level = level, w.entered = now, w.next_scan = now + 3000;
+                std::cout << "Boss research: " << level << "; its scripts go to the log 3 seconds in, then every change while you fight\n" << std::flush;
+                return;
+            }
+            if (now >= w.next_scan)
+            {
+                w.next_scan = now + 5000;
+                const auto owners = event_owners();
+                // the watched things that are gone (their memory may hold something else now)
+                {
+                    const std::set<Address> here(owners.begin(), owners.end());
+                    w.fields.erase(std::remove_if(w.fields.begin(), w.fields.end(), [&](const BossWatchField &f) { return !here.count(f.owner); }), w.fields.end());
+                }
+                for (const auto owner : owners)
+                {
+                    if (w.logged >= 40)
+                        break;
+                    if (w.seen.count(owner))
+                        continue;
+                    const auto name = string(value<Address>(owner + 128));
+                    std::string scripts;
+                    std::vector<std::pair<Address, std::string>> own;
+                    for (const auto c : list(value<Address>(owner + 24), 64))
+                        if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78) && value<Address>(c + 24) == owner)
+                        {
+                            auto script = string(value<Address>(value<Address>(c + 56) + 16), 120);
+                            if (script.rfind("Scripts.Graph.", 0) == 0)
+                                script.erase(0, 14);
+                            scripts += (scripts.empty() ? "" : ", ") + script;
+                            own.emplace_back(c, script);
+                        }
+                    if (!boss_related(name) && !boss_related(scripts))
+                        continue;
+                    w.seen.insert(owner);
+                    // things the boss spawns or throws: each kind once, not watched
+                    const bool spawned = name.find("Spawned") != std::string::npos || name.find("spawned") != std::string::npos;
+                    if (spawned && !w.kinds.insert(scripts).second)
+                        continue;
+                    ++w.logged;
+                    std::cout << "Boss research: " << (name.empty() ? std::string("(unnamed)") : name) << " has " << (scripts.empty() ? "no scripts" : scripts)
+                              << "\n";
+                    for (const auto &[c, script] : own)
+                    {
+                        // the shared crate, camera and pickup scripts say nothing about the boss; the shared boss ones do
+                        const bool common = script.rfind("common_", 0) == 0;
+                        if (common && !boss_common_script(script))
+                            continue;
+                        const auto who = "Boss " + name + " " + script;
+                        log_graph_fields(c, who);
+                        if (const auto data = value<Address>(c + 16); data && typed(data, 0x13bbb10))
+                            dump_fields(data, value<Address>(data + 32), who + " data", 60);
+                        if (spawned)
+                            continue;
+                        // its whole-number (4 bytes) and on/off (1 byte) settings are watched; in the shared boss scripts
+                        // also the decimal ones (the health may be one)
+                        const auto meta = value<Address>(c + 56);
+                        const unsigned size = value<std::uint16_t>(meta + 90), count = value<unsigned>(meta + 24);
+                        const auto fields = value<Address>(meta + 40);
+                        for (unsigned i = 0; fields && count <= 512 && i < count && w.fields.size() < 600; ++i)
+                        {
+                            const auto field = value<Address>(fields + i * 8);
+                            const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                            const bool decimal = value<Address>(field) == base() + 0x17afe98;
+                            if ((bytes != 1 && bytes != 4) || offset < 0x40 || offset + bytes > size || (decimal && !common))
+                                continue;
+                            BossWatchField f;
+                            f.at = c + offset, f.owner = owner, f.bytes = bytes, f.decimal = decimal;
+                            f.name = name + " " + script + " " + string(value<Address>(field + 48), 64);
+                            f.last = bytes == 1 ? value<unsigned char>(c + offset) : value<int>(c + offset);
+                            f.last_f = value<float>(c + offset);
+                            w.fields.push_back(f);
+                        }
+                    }
+                }
+                std::cout << std::flush;
+            }
+            if (now < w.next || w.fields.empty() || w.lines >= 800)
+                return;
+            w.next = now + 150;
+            for (auto &f : w.fields)
+            {
+                std::string change;
+                if (f.decimal)
+                {
+                    const float v = value<float>(f.at);
+                    if (v == f.last_f || (std::isnan(v) && std::isnan(f.last_f)))
+                        continue;
+                    std::ostringstream text;
+                    text << f.last_f << " -> " << v;
+                    change = text.str(), f.last_f = v;
+                }
+                else
+                {
+                    const int v = f.bytes == 1 ? value<unsigned char>(f.at) : value<int>(f.at);
+                    if (v == f.last)
+                        continue;
+                    change = std::to_string(f.last) + " -> " + std::to_string(v), f.last = v;
+                }
+                if (++f.changes > 61 || w.lines >= 800)
+                    continue;
+                ++w.lines;
+                std::cout << "Boss watch +" << seconds(now - w.entered) << ": " << f.name << " " << change
+                          << (f.changes == 61 ? " (keeps changing; not logged anymore)" : "") << "\n";
+            }
+            std::cout << std::flush;
+        }
+        // Harder bosses (V1.3.4, test: /boss_health, /boss_speed, /boss_rules). Every boss's hits are a setting of his
+        // common_BossHealthHandler (HitCount; the game makes it his health at 100 a hit, maxHealth), and the pace of a
+        // few bosses is in their own settings. Both are set as the fight starts. Papu Papu's rule: he glows red while he
+        // can't be hit (V1.3.5: his spin, currState 2); landing on him then is a hit for Crash and doesn't count.
+        // V1.3.4's log: a death resets the whole fight (the boss back to full health), and Papu Papu's position at +32
+        // stays put while he spins.
+        struct BossTuning
+        {
+            std::string level;
+            std::uint64_t next = 0, entered = 0;
+            // what the game had in the settings changed here (they stay loaded while Crash retries, so a setting is
+            // always worked out from the game's own value, never from an already changed one)
+            std::map<Address, int> hits;
+            std::set<Address> handlers;
+            std::map<Address, unsigned> timed; // speed settings set, at which percent
+            std::set<std::string> told;
+            // Papu Papu
+            Address papu = 0, papu_ai = 0;
+            unsigned state_at = 0, laps_at = 0, spin_at = 0;
+            // his spin speed (currAttackSpinSpeedMultiplier, the game's 1 + 0.075 a hit): the game's, and ours (x speed)
+            float spin_game = 0, spin_written = 0;
+            // which way he faces (degrees), to tell how fast and which way he turns
+            float yaw = 0, turn = 0, turn_most = 0, turn_least = 0;
+            bool yaw_known = false;
+            // his actor's and his parts' numbers when he turned red, to put back the one a hit while red takes
+            std::vector<std::pair<Address, std::vector<std::uint32_t>>> red_snapshot;
+            // his spin length (spinPlayerLapCount) and hit count when he turned red: a hit while red would add to them
+            unsigned laps_total_at = 0, hit_count_at = 0;
+            int red_laps = -1, red_hits = -1;
+            unsigned blocked_seen = 0;
+            std::uint64_t blocked_told = 0;
+            // V1.3.13: one hit for Crash per landing (V1.3.12 sent two: one when his state changed, one for the kept messages)
+            std::uint64_t crash_hit_at = 0;
+            // a mask taken for it: checked a second later (the count, and whether his mask is still on screen)
+            std::uint64_t hit_check_at = 0;
+            int hit_masks = 0;
+            // V1.3.13: a landing while red makes him flinch (the game's hit reaction); he stays red through it, so it's
+            // clear it didn't count
+            bool forbidden = false;
+            // the death for it: whether Crash's script's death was changed (checked 2.5 seconds later)
+            std::uint64_t death_check_at = 0;
+            // V1.3.24: his spin's hit sent again for it: whether Crash died, and the angel's death (checked 0.8 seconds later)
+            std::uint64_t replay_check_at = 0;
+            unsigned replay_deaths = 0, replay_angels = 0;
+            // V1.3.27: and when Crash's damage script stopped short of his death, its next step (0.15 seconds later)
+            std::uint64_t die_step_at = 0;
+            unsigned die_steps_seen = 0;
+            // V1.3.28: his stomps and deflects as seen (see papu_entity): a stomp let through is looked at 0.25 s later (did
+            // his health script take it, or his deflect script bounce Crash off?); when a hit last counted
+            unsigned deflects_seen = 0, stomps_seen = 0, hits_seen = 0, stomp_lines = 0, hh_bounces_seen = 0;
+            std::uint64_t stomp_check_at = 0, stomp_at = 0, valid_hit_at = 0;
+            // V1.3.30 (see papu_red_time): where his immunity's length is set, and when the immunity of his last hit ends;
+            // his health as last seen there (the length for his next hit is set only once his hit was seen here); when the
+            // game last took a hit; red's end to the log
+            Address immune_at = 0;
+            std::uint64_t immune_until = 0, immune_health_at = 0, game_hit_at = 0;
+            int immune_health = -1;
+            unsigned red_lines = 0;
+            // V1.3.30: his health script and where its immunity's timer is (_Internal_TimerAction_id_5s6p54hm_timer: V1.3.30's
+            // log, a timer of type +0x17610b8 made at his first hit, with +0x48 and +0x50 the immunity's length as it starts)
+            Address hh = 0;
+            unsigned hh_timer_at = 0;
+            // V1.3.31 (see papu_immune_watch and papu_cut): his immunity as his can-be-hit flag shows it, since when, and
+            // whether it was cut at the end of his spin (when, and whether his flag came back after); the timer's numbers as
+            // the immunity started, and the ones seen counting down (or up) with time
+            bool immune_flag = false, cut_done = false, cut_checked = false, timer_sampled = false;
+            std::uint64_t immune_since = 0, cut_at = 0, timer_start_at = 0;
+            std::array<std::uint32_t, 32> timer_start{};
+            Address timer_started = 0;
+            std::vector<unsigned> timer_down, timer_up;
+            float timer_length = 0;
+            unsigned timer_lines = 0, cut_lines = 0;
+            // V1.3.32 (see bar_refill): the bar filled back up the game's own way: when last, how often; the message for it
+            std::uint64_t refill_at = 0;
+            unsigned refills = 0;
+            PapuSend refill_send;
+            // V1.3.32 (see papu_start_red and papu_red_end): red from the fight's start; a spin over while he's red (red
+            // ends with the slam after it), waiting for that slam since when, his slams seen then; the game's immunity's
+            // timer run again for the fight's start (since when, for how long, checked to run)
+            bool start_red = false, red_spun = false, slam_wait = false, start_timer = false, start_timer_checked = false, start_timer_ticks = false;
+            std::uint64_t slam_wait_since = 0, start_timer_at = 0;
+            unsigned slams_seen = 0;
+            float start_timer_set = 0;
+            // V1.3.29 (see bar_count): the bar's own count of notches left (two copies), found at the fight's start and
+            // checked at his first hit
+            std::vector<std::pair<Address, unsigned>> count_places; // (object, offset)
+            std::vector<int> count_last;
+            bool count_searched = false, count_checked = false;
+            unsigned count_lines = 0;
+            std::uint64_t count_since = 0;
+            // V1.3.28 research (see bar_research): the blue's length as it last settled, and the bar's objects then
+            float w_seen = -1, w_settling = -1;
+            std::uint64_t w_since = 0;
+            unsigned w_lines = 0, snap_diffs = 0;
+            std::vector<Address> snap_objects;
+            std::vector<std::uint32_t> snap_words;
+            // V1.3.28 research (see vuln_research): his numbers while he can be hit (0), getting up from a hit (1), red
+            // right after a hit (2)
+            struct VulnWord
+            {
+                std::array<std::uint32_t, 3> value{};
+                std::array<bool, 3> seen{}, steady{true, true, true};
+            };
+            std::unordered_map<Address, VulnWord> vuln;
+            std::vector<std::pair<Address, Address>> vuln_parts; // (part, its type) as last read
+            std::array<unsigned, 3> vuln_episodes{};
+            int vuln_class = -1;
+            std::uint64_t vuln_next = 0;
+            bool vuln_logged = false;
+            unsigned death_seen = 0, death_changed = 0, death_count = 0, death_angels = 0, death_skips = 0, crash_dumps = 0;
+            bool crash_dumped_start = false;
+            // research (V1.3.15): his health part (+0x14da2c0) as each state starts, to find what keeps him from being hit
+            // after a hit (the game's own: Crash bounces off him then), for the red time
+            Address health_part = 0;
+            std::vector<std::uint32_t> health_words;
+            unsigned health_lines = 0;
+            // V1.3.13: his fight's pace with more health: the game's hit count (HitCount, 5) and, at the fight's start, his
+            // spin length and hit count
+            int papu_original = 0, laps_start = 0, hits_start = 0;
+            bool starts_known = false;
+            // the game's hit for Crash (Papu Papu's attack's damage message to him), once found
+            Address hit_message = 0, hit_target = 0, hit_args = 0, hit_sender = 0;
+            bool hit_searched = false;
+            // (V1.3.26) the settings of his attack script the hit's values read: (offset, size)
+            std::vector<std::pair<unsigned, unsigned>> hit_reads;
+            int state = -1;
+            bool spun = false, red = false, was_red = false;
+            int red_health = -1; // his health when he turned red
+            std::uint64_t still_since = 0, state_since = 0, sample_at = 0, red_since = 0;
+            std::array<float, 3> sample{};
+            float speed = 0, top_speed = 0;
+            // the red glow: our tint on his model
+            Address tint_model = 0, tint_bundle = 0, tint_handle = 0;
+            // the health bar: its health scripts seen, the bar, its setting (the bar the game copies it from), when it was found
+            std::set<Address> bar_handlers;
+            Address bar_object = 0, bar_template = 0;
+            std::uint64_t bar_found_at = 0;
+            // V1.3.25: the fill for more notches than the game's (see game_bar_width): the boss's notches as the game has them
+            // and ours, the bar's parts (its own, not its setting's), BarParent's widest (the fill at full health), and the
+            // setting's HealthBar (found once a visit, and whether its scale is ours)
+            Address bar_script = 0;
+            unsigned bar_proj_at = 0;
+            int bar_game_hits = 0, bar_hits = 0;
+            bool parts_searched = false;
+            unsigned parts_searches = 0;
+            std::uint64_t parts_at = 0;
+            Address bar_parent = 0, health_bar = 0, setting_health_bar = 0;
+            bool setting_searched = false, setting_written = false;
+            float fill_full = 0;
+            unsigned fill_logs = 0;
+            // a /bar_try in effect: what it changed, the game's value there and ours
+            unsigned try_target = 0;
+            Address try_part = 0, try_at = 0;
+            float try_game = 0, try_written = 0;
+            // V1.3.34 (see papu_lists and papu_list_block): his health script's list of the attacks that hurt him (the list,
+            // its items and type, how many), looked for once a visit; his can-be-hit flag held clear by us (and since when)
+            Address id_list = 0, id_items = 0, id_type = 0;
+            unsigned id_count = 0, block_lines = 0, hold_writes = 0;
+            bool lists_done = false, flag_held = false, block_had_timer = false;
+            std::uint64_t block_at = 0;
+            // V1.3.34 (see papu_speed_timers): his AI's timers (their place in his AI and id, the timer last seen there, its
+            // time left then, how many times it started)
+            struct AiTimer
+            {
+                unsigned at = 0;
+                std::string id;
+                Address timer = 0;
+                float left = 0;
+                unsigned starts = 0;
+            };
+            std::vector<AiTimer> ai_timers;
+            unsigned speed_lines = 0;
+            // V1.3.35 research (see papu_spin_search): the places that held his spin speed at the last search (with how many
+            // searches in a row they did), the searches done, and when the next is due (a little into his spin)
+            struct SpinPlace
+            {
+                Address at = 0;
+                std::string where;
+                unsigned follows = 0;
+                std::size_t region = static_cast<std::size_t>(-1); // (its place among clock_regions, if it's in one)
+                bool moved = false; // (it followed his spin speed from one number to another)
+            };
+            std::vector<SpinPlace> spin_places;
+            unsigned spin_searches = 0;
+            float spin_last_v = 0;
+            bool spin_candidates = false;
+            std::uint64_t spin_search_due = 0;
+            // V1.3.35 (see papu_clocks and papu_slam_rate): the places looked at for what plays his moves (his parts and what they
+            // point to), their snapshots in his first two slams, the clocks found there (a number counting the seconds up and
+            // starting over with each move), and his slam's speed: the numbers next to a clock tried as its speed, the one found
+            struct ClockRegion
+            {
+                Address at = 0, type = 0; // (the object and its type then: it's checked to be the same before anything is set in it)
+                unsigned bytes = 0;
+                std::string where;
+                std::size_t first = 0; // where its words start in a snapshot
+            };
+            struct Clock
+            {
+                Address at = 0;
+                std::string where;
+                bool dbl = false;
+                float unit = 1;
+                double last = 0;
+                std::size_t region = 0;
+                bool confirmed = false;
+            };
+            struct RateCandidate
+            {
+                Address at = 0;
+                std::string where;
+                std::size_t region = 0, clock = 0;
+            };
+            std::vector<ClockRegion> clock_regions;
+            std::array<std::vector<std::uint32_t>, 3> clock_snap;
+            std::array<double, 3> clock_t{};
+            int clock_period = 0, clock_step = 0;
+            std::vector<Clock> clocks;
+            std::vector<RateCandidate> rate_candidates;
+            std::size_t rate_next = 0, rate_clock = 0;
+            bool rate_found = false, rate_trying = false, rate_written = false, rate_checked = false;
+            float rate_value = 0;
+            double rate_t0 = 0, rate_c0 = 0;
+            unsigned rate_lines = 0, rate_retries = 0, rate_uses = 0;
+            std::uint64_t stand_seen = 0, rate_stand = 0;
+            // V1.3.35 (Eric: "scan the speed of his normal speed and then add it to the logs"): his moves' times in each cycle
+            std::uint64_t stand_at = 0, slam_seen_at = 0, spin_start_at = 0, lap_at = 0;
+            int laps_last = 0;
+            std::string lap_times, cycle_head;
+            unsigned cycle_lines = 0, slams_cycle = 0;
+            // V1.3.36 (see papu_aim): his slam aimed at Crash. The way he faces (0: his matrix's X axis, as Crash's is, 1: -X, 2:
+            // Y, 3: -Y), checked as he jumps into the arena (votes for each); the facing set last frame (to see if it stays), how
+            // often it stayed or the game turned him back, and when he was last turned
+            int face_axis = 0;
+            bool face_checked = false;
+            std::array<float, 4> face_votes{};
+            unsigned face_samples = 0;
+            float aim_yaw = 0, aim_turned = 0, aim_lock = 0, yaw_last = 0;
+            bool aim_wrote = false, aim_skip = false;
+            unsigned aim_kept = 0, aim_overridden = 0, aim_lines = 0, aim_where = 0, yaw_searches = 0;
+            std::uint64_t aim_last = 0, aim_skip_told = 0;
+            std::vector<std::tuple<Address, std::string, std::size_t>> yaw_places; // (where, its name, its place among clock_regions)
+            // V1.3.39 (see papu_aim and papu_facing_set): his facing's own places on him for this stand (in two of his parts, see
+            // facing_stores): where, its name, what was set there last frame, and how often it was set, still held it the next
+            // frame, or was put back by the game; how each keeps the angle (1 radians, 2 degrees), by where it is; his facing as
+            // the game had it as he stood; what's set (0: his facing's places and his matrix, 1: his matrix only, as V1.3.36 did,
+            // 2: nothing, the game kept turning him back), for how many frames, and the frames that stayed in it; the ways
+            // tried this stand; and his facing's places told in the log
+            struct FacingPlace
+            {
+                Address at = 0, type = 0; // (and its part's type, and where it is in the part)
+                unsigned offset = 0;
+                std::string name;
+                float wrote = 0;
+                bool written = false;
+                unsigned set = 0, held = 0, reset = 0;
+            };
+            std::vector<FacingPlace> facing_places;
+            std::map<Address, int> facing_unit;
+            float aim_from = 0, aim_prev = 0; // (and what was set the frame before last: the game may take a frame to follow)
+            int aim_mode = 0;
+            unsigned aim_mode_frames = 0, aim_mode_kept = 0, aim_modes = 0, facing_told = 0;
+            // V1.3.41 (see papu_turn_research and papu_turn_set): what turns with him as he spins: where, how it holds his turn (1:
+            // an angle, in radians, degrees or turns (unit), either way (sign); 2: a direction, two numbers; 3: a quaternion's
+            // last two numbers, a turn about his up axis), what it is (its object, the object's type and the place in it), whether
+            // it's set by the aim (not his transform's own), in how many research spins it turned with him and how many it
+            // didn't; for this stand: what it held as he stood, what was set last frame, and how often it was set, held it or was
+            // put back by the game
+            struct TurnPlace
+            {
+                Address at = 0, object = 0, type = 0;
+                unsigned offset = 0;
+                int kind = 0;
+                float unit = 1, sign = 1;
+                std::string where;
+                bool writable = true;
+                unsigned spins = 0, missed = 0;
+                std::array<float, 2> from{}, wrote{};
+                bool started = false, written = false;
+                unsigned set = 0, held = 0, reset = 0;
+                // (V1.3.41, after the code review: its own angle less his facing (radians), as it was read in the research; and
+                // whether it's out of step with his facing as he stands now, so left alone in this stand)
+                float phase = 0;
+                bool out_of_step = false;
+            };
+            std::vector<TurnPlace> turn_places;
+            // (the research: the places read, each with where its numbers start in a reading; the three readings, his turning
+            // (unwrapped) at each, when they're due, his turning so far and his facing last frame; whether a spin is being
+            // read, how many spins were, and lines written)
+            struct TurnRegion
+            {
+                Address at = 0, type = 0;
+                unsigned bytes = 0;
+                std::string where;
+                bool writable = true;
+                std::size_t first = 0;
+            };
+            std::vector<TurnRegion> turn_regions;
+            std::vector<std::vector<float>> turn_snaps;
+            std::vector<double> turn_marks;
+            std::vector<float> turn_yaws; // (his facing at each reading)
+            Address turn_transform = 0;   // (his transform as the places were read: nothing in it is set, see papu_turn_regions)
+            std::array<std::uint64_t, 3> turn_due{};
+            double turn_total = 0;
+            float turn_yaw = 0;
+            bool turn_tracking = false;
+            unsigned turn_spins = 0, turn_lines = 0;
+            // V1.3.41: the first aimed stands of a visit frame by frame (his facing as the game had it each frame, and what was
+            // set, from his facing as he stood), and his spin's first frames after an aimed stand (his facing from where it was
+            // held)
+            std::string aim_trace, spin_trace;
+            unsigned aim_traces = 0, spin_frames = 0, spin_lines = 0;
+            float spin_from = 0;
+            // V1.3.41 (see papu_who): the watch on his facing's place: 0 not yet, 1 on, 2 done for this visit; when it went on,
+            // and whether it's wanted (his spin jumped from his aim even with what turns with him set)
+            int watch_step = 0;
+            std::uint64_t watch_at = 0;
+            bool watch_due = false;
+            // V1.3.36 (see papu_slam_rate): his slam's time from when he stands, as the game plays it (the shortest seen while
+            // nothing of ours is set), and the stand a try was set in
+            std::uint64_t slam_normal = 0, try_stand = 0;
+        } boss_tuning;
+        // V1.3.34 (see papu_list_block): the list emptied, outside the fight's own state so it's always put back (also after
+        // the fight is left): the list, its items and type then, and its count before
+        struct ListBlock
+        {
+            Address list = 0, items = 0, type = 0;
+            unsigned count = 0;
+        } list_block_now;
+        constexpr std::array<float, 4> boss_red{1.6f, 0.12f, 0.12f, 0.6f};
+        void tell_once(BossTuning &t, const std::string &key, const std::string &line)
+        {
+            if (t.told.insert(key).second)
+                std::cout << line << "\n" << std::flush;
+        }
+        // a type's field by name: its description, or 0
+        Address field_named(Address meta, const char *name)
+        {
+            const auto count = value<unsigned>(meta + 24);
+            const auto fields = value<Address>(meta + 40);
+            for (unsigned i = 0; fields && count <= 512 && i < count; ++i)
+            {
+                const auto field = value<Address>(fields + i * 8);
+                if (string(value<Address>(field + 48)) == name)
+                    return field;
+            }
+            return 0;
+        }
+        // an entity's running scripts: (component, name without "Scripts.Graph.")
+        std::vector<std::pair<Address, std::string>> entity_scripts(Address owner, unsigned limit = 64)
+        {
+            std::vector<std::pair<Address, std::string>> result;
+            for (const auto c : list(value<Address>(owner + 24), limit))
+                if (typed(c, 0x13bbbd0) && typed(value<Address>(c + 56), 0x1745d78) && value<Address>(c + 24) == owner)
+                {
+                    auto script = string(value<Address>(value<Address>(c + 56) + 16), 120);
+                    if (script.rfind("Scripts.Graph.", 0) == 0)
+                        script.erase(0, 14);
+                    result.emplace_back(c, script);
+                }
+            return result;
+        }
+        bool health_getter_ok()
+        {
+            return code_matches(0x4df230, std::array<unsigned char, 16>{0x48, 0x89, 0x5c, 0x24, 8, 0x57, 0x48, 0x83, 0xec, 0x20, 0x8b, 0xb9, 0xf8, 0, 0, 0});
+        }
+        int actor_health(Address actor) { return reinterpret_cast<int (*)(Address)>(base() + 0x4df230)(actor); }
+        // health: the boss himself (his health bar has his name), not the lions or blobs he sends; not N. Gin's mechs (both
+        // only get faster), not Cortex's chase in Crash 2 (more health there can't be beaten in time), and of Brio only
+        // his last form (his first phase stays)
+        // research (V1.3.6): the boss's health bar. V1.3.5 made HitCount bigger: the bar grew to 10 notches but its fill
+        // still counted 5 (half full at the start, empty a hit early). Its bar object's numbers go to the log as they change
+        void watch_boss_bar(BossTuning &t, Address c, const std::string &name, int game_hits, int hits)
+        {
+            if (!t.bar_handlers.insert(c).second)
+                return;
+            const auto at = field_offset(value<Address>(c + 56), "guiBossHealthbarProj", 8);
+            const auto p = at ? value<Address>(c + at) : 0;
+            const auto bar = resolve(p) ? resolve(p) : p;
+            if (!bar || !readable(bar, 0x100))
+            {
+                std::cout << "Boss bar: " << name << "'s health bar isn't there (+" << at << ")\n" << std::flush;
+                return;
+            }
+            t.bar_object = bar, t.bar_found_at = GetTickCount64();
+            t.bar_script = c, t.bar_proj_at = at, t.bar_game_hits = game_hits, t.bar_hits = hits;
+            if (const auto data = value<Address>(c + 16); typed(data, 0x13bbb10))
+                if (const auto off = field_offset(value<Address>(data + 32), "GuiBossHealthBar", 8))
+                    t.bar_template = resolve(value<Address>(data + off)) ? resolve(value<Address>(data + off)) : value<Address>(data + off);
+            // (V1.3.17 to V1.3.26 also watched thousands of the bar's numbers here, and V1.3.22 to V1.3.26 searched what it
+            // leads to: research that's done, and that made the game stop for seconds, V1.3.26's log)
+            std::cout << "Boss bar: " << name << "'s health bar is " << object_brief(bar, 0x100, 6) << " (its setting: " << object_brief(t.bar_template, 0x100, 6) << ")\n"
+                      << std::flush;
+        }
+        // V1.3.25: the fill for more notches than the game's. V1.3.21's clip and V1.3.22's log: with Papu Papu's 10 notches
+        // the bar's layout is the 10 notches' (the frame, notches, dark track and BarParent, which the blue is shown up to:
+        // 1013 at full health, 91 less with each hit), but the blue ends where the game's 5 notches end, at any health above
+        // that (it's cut off there, not squeezed). The blue is a picture (HealthBar, as wide as the whole bar) painted only
+        // as far as the boss's own notches go (Brio's 7 reach 782). V1.3.24's tests: HealthBar made wider sideways (its
+        // scale) stretches the painted part to the bar's end, and the blue still goes down with each hit; BarParent's scale
+        // stretched the bar past its frame. The game only uses a part's scale when it lays the bar out (a fight's start, a
+        // hit, a death), so the scale goes into the bar's setting (the bar each fight's bar is copied from) as soon as the
+        // boss is there, before his bar is made, and into the bar itself once it's found. (V1.3.24 widened the setting's
+        // picture size instead: no difference)
+        float game_bar_width(int hits) { return std::min(547.0f + static_cast<float>(hits - 5) * 117.5f, 1013.0f); } // N. Gin's 5: 547, Brio's 7: 782; 9 and up: 1013
+        // how much wider the blue has to be: the bar's length with our notches over its length with the game's
+        float bar_stretch(int game_hits, int hits)
+        {
+            if (game_hits < 1 || hits <= game_hits)
+                return 1.0f;
+            const float game = game_bar_width(game_hits), ours = game_bar_width(hits);
+            return game > 1 && ours > game ? ours / game : 1.0f;
+        }
+        bool bar_part_ok(Address part, Address type, unsigned name_at, const char *name)
+        {
+            return part && typed(part, type) && printable_text(value<Address>(part + name_at)) == name;
+        }
+        // what a bar (or its setting) leads to, nearest first: (object, steps)
+        void bar_reach(Address root, unsigned depth_most, std::size_t most, std::vector<std::pair<Address, unsigned>> &found)
+        {
+            std::vector<std::pair<Address, unsigned>> queue{{root, 0}};
+            std::unordered_set<Address> seen{root};
+            ReadableRegions ok;
+            std::vector<std::uint32_t> words(0x200 / 4);
+            for (std::size_t q = 0; q < queue.size() && found.size() < most; ++q)
+            {
+                const auto [object, depth] = queue[q];
+                if (!ok(object, 0x200) || !read(object, words))
+                    continue;
+                found.emplace_back(object, depth);
+                if (depth >= depth_most)
+                    continue;
+                for (std::size_t i = 0; i + 1 < words.size(); i += 2)
+                {
+                    const Address p = words[i] | (static_cast<Address>(words[i + 1]) << 32);
+                    if (p >= 0x10000 && p < 0x7fffffff0000ULL && (p < base() || p >= module_end()) && !seen.count(p) && ok(p, 0x40))
+                        seen.insert(p), queue.emplace_back(p, depth + 1);
+                }
+            }
+        }
+        // the bar's setting's HealthBar wider by the bar's growth (or back to the game's): every bar made from it from now on
+        // has it. Its HealthBar is found once a visit (the one nearest the setting)
+        void stretch_bar_setting(BossTuning &t, Address data, float stretch)
+        {
+            const auto off = field_offset(value<Address>(data + 32), "GuiBossHealthBar", 8);
+            const auto p = off ? value<Address>(data + off) : 0;
+            const auto setting = resolve(p) ? resolve(p) : p;
+            if (!setting || !readable(setting, 0x100))
+                return;
+            if (!bar_part_ok(t.setting_health_bar, 0x161cf98, 0x30, "HealthBar"))
+            {
+                t.setting_health_bar = 0;
+                if (t.setting_searched)
+                    return;
+                t.setting_searched = true;
+                std::vector<std::pair<Address, unsigned>> found;
+                bar_reach(setting, 5, 2500, found);
+                for (const auto &[a, depth] : found)
+                    if (bar_part_ok(a, 0x161cf98, 0x30, "HealthBar"))
+                    {
+                        t.setting_health_bar = a;
+                        break;
+                    }
+                std::cout << "Boss bar: its setting's HealthBar " << (t.setting_health_bar ? "found" : "not found") << " (" << found.size() << " objects)\n" << std::flush;
+                if (!t.setting_health_bar)
+                    return;
+            }
+            const float want = stretch, has = value<float>(t.setting_health_bar + 0x8c);
+            if (std::isfinite(has) && has > 0.3f && has < 4.0f && std::abs(has - want) > 0.0005f)
+            {
+                write(t.setting_health_bar + 0x8c, want);
+                t.setting_written = want != 1.0f;
+                std::cout << "Boss bar: the setting's HealthBar's sideways scale " << has << " -> " << want << " (bars made from it from now on)\n" << std::flush;
+            }
+        }
+        // the bar's own parts: what the bar leads to (5 steps, 3000 objects) and its setting doesn't (4 steps); BarParent and
+        // HealthBar, and every named part of the bar to the log
+        void find_bar_parts(BossTuning &t)
+        {
+            t.parts_searched = true, ++t.parts_searches;
+            if (t.bar_script && t.bar_proj_at)
+            {
+                const auto p = value<Address>(t.bar_script + t.bar_proj_at);
+                if (const auto bar = resolve(p) ? resolve(p) : p; bar && readable(bar, 0x100))
+                    t.bar_object = bar;
+            }
+            std::vector<std::pair<Address, unsigned>> setting_parts, bar_parts;
+            if (t.bar_template)
+                bar_reach(t.bar_template, 4, 2000, setting_parts);
+            if (t.bar_object)
+                bar_reach(t.bar_object, 5, 3000, bar_parts);
+            std::set<Address> setting;
+            for (const auto &[a, depth] : setting_parts)
+                setting.insert(a);
+            std::vector<std::pair<Address, bool>> parents, healths;
+            std::ostringstream parts;
+            unsigned named = 0;
+            for (const auto &[a, depth] : bar_parts)
+            {
+                if (!typed(a, 0x161cf98))
+                    continue;
+                const auto name = printable_text(value<Address>(a + 0x30));
+                if (name.empty())
+                    continue;
+                const bool in_setting = setting.count(a) != 0 || a == t.setting_health_bar;
+                if (name == "BarParent")
+                    parents.emplace_back(a, in_setting);
+                else if (name == "HealthBar")
+                    healths.emplace_back(a, in_setting);
+                if (!in_setting && named++ < 30)
+                    parts << "\nBoss bar part: " << name << " (depth " << depth << ") x " << value<float>(a + 0x68) << " y " << value<float>(a + 0x6c) << " width "
+                          << value<float>(a + 0x98) << " height " << value<float>(a + 0x9c) << " scale " << value<float>(a + 0x8c) << " " << value<float>(a + 0x90);
+            }
+            // the bar's own: not its setting's (then, as the setting's BarParent is the full 1040, a narrower BarParent)
+            const auto pick = [](const std::vector<std::pair<Address, bool>> &list, bool parent) {
+                Address best = 0;
+                int best_score = -1;
+                for (const auto &[a, in_setting] : list)
+                {
+                    const int score = (in_setting ? 0 : 2) + (parent && std::abs(value<float>(a + 0x98) - 1040.0f) > 0.5f ? 1 : 0);
+                    if (score > best_score)
+                        best = a, best_score = score;
+                }
+                return best;
+            };
+            t.bar_parent = pick(parents, true);
+            t.health_bar = pick(healths, false);
+            const auto brief = [&](const std::vector<std::pair<Address, bool>> &list, Address chosen) {
+                std::ostringstream out;
+                for (const auto &[a, in_setting] : list)
+                    out << " 0x" << std::hex << a << std::dec << (in_setting ? " (the setting's)" : "") << (a == chosen ? " (this one)" : "");
+                return out.str();
+            };
+            std::cout << "Boss bar parts: " << bar_parts.size() << " objects from the bar, " << setting_parts.size() << " from its setting; BarParent" << brief(parents, t.bar_parent)
+                      << "; HealthBar" << brief(healths, t.health_bar);
+            if (t.health_bar)
+                std::cout << ", made with sideways scale " << value<float>(t.health_bar + 0x8c);
+            std::cout << parts.str() << "\n" << std::flush;
+        }
+        // a /bar_try's change back while it's still ours
+        void bar_parts_back_try(BossTuning &t)
+        {
+            if (t.try_at && typed(t.try_part, 0x161cf98) && std::abs(value<float>(t.try_at) - t.try_written) < 0.0001f)
+                write(t.try_at, t.try_game);
+            t.try_at = t.try_part = 0, t.try_target = 0;
+        }
+        // the setting's HealthBar back as the game had it (it's kept between levels), and a /bar_try's change while it's still ours
+        void bar_parts_back(BossTuning &t)
+        {
+            if (t.setting_written && bar_part_ok(t.setting_health_bar, 0x161cf98, 0x30, "HealthBar"))
+            {
+                write(t.setting_health_bar + 0x8c, 1.0f);
+                std::cout << "Boss bar: the setting's HealthBar's sideways scale back to 1\n" << std::flush;
+            }
+            t.setting_written = false;
+            bar_parts_back_try(t);
+        }
+        // V1.3.28 research: the bar's own count. V1.3.27's clips and log: the blue ends on the notch marks one notch short
+        // of his hits left (at 300 health on the 2nd mark, 200 on the 1st), a landing on red took a notch off for good (his
+        // health was put back, the bar's count wasn't), and the bar went away with two hits left. Each time the blue's length
+        // (BarParent's width) settles at a new value it goes to the log with his health, and what changed in the bar's
+        // objects since the last time: the numbers that moved like a count (by 1), a health (by 100), a fraction (a tenth or
+        // a ninth) or a notch (80 to 130 long)
+        void bar_research(BossTuning &t, std::uint64_t now)
+        {
+            const float w = value<float>(t.bar_parent + 0x98);
+            if (!std::isfinite(w))
+                return;
+            if (std::abs(w - t.w_settling) > 0.01f)
+            {
+                t.w_settling = w, t.w_since = now;
+                return;
+            }
+            if (now - t.w_since < 600 || std::abs(w - t.w_seen) < 0.01f)
+                return;
+            const float before = t.w_seen;
+            t.w_seen = w;
+            const int health = t.papu && typed(t.papu, 0x1592220) && health_getter_ok() ? actor_health(t.papu) : -1;
+            if (t.w_lines < 40)
+                ++t.w_lines, std::cout << "Boss bar research: the blue's length (BarParent) " << before << " -> " << w << " (his health " << health << ")\n" << std::flush;
+            // (V1.3.29: the diffs found the bar's count, see bar_count; only the length is logged now)
+            constexpr bool snapshots = false;
+            if (!snapshots || t.snap_diffs >= 8)
+                return;
+            if (t.snap_objects.empty())
+            {
+                std::vector<std::pair<Address, unsigned>> found;
+                bar_reach(t.bar_object, 5, 3000, found);
+                for (const auto &[a, depth] : found)
+                    t.snap_objects.push_back(a);
+            }
+            std::vector<std::uint32_t> words(t.snap_objects.size() * 0x80), one(0x80);
+            for (std::size_t k = 0; k < t.snap_objects.size(); ++k)
+                if (read(t.snap_objects[k], one))
+                    std::copy(one.begin(), one.end(), words.begin() + static_cast<std::ptrdiff_t>(k * 0x80));
+            if (!t.snap_words.empty() && t.snap_words.size() == words.size())
+            {
+                ++t.snap_diffs;
+                std::ostringstream out;
+                unsigned shown = 0, moved = 0;
+                for (std::size_t i = 0; i < words.size(); ++i)
+                {
+                    const auto a = t.snap_words[i], b = words[i];
+                    if (a == b)
+                        continue;
+                    const int da = static_cast<int>(b) - static_cast<int>(a);
+                    float fa = 0, fb = 0;
+                    std::memcpy(&fa, &a, 4), std::memcpy(&fb, &b, 4);
+                    const float df = std::abs(fb - fa);
+                    const bool count = (da == 1 || da == -1 || da == 100 || da == -100) && std::abs(static_cast<int>(a)) < 100000;
+                    const bool decimal = std::isfinite(fa) && std::isfinite(fb) && std::abs(fa) < 100000 && std::abs(fb) < 100000 && std::abs(fa) > 1e-6f &&
+                                         (std::abs(df - 100) < 1 || std::abs(df - 1) < 0.01f || std::abs(df - 0.1f) < 0.002f || std::abs(df - 1.0f / 9) < 0.002f ||
+                                          (df > 80 && df < 130));
+                    if (!count && !decimal)
+                        continue;
+                    ++moved;
+                    if (shown++ >= 30)
+                        continue;
+                    const auto k = i / 0x80;
+                    const auto vt = value<Address>(t.snap_objects[k]);
+                    out << "\nBoss bar research: #" << k << " 0x" << std::hex << t.snap_objects[k] << std::dec
+                        << (vt >= base() && vt < module_end() ? " type " + hex(static_cast<unsigned>(vt - base())) : std::string()) << " +" << hex(static_cast<unsigned>((i % 0x80) * 4))
+                        << " " << (count ? std::to_string(static_cast<int>(a)) + " -> " + std::to_string(static_cast<int>(b)) : std::string()) << (decimal ? " (decimal " : "")
+                        << (decimal ? std::to_string(fa) + " -> " + std::to_string(fb) + ")" : std::string());
+                }
+                std::cout << "Boss bar research: " << moved << " numbers in the bar's " << t.snap_objects.size() << " objects moved like a count, a health or a notch"
+                          << out.str() << "\n" << std::flush;
+            }
+            t.snap_words = std::move(words);
+        }
+        // V1.3.29: the bar's own count of notches left. V1.3.28's research: two of the bar's objects (one of type
+        // +0x1623970 at +0xb4, one of type +0x1622be8 at +0x104) count down from 9, the most notches the bar draws, with each
+        // hit the game takes (a landing on red too), the blue is laid out from it, and at 0 the bar empties and goes away:
+        // with his 10 hits, one hit early (two with a landing on red that counted). So it's kept at his hits left, 9 at
+        // most: the bar lasts until his last hit, and a notch a landing on red took comes back. The places are found when
+        // the fight starts (at his full health) and used once each was seen to count one down at his first hit
+        bool papu_send_find(PapuSend &s, Address taker_entity, const char *taker_script, Address sender, const char *id, std::size_t values)
+        {
+            if (s.searched)
+                return s.message && s.args && s.sender == sender;
+            s.searched = true, s.sender = sender;
+            for (const auto &[c, script] : entity_scripts(taker_entity, 256))
+            {
+                if (script != taker_script || s.message)
+                    continue;
+                for (const auto delegator : list(value<Address>(value<Address>(c + 56) + 160), 128))
+                {
+                    const auto m = value<Address>(delegator + 24), to = value<Address>(delegator + 32);
+                    if (typed(delegator, 0x13bc268) && typed(m, 0x17b6578) && typed(to, 0x13bbcb8) &&
+                        string(value<Address>(m + 16), 120).find(std::string("_id_") + id) != std::string::npos)
+                    {
+                        s.message = m, s.target = to;
+                        break;
+                    }
+                }
+            }
+            if (s.message && sender)
+                for (const auto node : aku_send_nodes(value<Address>(sender + 56), s.message))
+                {
+                    const auto list_at = value<Address>(node + 32);
+                    if (typed(node, 0x13bc390) && value<Address>(node + 16) == s.message && typed(list_at, 0x1745070) && list(list_at, 16).size() == values)
+                    {
+                        s.args = list_at;
+                        break;
+                    }
+                }
+            std::cout << "Boss rule: his " << id << " (to his " << taker_script << ") " << (s.message ? "found" : "not found") << ", its values "
+                      << (s.args ? "found" : "not found") << "\n" << std::flush;
+            return s.message && s.args;
+        }
+        bool papu_send(const PapuSend &s)
+        {
+            const bool sender_ok = event_hook.installed || code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0});
+            if (!sender_ok || !s.message || !s.args || !typed(s.sender, 0x13bbbd0) || !typed(s.message, 0x17b6578) || !typed(s.args, 0x1745070))
+                return false;
+            std::array<Address, 11> own{base() + 0x13bc390, 0, s.message, s.target, s.args};
+            std::array<Address, 6> context{s.sender};
+            reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(reinterpret_cast<Address>(own.data()), reinterpret_cast<Address>(context.data()));
+            return true;
+        }
+        Address papu_timer(const BossTuning &t);
+        // V1.3.32: the bar filled back up the game's own way: the message his AI sends his health script when Crash dies and
+        // the fight starts over (hdq20ywc; V1.3.31's log: as his health script takes it, his health and the bar's count go
+        // back to full), sent from a node of our own with the values his AI's own node gives it. Then his health goes back
+        // to what it was (his health part's damage, +0x310), and his immunity too if it stopped
+        bool bar_refill(BossTuning &t, std::uint64_t now)
+        {
+            if (!t.papu_ai || !typed(t.health_part, 0x14da2c0) || !papu_send_find(t.refill_send, t.papu, "common_BossHealthHandler", t.papu_ai, "hdq20ywc", 4))
+                return false;
+            const int damage = value<int>(t.health_part + 0x310), health = actor_health(t.papu);
+            const auto timer = papu_timer(t);
+            const float countdown = timer ? value<float>(timer + 0x50) : 0.0f;
+            const auto flags = value<std::uint32_t>(t.papu + 0x7c);
+            if (!papu_send(t.refill_send))
+                return false;
+            std::ostringstream line;
+            line << "Boss bar: filled back up his health script's own way (hdq20ywc)";
+            if (value<int>(t.health_part + 0x310) != damage)
+                write(t.health_part + 0x310, damage), line << "; his damage back to " << damage;
+            line << "; his health " << health << " -> " << actor_health(t.papu);
+            if (timer && countdown > 0.1f && value<float>(timer + 0x50) < 0.05f)
+                write(timer + 0x50, countdown), line << "; his immunity had stopped: its timer back to " << countdown << " s";
+            if (const auto after = value<std::uint32_t>(t.papu + 0x7c); (after & 0x8) && !(flags & 0x8))
+                write(t.papu + 0x7c, after & ~0x8u), line << "; his can-be-hit flag clear again";
+            std::cout << line.str() << "\n" << std::flush;
+            (void)now;
+            return true;
+        }
+        // V1.3.32: V1.3.30's clips and V1.3.31's log: the bar only redraws as it's hit, so a count put back (V1.3.29) or a
+        // length written (V1.3.30) didn't show until his next hit, which then stepped down from full to the same notch.
+        // Now when the bar is short of his hits left and he has the bar's most or more left (his first hit with more hits
+        // than its 9 notches; a hit on him while he's red at the fight's start, taken back), the bar is filled back up the
+        // game's own way (see bar_refill), which redraws it full. Otherwise the count alone goes back, as in V1.3.29
+        void bar_count(BossTuning &t, std::uint64_t now)
+        {
+            if (!t.papu || !t.bar_object || !t.bar_parent || t.bar_hits < 1 || !typed(t.papu, 0x1592220) || !health_getter_ok())
+                return;
+            const int most = std::min(t.bar_hits, 9), health = actor_health(t.papu);
+            // (a place that's no longer what it was: the bar was made again; looked for again)
+            for (const auto &[a, off] : t.count_places)
+                if (!typed(a, off == 0xb4 ? 0x1623970 : 0x1622be8))
+                {
+                    t.count_places.clear(), t.count_last.clear();
+                    t.count_searched = t.count_checked = false, t.count_since = now;
+                    break;
+                }
+            if (!t.count_searched)
+            {
+                if (health != t.bar_hits * 100)
+                    return;
+                t.count_searched = true, t.count_checked = false;
+                std::vector<std::pair<Address, unsigned>> found;
+                bar_reach(t.bar_object, 5, 3000, found);
+                for (const auto &[a, depth] : found)
+                {
+                    if (typed(a, 0x1623970) && value<int>(a + 0xb4) == most)
+                        t.count_places.emplace_back(a, 0xb4);
+                    else if (typed(a, 0x1622be8) && value<int>(a + 0x104) == most)
+                        t.count_places.emplace_back(a, 0x104);
+                }
+                t.count_last.clear();
+                for (const auto &[a, off] : t.count_places)
+                    t.count_last.push_back(value<int>(a + off));
+                t.count_since = now;
+                probe_count_at = t.count_places.empty() ? 0 : t.count_places[0].first + t.count_places[0].second;
+                if (t.count_lines < 30)
+                    ++t.count_lines, std::cout << "Boss bar: its own count of notches left found in " << t.count_places.size() << " places (" << most << ", at his full health)\n"
+                                               << std::flush;
+                return;
+            }
+            if (t.count_places.empty())
+                return;
+            const auto count_at = [&](std::size_t i) { return value<int>(t.count_places[i].first + t.count_places[i].second); };
+            if (!t.count_checked)
+            {
+                // his first hit: a count goes one down (anything else: not a count, dropped)
+                bool changed = false;
+                for (std::size_t i = 0; i < t.count_places.size(); ++i)
+                    changed = changed || count_at(i) != t.count_last[i];
+                if (!changed)
+                    return;
+                t.count_checked = true, t.count_since = now;
+                std::vector<std::pair<Address, unsigned>> kept;
+                std::vector<int> last;
+                for (std::size_t i = 0; i < t.count_places.size(); ++i)
+                    if (count_at(i) == most - 1)
+                        kept.push_back(t.count_places[i]), last.push_back(most - 1);
+                if (t.count_lines < 30)
+                    ++t.count_lines, std::cout << "Boss bar: at his first hit " << kept.size() << " of the " << t.count_places.size() << " places counted one down\n" << std::flush;
+                t.count_places = std::move(kept), t.count_last = std::move(last);
+                probe_count_at = t.count_places.empty() ? 0 : t.count_places[0].first + t.count_places[0].second;
+                return;
+            }
+            if (t.count_places.empty())
+                return;
+            const int target = std::min(most, std::clamp((health + 99) / 100, 0, 1000));
+            bool short_of = false;
+            for (std::size_t i = 0; i < t.count_places.size(); ++i)
+                if (const int v = count_at(i); v < target && v >= 0)
+                    short_of = true;
+            // short of a full bar with a full bar's hits or more left: filled back up the game's way (and seen to be)
+            if (short_of && target == most && now - t.refill_at >= 1500 && t.refills < 24)
+            {
+                t.refill_at = now, ++t.refills;
+                const int before = count_at(0);
+                if (bar_refill(t, now) && t.count_lines < 30)
+                    ++t.count_lines, std::cout << "Boss bar: its count after the refill " << before << " -> " << count_at(0) << " (his health " << actor_health(t.papu) << ")\n"
+                                               << std::flush;
+            }
+            for (std::size_t i = 0; i < t.count_places.size(); ++i)
+            {
+                const auto [a, off] = t.count_places[i];
+                if (const int v = count_at(i); v < target && v >= 0)
+                {
+                    write(a + off, target);
+                    if (t.count_lines < 30)
+                        ++t.count_lines, std::cout << "Boss bar: its count " << v << " -> " << target << " (his health " << health << "; it shows once he's hit again)\n" << std::flush;
+                }
+                t.count_last[i] = count_at(i);
+            }
+        }
+        void stretch_bar_fill(BossTuning &t, const Shared &state, std::uint64_t now)
+        {
+            if (!t.bar_object)
+                return;
+            if (!t.parts_searched && t.bar_found_at && now - t.bar_found_at > 300)
+                find_bar_parts(t);
+            if (!bar_part_ok(t.bar_parent, 0x161cf98, 0x30, "BarParent"))
+            {
+                // (gone, or not found yet: looked for again every 3 seconds, a few times)
+                if (t.parts_searched && t.parts_searches < 6 && now >= t.parts_at)
+                {
+                    bar_parts_back_try(t);
+                    t.parts_searched = false, t.parts_at = now + 3000, t.bar_parent = t.health_bar = 0;
+                }
+                return;
+            }
+            const float width = value<float>(t.bar_parent + 0x98);
+            if (std::isfinite(width) && width > t.fill_full && width < 5000)
+                t.fill_full = width;
+            bar_research(t, now);
+            bar_count(t, now);
+            // the bar's own HealthBar as wide as its setting's (a bar made before the setting changed gets it at its next
+            // layout: his first hit, or a death); not with /bar_try none, to compare
+            const float stretch = state.bar_try_target == 1 ? 1.0f : bar_stretch(t.bar_game_hits, t.bar_hits);
+            if (bar_part_ok(t.health_bar, 0x161cf98, 0x30, "HealthBar"))
+            {
+                const float has = value<float>(t.health_bar + 0x8c);
+                if (std::isfinite(has) && has > 0.3f && has < 4.0f && std::abs(has - stretch) > 0.0005f)
+                {
+                    write(t.health_bar + 0x8c, stretch);
+                    if (t.fill_logs++ < 12)
+                        std::cout << "Boss bar: HealthBar's sideways scale " << has << " -> " << stretch << " (the blue is painted for the game's " << t.bar_game_hits
+                                  << " notches; the bar has " << t.bar_hits << ", " << t.fill_full << " long)\n" << std::flush;
+                }
+            }
+            // /bar_try scale (V1.3.24 test): BarParent's sideways scale times the factor (the bar's growth unless one is
+            // given), kept until /bar_try off
+            const unsigned target = state.bar_try_target == 3 ? 3u : 0u;
+            if (target != t.try_target)
+            {
+                bar_parts_back_try(t);
+                t.try_target = target;
+                if (target)
+                {
+                    const float factor = state.bar_try_factor > 0.1f ? state.bar_try_factor : std::max(bar_stretch(t.bar_game_hits, t.bar_hits), 1.5f);
+                    t.try_part = t.bar_parent, t.try_at = t.bar_parent + 0x8c, t.try_game = value<float>(t.try_at), t.try_written = t.try_game * factor;
+                    write(t.try_at, t.try_written);
+                    std::cout << "Boss bar try: BarParent's sideways scale " << t.try_game << " -> " << t.try_written << "\n" << std::flush;
+                }
+            }
+            else if (t.try_at && typed(t.try_part, 0x161cf98) && std::abs(value<float>(t.try_at) - t.try_game) < 0.0001f && std::abs(t.try_written - t.try_game) > 0.0001f)
+                write(t.try_at, t.try_written); // (the game put its own back)
+        }
+        // health: the boss himself (his health bar has his name), not the lions or blobs he sends; not N. Gin's mechs (both
+        // only get faster), not Cortex's chase in Crash 2 (more health can't be beaten in time), and of Brio only his
+        // last form (his first phase stays). Done again whenever the fight starts over (a death resets the boss to the
+        // game's health).
+        // V1.3.15: his bar grows to match. His HitCount (the bar's notches; his health script makes maxHealth HitCount x
+        // 100 when it starts) goes up with the percent as soon as he's there, and once his script has started, his actor's
+        // health (+0xf8, what the bar's fill and the game count) goes up to the same. V1.3.5 changed only HitCount: the bar
+        // grew but his health stayed the game's, so it was half full. V1.3.6 to V1.3.14 left HitCount alone and raised
+        // only his health and maxHealth: right health, the game's notches
+        // V1.3.16: his health part's own full health. V1.3.15's log and screenshot: with HitCount, maxHealth and his actor's
+        // health all at 1000, the bar had 10 notches but was only half full: the fill counts from a health of the game's
+        // (500) somewhere else. His health part (+0x14da2c0) keeps the damage taken (+0x310); the one number in it that is
+        // the game's full health goes up to ours. With more than one candidate, none is changed (they go to the log).
+        // Also research: the numbers equal to his hits or health in his actor, his health part and his bar
+        void grow_health_part(BossTuning &t, Address owner, Address bar, const std::string &name, int original, int target)
+        {
+            std::vector<std::pair<Address, std::string>> places{{owner, "his actor"}};
+            for (const auto c : list(value<Address>(owner + 24), 128))
+                if (typed(c, 0x14da2c0))
+                    places.emplace_back(c, "his health part");
+            if (bar)
+            {
+                places.emplace_back(bar, "his bar");
+                for (const unsigned off : {0x10u, 0x18u, 0x90u, 0xa0u})
+                    if (const auto p = value<Address>(bar + off); p && readable(p, 0x100))
+                        places.emplace_back(p, "his bar's +" + hex(off));
+            }
+            const int game = original * 100;
+            std::ostringstream found;
+            std::vector<std::pair<Address, unsigned>> candidates;
+            bool damaged = false;
+            for (const auto &[place, label] : places)
+            {
+                std::vector<std::uint32_t> words(0x400 / 4);
+                if (!read(place, words))
+                    continue;
+                const bool health_part = typed(place, 0x14da2c0);
+                if (health_part && words[0x310 / 4] != 0)
+                    damaged = true;
+                for (std::size_t i = 2; i < words.size(); ++i)
+                {
+                    const int v = static_cast<int>(words[i]);
+                    float f = 0;
+                    std::memcpy(&f, &words[i], 4);
+                    const bool whole = v == original || v == game || v == target || v == target / 100;
+                    const bool decimal = f == static_cast<float>(game) || f == static_cast<float>(target) || f == static_cast<float>(original) || f == static_cast<float>(target / 100);
+                    if (!whole && !decimal)
+                        continue;
+                    found << " " << label << " +" << hex(static_cast<unsigned>(i * 4)) << "=" << (whole ? std::to_string(v) : std::to_string(f));
+                    if (health_part && (v == game || f == static_cast<float>(game)))
+                        candidates.emplace_back(place, static_cast<unsigned>(i * 4));
+                }
+            }
+            tell_once(t, "numbers" + name + std::to_string(target), "Boss research: " + name + "'s numbers like his hits or health:" + found.str());
+            if (damaged)
+                return;
+            if (candidates.size() == 1)
+            {
+                const auto at = candidates[0].first + candidates[0].second;
+                const bool whole = value<int>(at) == game;
+                if (whole)
+                    write(at, target);
+                else
+                    write(at, static_cast<float>(target));
+                std::cout << "Boss health: " << name << "'s health part's full health " << game << " -> " << target << " (+" << hex(candidates[0].second)
+                          << (whole ? "" : ", decimal") << "), for his bar's fill\n" << std::flush;
+            }
+            else if (candidates.size() > 1)
+                tell_once(t, "parts" + name, "Boss health: " + name + "'s health part has " + std::to_string(candidates.size()) + " numbers at the game's health; none changed");
+        }
+        std::map<std::string, int> game_hits;
+        bool boss_hits_changed = false; // a HitCount was changed this game session (it's put back at 100%)
+        // (V1.3.21: grow says whether the notches grow too, /boss_bar; the health is ours either way)
+        void tune_boss_health(BossTuning &t, const std::string &boss, Address owner, const std::string &name, Address c, unsigned percent, bool grow)
+        {
+            const auto data = value<Address>(c + 16);
+            if (!typed(data, 0x13bbb10))
+                return;
+            const auto dmeta = value<Address>(data + 32), meta = value<Address>(c + 56);
+            const unsigned hit_at = field_offset(dmeta, "HitCount", 4), name_at = field_offset(dmeta, "GuiBossName", 8), max_at = field_offset(meta, "maxHealth", 4);
+            if (!hit_at || !max_at)
+            {
+                tell_once(t, "layout" + name, "Boss health: " + name + "'s health script isn't laid out as expected (HitCount " + std::to_string(hit_at) +
+                                                  ", maxHealth " + std::to_string(max_at) + ")");
+                return;
+            }
+            // the game's count, as first seen in this game session (his settings can stay loaded from one visit to the next,
+            // with ours in them)
+            auto it = game_hits.find(boss + "|" + name);
+            if (it == game_hits.end())
+                it = game_hits.emplace(boss + "|" + name, value<int>(data + hit_at)).first;
+            const int original = it->second;
+            if (original < 1 || original > 50)
+                return;
+            if (name.find("PapuPapu") != std::string::npos)
+                t.papu_original = original;
+            const bool eligible = value<Address>(data + name_at) && boss != "B204" && boss != "B304" && boss != "B205" &&
+                                  (boss != "B105" || name.find("Hulk") != std::string::npos);
+            // (V1.3.33, Eric: "we'll just make it 9 the most for now": the bar draws 9 notches at most, so a 10th hit can't show)
+            // V1.3.41 (Eric: "200 is for 10 hits, but as of right now, that doesn't make sense for 200... just make it to 25%"):
+            // 200% is the most hits (twice the game's, 9 at most), and the steps up to it are even, one more hit each time
+            // the next step is reached: Papu Papu's 5 hits are 6 at 125%, 7 at 150%, 8 at 175% and 9 at 200% (V1.3.33 to
+            // V1.3.40 rounded the game's hits times the percent, so 9 came at 170% already)
+            const int top = std::max(original, std::min(9, original * 2));
+            const int extra = std::max(0, static_cast<int>(percent) - 100) * (top - original) / 100;
+            const int hits = eligible ? std::clamp(original + extra, original, top) : original;
+            const int notches = grow ? hits : original;
+            const int max_health = value<int>(c + max_at);
+            if (const int was = value<int>(data + hit_at); was != notches)
+            {
+                write(data + hit_at, notches), boss_hits_changed = boss_hits_changed || notches != original;
+                // research (V1.3.20): when the count changes, and whether his health script had started by then
+                std::cout << "Boss health: " << name << "'s HitCount " << was << " -> " << notches << ", " << seconds(GetTickCount64() - t.entered)
+                          << " into the level; his health script " << (max_health > 0 ? "had started (maxHealth " + std::to_string(max_health) + ")" : std::string("hadn't started"))
+                          << "\n" << std::flush;
+            }
+            // (V1.3.25) the bar's setting's blue as much wider as the bar grows, before his bar is made from it (see
+            // game_bar_width); back to the game's when it doesn't grow
+            // (only from the boss whose bar it is: Brio's first form keeps the game's hits)
+            if (eligible && (notches > original || t.setting_written))
+                stretch_bar_setting(t, data, bar_stretch(original, notches));
+            if (max_health <= 0)
+                return; // not started yet
+            watch_boss_bar(t, c, name, original, eligible ? notches : original);
+            if (!eligible)
+            {
+                tell_once(t, "same" + name, "Boss health: " + name + " keeps his " + std::to_string(original) + " hits");
+                return;
+            }
+            const int target = hits * 100;
+            const bool actor = typed(owner, 0x1592220) && health_getter_ok();
+            const int health = actor ? actor_health(owner) : -1, raw = value<int>(owner + 0xf8);
+            if (hits == original)
+                return; // nothing to do
+            if (actor && max_health == target && raw == target)
+            {
+                // done (his script made them from our count); his health part's own full health too
+                if (health == raw)
+                {
+                    const auto at = field_offset(meta, "guiBossHealthbarProj", 8);
+                    const auto p = at ? value<Address>(c + at) : 0;
+                    grow_health_part(t, owner, resolve(p) ? resolve(p) : p, name, original, target);
+                }
+                return;
+            }
+            // only while he's at full health (the game's, or ours): a hit taken already stays taken
+            if (!actor || health != raw || (raw != original * 100 && raw != target) || (max_health != original * 100 && max_health != target))
+            {
+                tell_once(t, "notfull" + name + std::to_string(health) + "/" + std::to_string(max_health),
+                          "Boss health: " + name + " left as he is (" + (actor ? "health " + std::to_string(health) + ", +0xf8 " + std::to_string(raw) : std::string("not an actor")) +
+                              ", maxHealth " + std::to_string(max_health) + ")");
+                return;
+            }
+            // his script started with our count: the bar has our notches. If it started before (the game's count), the
+            // health is still ours but the bar keeps the game's notches
+            const bool grown = max_health == target;
+            write(c + max_at, target);
+            write(owner + 0xf8, target);
+            std::cout << "Boss health: " << name << " " << original << " hits -> " << hits << " (" << percent << "%): health " << health << " -> "
+                      << actor_health(owner) << ", maxHealth " << value<int>(c + max_at) << "; his bar "
+                      << (grown ? "has " + std::to_string(hits) + " notches"
+                                : "keeps the game's " + std::to_string(original) + " notches" + (grow ? std::string(" (his script started before the count changed)") : std::string()))
+                      << "\n" << std::flush;
+        }
+        // V1.3.28: Papu Papu's immunity after a hit, the game's own (his health script's OnTakeHitImmuneTime, which the
+        // game leaves at 0 for him), for as long as he's red at the start: his get-up (2.6 s), his wait (1.3 s) and the
+        // start of his next spin, when he could be hit (up to 1 s in). So a landing on him while he's red is what the game
+        // does while a boss can't be hit: hopefully his deflect script bounces Crash off, and he isn't hurt and doesn't
+        // flinch (V1.3.27: the landing was a real hit for the game, taken back after: he flinched, and his health bar
+        // took a notch off that stayed off). The game's value is kept (his settings can stay loaded from one visit to the
+        // next) and put back with the rules off
+        // V1.3.30: V1.3.29's log: holding his actor's flag kept the deflect script off him but not his health script (a
+        // landing 6 s after the hit was a hit again), and V1.3.28's 5.5 s was shorter than his red time. So his red time
+        // is the game's immunity itself: set before each hit to last through his get-up (2.6 s), his wait (1.3 s) and
+        // his next spin (about 1.3 s a lap, with the lap count the game's pace gives it after that hit, see the pace in
+        // papu_rule) and a second more, and he's red for as long as it lasts (see papu_rule)
+        float papu_red_time(const BossTuning &t)
+        {
+            int laps = t.papu_ai && t.laps_total_at ? value<int>(t.papu_ai + t.laps_total_at) + 1 : 4;
+            if (t.starts_known && t.papu_original > 1 && t.laps_total_at && typed(t.papu, 0x1592220) && health_getter_ok())
+            {
+                const int max = value<int>(t.papu + 0xf8), total = max / 100, health = actor_health(t.papu);
+                if (total > t.papu_original)
+                {
+                    const int taken = std::clamp((max - health + 50) / 100 + 1, 0, total - 1); // (after his next hit)
+                    laps = t.laps_start + taken * (t.papu_original - 1) / (total - 1);
+                }
+            }
+            return std::clamp(7.5f + 1.5f * static_cast<float>(std::clamp(laps, 1, 12)), 8.0f, 18.0f);
+        }
+        std::map<std::string, float> game_immune;
+        bool boss_immune_changed = false;
+        void papu_immunity(BossTuning &t, Address c, const std::string &name, bool on, std::uint64_t now)
+        {
+            const auto data = value<Address>(c + 16);
+            if (!typed(data, 0x13bbb10))
+                return;
+            // (for the research on his health script's timer, see papu_rule)
+            if (t.hh != c)
+                t.hh = c, t.hh_timer_at = field_offset(value<Address>(c + 56), "_Internal_TimerAction_id_5s6p54hm_timer", 8);
+            const auto field = field_named(value<Address>(data + 32), "OnTakeHitImmuneTime");
+            if (!field || value<Address>(field) != base() + 0x17afe98 || value<std::uint16_t>(field + 22) != 4)
+            {
+                tell_once(t, "immune" + name, "Boss rule: " + name + "'s health script has no decimal OnTakeHitImmuneTime");
+                return;
+            }
+            const auto at = data + value<std::uint16_t>(field + 24);
+            auto it = game_immune.find(name);
+            if (it == game_immune.end())
+                it = game_immune.emplace(name, value<float>(at)).first;
+            const float game = it->second;
+            if (!std::isfinite(game) || game < 0 || game > 60)
+                return;
+            // (the length for his next hit only once the immunity of his last hit is over, the old length and the new: so
+            // the length of a hit is the one papu_rule read as he was hit, whether the game reads it once at the hit or as
+            // the immunity goes; and not while his health has just changed, as papu_rule may not have seen that hit yet)
+            if (const int health = typed(t.papu, 0x1592220) && health_getter_ok() ? actor_health(t.papu) : -1; health != t.immune_health)
+                t.immune_health = health, t.immune_health_at = now;
+            const float want = on ? std::max(game, papu_red_time(t)) : game, has = value<float>(at);
+            const float longest = std::clamp(std::isfinite(has) ? std::max(has, want) : want, 0.0f, 60.0f);
+            const bool safe = !on || ((!t.game_hit_at || now - t.game_hit_at >= static_cast<std::uint64_t>((longest + 0.3f) * 1000)) && now - t.immune_health_at >= 300);
+            if (safe && std::isfinite(has) && std::abs(has - want) > 0.05f)
+            {
+                write(at, want);
+                std::cout << "Boss rule: " << name << "'s immunity after his next hit (OnTakeHitImmuneTime) " << has << " -> " << want << " s"
+                          << (on ? " (he's red, and can't be hit, for as long as it lasts)" : " (the game's)") << "\n" << std::flush;
+            }
+            t.immune_at = on ? at : 0;
+            boss_immune_changed = on && want != game;
+        }
+        // speed: the settings known to set a boss's pace. A speed or speed multiplier goes up by the percent, a wait goes
+        // down by it
+        struct BossPace
+        {
+            const char *script, *field;
+            bool bigger_is_faster;
+        };
+        // (V1.3.34) the game's own value of each of those settings, by script and setting, as first seen while the game runs:
+        // the settings can stay loaded from one visit to the next (see papu_immunity), and a speed worked out from an already
+        // changed value would grow with each visit. And whether any was changed (at 100% they're put back)
+        std::map<std::string, float> game_pace;
+        bool boss_pace_changed = false;
+        void tune_boss_speed(BossTuning &t, Address c, const std::string &name, const std::string &script, unsigned percent)
+        {
+            // (V1.3.34: Papu Papu's spin speed is his AI's own, set in papu_rule, and his waits are his AI's timers, cut in
+            // papu_speed_timers: his settings for them stay the game's, or a wait read from them would be cut twice)
+            static const BossPace paces[]{
+                {"BossPapuPapu_AiHandler", "IntroMoveSpeedMultiplier", true},
+                // N. Gin (Crash 3), his second mech: each step of his attack list and its wait
+                {"BossNGin_C3Mech02_AttackPatternAction", "Float_id_lyh5r6by", false},
+                // Brio: the wait before each potion of a stage, and his idle pauses
+                {"BossNBrio_BossStageAction", "DelayStart", false},
+                {"BossNBrio_IdleTimeOut", "TimeOutRangeMin", false},
+                {"BossNBrio_IdleTimeOut", "TimeOutRangeMax", false},
+            };
+            const auto data = value<Address>(c + 16);
+            if (!typed(data, 0x13bbb10))
+                return;
+            if (const auto done = t.timed.find(c); done != t.timed.end() && done->second == percent)
+                return;
+            const auto dmeta = value<Address>(data + 32);
+            bool any = false;
+            for (const auto &p : paces)
+            {
+                if (script != p.script)
+                    continue;
+                const auto field = field_named(dmeta, p.field);
+                if (!field || value<Address>(field) != base() + 0x17afe98 || value<std::uint16_t>(field + 22) != 4)
+                {
+                    tell_once(t, std::string("pace") + p.field, std::string("Boss speed: ") + script + " has no decimal " + p.field);
+                    continue;
+                }
+                const auto at = data + value<std::uint16_t>(field + 24);
+                const auto key = std::string(p.script) + "." + p.field;
+                auto it = game_pace.find(key);
+                if (it == game_pace.end())
+                    it = game_pace.emplace(key, value<float>(at)).first;
+                const float original = it->second, factor = percent / 100.0f;
+                const float now = p.bigger_is_faster ? original * factor : original / factor;
+                if (!std::isfinite(original) || original < 0 || original > 1000)
+                    continue;
+                write(at, now);
+                any = true;
+                boss_pace_changed = boss_pace_changed || percent != 100;
+                tell_once(t, std::string("pace") + script + p.field + std::to_string(original) + "/" + std::to_string(percent),
+                          "Boss speed: " + name + " " + script + " " + p.field + " " + std::to_string(original) + " -> " + std::to_string(now));
+            }
+            if (any)
+                t.timed[c] = percent;
+        }
+        // the red glow on Papu Papu: our own tint on his model (like the box tint), red while it's on
+        void boss_tint_off(BossTuning &t, bool remove)
+        {
+            if (!t.tint_bundle)
+                return;
+            if (remove && tint_api())
+            {
+                const bool alive = t.tint_model && resolve(t.tint_handle) == t.tint_model && typed(t.tint_model, 0x1676cb8);
+                const auto bundles = alive ? list(value<Address>(t.tint_model + 224), 64) : std::vector<Address>{};
+                if (std::find(bundles.begin(), bundles.end(), t.tint_bundle) != bundles.end())
+                    reinterpret_cast<void (*)(Address, Address)>(base() + 0xaf7370)(t.tint_model, t.tint_bundle);
+                release(t.tint_bundle);
+                model_handle(t.tint_handle, 0);
+                t.tint_bundle = t.tint_model = 0;
+            }
+            else
+                write(t.tint_bundle + 48, default_blend);
+        }
+        // a character's render model: as a crate's (+176, then +40), or (V1.3.4's log: Papu Papu's model part is another
+        // kind, +0x150df30) the first render model the model part points to, directly or through a handle
+        Address boss_model(BossTuning &t, Address entity)
+        {
+            if (const auto model = crate_model(entity))
+                return model;
+            const auto part = value<Address>(entity + 176);
+            if (!part || value<Address>(part + 32) != entity)
+                return 0;
+            for (unsigned off = 8; off < 0x200; off += 8)
+            {
+                const auto p = value<Address>(part + off);
+                for (const auto m : {p, resolve(p)})
+                    if (m && typed(m, 0x1676cb8))
+                    {
+                        tell_once(t, "modelat", "Boss rule: Papu Papu's model is at +" + hex(off) + " of his model part");
+                        return m;
+                    }
+            }
+            if (t.told.insert("nomodel").second)
+            {
+                std::cout << "Boss rule: no render model found in Papu Papu's model part (" << object_brief(part) << ")\n";
+                dump_pointees(part, "Boss rule: model part", 0x200);
+                std::cout << std::flush;
+            }
+            return 0;
+        }
+        void boss_tint(BossTuning &t, Address entity, bool red)
+        {
+            if (!tint_api())
+                return;
+            const auto model = boss_model(t, entity);
+            if (!model)
+                return;
+            if (t.tint_bundle && (t.tint_model != model || resolve(t.tint_handle) != model))
+                boss_tint_off(t, true);
+            if (!t.tint_bundle)
+            {
+                const auto bundle = reinterpret_cast<Address (*)(Address)>(base() + 0x882b0)(0);
+                if (!typed(bundle, 0x138da80))
+                    return;
+                retain(bundle);
+                Address handle = 0;
+                model_handle(handle, model);
+                if (resolve(handle) != model || !write(bundle + 32, default_tint))
+                {
+                    model_handle(handle, 0);
+                    release(bundle);
+                    return;
+                }
+                reinterpret_cast<void (*)(Address, Address)>(base() + 0xacd1c0)(model, bundle);
+                t.tint_model = model, t.tint_bundle = bundle, t.tint_handle = handle;
+                std::cout << "Boss rule: Papu Papu's glow is ready\n" << std::flush;
+            }
+            write(t.tint_bundle + 48, red ? boss_red : default_blend);
+        }
+        // Papu Papu's health is the actor's, kept at +0xf8 (what the getter returns)
+        bool papu_health_here(const BossTuning &t)
+        {
+            return typed(t.papu, 0x1592220) && health_getter_ok() && actor_health(t.papu) == value<int>(t.papu + 0xf8);
+        }
+        // a hit for Crash, the way Papu Papu's attack hits him (V1.3.5's log): his common_BossAttackDamageHandler sends
+        // Crash's damage script ha5y20l3 with seven values; Crash's damage and Aku Aku scripts do the rest (a mask, the
+        // hurt animation, or a life; nothing while he's invincible). Sent from a node of our own with the game's node's
+        // values (as the Nitro Trap's explosion is), from Papu Papu's attack script
+        // (not used from V1.3.14 to V1.3.22, see punish_crash; since V1.3.24 for the angel death, see replay_real_hit)
+        // the game's hit for Crash (once a visit): Crash's damage script's hit message (ha5y20l3) and its handler, Papu
+        // Papu's attack script, and its node that sends the hit, with which of his attack script's settings its values read
+        void find_real_hit(BossTuning &t)
+        {
+            const auto crash = player();
+            if (!crash || !t.papu || t.hit_searched)
+                return;
+            {
+                t.hit_searched = true;
+                // (V1.3.8 looked through Crash's first 64 scripts only, as for a crate; he has more)
+                Address message = 0, target = 0;
+                for (const auto c : list(value<Address>(crash + 24), 256))
+                {
+                    const auto meta = value<Address>(c + 56);
+                    if (message || !typed(c, 0x13bbbd0) || !typed(meta, 0x1745d78) || value<Address>(c + 24) != crash)
+                        continue;
+                    for (const auto delegator : list(value<Address>(meta + 160), 128))
+                    {
+                        const auto m = value<Address>(delegator + 24), to = value<Address>(delegator + 32);
+                        if (typed(delegator, 0x13bc268) && typed(m, 0x17b6578) && typed(to, 0x13bbcb8) &&
+                            string(value<Address>(m + 16), 120).find("_id_ha5y20l3") != std::string::npos)
+                        {
+                            message = m, target = to;
+                            break;
+                        }
+                    }
+                }
+                Address sender = 0;
+                for (const auto &[c, script] : entity_scripts(t.papu))
+                    if (script == "common_BossAttackDamageHandler")
+                        sender = c;
+                Address args = 0;
+                // the script sends ha5y20l3 from more than one node; the hit his attack gives (V1.3.5's log) has a damage
+                // value 4th (+0x1755c60) and an attack name 6th (+0x17483c0). V1.3.10 took another one: Crash's script
+                // didn't react
+                if (message && sender)
+                    for (const auto node : aku_send_nodes(value<Address>(sender + 56), message))
+                    {
+                        const auto list_at = value<Address>(node + 32);
+                        if (!typed(node, 0x13bc390) || value<Address>(node + 16) != message || !typed(list_at, 0x1745070))
+                            continue;
+                        const auto values = list(list_at, 16);
+                        const bool hit = values.size() == 7 && typed(values[3], 0x1755c60) && typed(values[5], 0x17483c0);
+                        // (V1.3.25 research) which of his attack script's settings each value reads: a field description of
+                        // the script's type among the value's (or what it points to's) first words
+                        std::ostringstream reads;
+                        std::vector<std::pair<unsigned, unsigned>> read_fields;
+                        if (hit)
+                        {
+                            const auto smeta = value<Address>(sender + 56);
+                            const auto count = value<unsigned>(smeta + 24);
+                            const auto fields = value<Address>(smeta + 40);
+                            for (std::size_t k = 0; k < values.size(); ++k)
+                                for (const auto place : {values[k], value<Address>(values[k] + 24)})
+                                    for (unsigned off = 0; place && off < 0x40; off += 8)
+                                        for (unsigned i = 0; fields && count <= 512 && i < count; ++i)
+                                            if (const auto field = value<Address>(fields + i * 8); field && value<Address>(place + off) == field)
+                                            {
+                                                reads << " value " << k << " reads " << string(value<Address>(field + 48), 64);
+                                                read_fields.emplace_back(value<std::uint16_t>(field + 24), value<std::uint16_t>(field + 22));
+                                            }
+                        }
+                        std::cout << "Boss rule: a sender of Crash's hit message in Papu Papu's attack script" << send_arguments(node) << (hit ? " (the hit)" : "")
+                                  << reads.str() << "\n";
+                        if (hit && !args)
+                            args = list_at, t.hit_reads = read_fields;
+                    }
+                std::cout << "Boss rule: the game's hit for Crash " << (message && target && sender && args ? "found" : "not found") << " (message "
+                          << (message ? "yes" : "no") << ", Papu Papu's attack script " << (sender ? "yes" : "no") << ", its values "
+                          << (args ? "yes" : "no") << ")\n" << std::flush;
+                if (message && target && sender && args)
+                    t.hit_message = message, t.hit_target = target, t.hit_args = args, t.hit_sender = sender;
+            }
+        }
+        bool boss_real_hit(BossTuning &t, std::ostream &out)
+        {
+            if (!player() || !t.papu)
+                return false;
+            find_real_hit(t);
+            // (with the message hook on, the sender's first bytes are the hook's jump)
+            const bool sender_ok = event_hook.installed || code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0});
+            if (!t.hit_message || !event_owner(t.papu) || !sender_ok)
+                return false;
+            std::cout << "Boss rule: sending Crash the game's hit ...\n" << std::flush;
+            std::array<Address, 11> own{base() + 0x13bc390, 0, t.hit_message, t.hit_target, t.hit_args};
+            std::array<Address, 6> context{t.hit_sender};
+            reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(reinterpret_cast<Address>(own.data()), reinterpret_cast<Address>(context.data()));
+            out << "; Crash takes the game's hit (Aku Aku takes it if he's there)";
+            return true;
+        }
+        // V1.3.25: the angel death for a landing while red without a mask: the game's hit message from his attack script, with
+        // the death it names (currCrashDeathBehaviorEvent) set to his attack's own (his data's CrashDeathDefaultBehaviorEvent,
+        // "Death_Common_Spin"), for the moment it's sent. V1.3.24's log: the message's values are the death's name (of the
+        // type +0x17a5098) and a yes/no, read from his attack script when it's sent; at rest the name is empty, which is why
+        // V1.3.13's message did nothing. (V1.3.24 put back everything his script held at a real hit, the damage too: that
+        // damage is made for each hit and gone right after, so it was never sent)
+        // V1.3.26: V1.3.25's log: the yes/no is isCrashHit_metaField_id_lsmgndbv (V1.3.25 set isCrashHit: Crash didn't die).
+        // So every setting the hit's values read is filled in: the death's name with his death, a yes/no with yes
+        std::pair<Address, Address> boss_death_behavior(Address boss);
+        bool replay_real_hit(BossTuning &t, std::ostream &out)
+        {
+            find_real_hit(t);
+            const auto sender = t.hit_sender;
+            const auto meta = sender ? value<Address>(sender + 56) : 0;
+            const auto [death, death_type] = boss_death_behavior(t.papu);
+            // what to fill in: what the hit reads, or (not found) the death's name and every isCrashHit yes/no by name
+            std::vector<std::pair<unsigned, unsigned>> fields = t.hit_reads;
+            if (fields.empty() && meta)
+            {
+                if (const auto at = field_offset(meta, "currCrashDeathBehaviorEvent", 8))
+                    fields.emplace_back(at, 8);
+                const auto count = value<unsigned>(meta + 24);
+                const auto list_at = value<Address>(meta + 40);
+                for (unsigned i = 0; list_at && count <= 512 && i < count; ++i)
+                {
+                    const auto field = value<Address>(list_at + i * 8);
+                    if (string(value<Address>(field + 48), 64).rfind("isCrashHit", 0) == 0 && value<std::uint16_t>(field + 22) == 1)
+                        fields.emplace_back(value<std::uint16_t>(field + 24), 1);
+                }
+            }
+            const bool has_death = std::any_of(fields.begin(), fields.end(), [](const auto &f) { return f.second == 8; });
+            if (!sender || !death || !has_death)
+            {
+                out << "; his attack script or its death wasn't found (script " << (sender ? "yes" : "no") << ", his death " << (death ? "yes" : "no") << ", its name's place "
+                    << (has_death ? "yes" : "no") << ")";
+                return false;
+            }
+            struct Kept
+            {
+                unsigned at, size;
+                Address before, written;
+            };
+            std::vector<Kept> kept;
+            std::ostringstream filled;
+            for (const auto &field : fields)
+            {
+                const unsigned at = field.first, size = field.second;
+                if (at < 0x40 || (size != 8 && size != 1) || std::any_of(kept.begin(), kept.end(), [at](const Kept &k) { return k.at == at; }))
+                    continue;
+                if (size == 8)
+                {
+                    kept.push_back({at, 8, value<Address>(sender + at), death});
+                    write(sender + at, death);
+                }
+                else
+                {
+                    kept.push_back({at, 1, value<std::uint8_t>(sender + at), 1});
+                    write(sender + at, std::uint8_t{1});
+                }
+                filled << " " << hex(at) << (size == 8 ? "=his death" : "=yes");
+            }
+            own_hit_send = true;
+            std::ostringstream sent_note;
+            const bool sent = boss_real_hit(t, sent_note);
+            own_hit_send = false;
+            for (const auto &k : kept)
+                if (k.size == 8 && value<Address>(sender + k.at) == k.written)
+                    write(sender + k.at, k.before);
+                else if (k.size == 1 && value<std::uint8_t>(sender + k.at) == k.written)
+                    write(sender + k.at, static_cast<std::uint8_t>(k.before));
+            std::cout << "Boss rule: his attack's hit message sent with" << filled.str() << " (his death " << pointer_brief(death) << ")" << (sent ? "" : " (it couldn't be sent)")
+                      << "\n" << std::flush;
+            if (!sent)
+                out << "; his hit couldn't be sent";
+            return sent;
+        }
+        // without the game's hit: as one would be (a mask less, nothing while invincible, a life without a mask). (His
+        // state is the mask count while a mask is out, as /aku_give reads it)
+        // the death a boss's attack gives Crash (his attack script's CrashDeathDefaultBehaviorEvent: Papu Papu's is
+        // "Death_Common_Spin", the angel flying up) and that setting's type, or {0, 0}
+        std::pair<Address, Address> boss_death_behavior(Address boss)
+        {
+            for (const auto &[c, script] : entity_scripts(boss))
+            {
+                const auto data = value<Address>(c + 16);
+                if (script != "common_BossAttackDamageHandler" || !typed(data, 0x13bbb10))
+                    continue;
+                const auto field = field_named(value<Address>(data + 32), "CrashDeathDefaultBehaviorEvent");
+                if (field && value<std::uint16_t>(field + 22) == 8)
+                    return {value<Address>(data + value<std::uint16_t>(field + 24)), value<Address>(field)};
+            }
+            return {0, 0};
+        }
+        // a hit for Crash with a mask, the game's way. V1.3.20's log: when Papu Papu's spin hits Crash with a mask, Crash's
+        // damage script sends Aku Aku's manager 7ajlmc3q with a "1" (from one node of its script), and Aku's manager does
+        // the rest (the mask goes, Crash blinks: DamagedInvulnerable). The very same node is sent again here, from Crash's
+        // damage script
+        bool aku_take_hit(std::ostream &out)
+        {
+            const auto crash = player();
+            Address damage = 0;
+            for (const auto &[c, script] : entity_scripts(crash, 256))
+                if (script == "Crash_DamageManager")
+                    damage = c;
+            const auto aku = aku_manager_component(crash);
+            if (!damage || !aku)
+            {
+                out << "; Crash's damage or Aku Aku script wasn't found";
+                return false;
+            }
+            const auto message = aku_message(aku, "7ajlmc3q").first;
+            if (!message)
+            {
+                out << "; Aku Aku's manager doesn't take 7ajlmc3q here";
+                return false;
+            }
+            const auto meta = value<Address>(damage + 56);
+            const auto right = [&](Address node) {
+                const auto values = list(value<Address>(node + 32), 16);
+                return typed(node, 0x13bc390) && value<Address>(node + 16) == message && typed(value<Address>(node + 32), 0x1745070) && values.size() == 6 &&
+                       typed(values[3], 0x1748280) && (value<std::uint64_t>(values[3] + 24) & 0xff) == 1;
+            };
+            static Address found_for = 0, found = 0;
+            Address node = found_for == meta && found && right(found) ? found : 0;
+            if (!node)
+            {
+                std::ostringstream seen;
+                unsigned count = 0;
+                for (const auto n : aku_send_nodes(meta, message))
+                {
+                    if (count++ < 6)
+                        seen << "\nBoss rule: a sender of Aku Aku's hit message in Crash's damage script" << send_arguments(n) << (right(n) ? " (the hit)" : "");
+                    if (!node && right(n))
+                        node = found = n, found_for = meta;
+                }
+                std::cout << "Boss rule: Aku Aku's hit message: " << count << " senders in Crash's damage script" << seen.str() << "\n" << std::flush;
+            }
+            if (!node)
+            {
+                out << "; the game's sender of Aku Aku's hit wasn't found";
+                return false;
+            }
+            aku_send(damage, node);
+            out << "; Aku Aku takes the hit (the game's own message to him)";
+            return true;
+        }
+        // Crash's damage script (Crash_DamageManager), or 0
+        Address crash_damage_script()
+        {
+            for (const auto &[c, script] : entity_scripts(player(), 256))
+                if (script == "Crash_DamageManager")
+                    return c;
+            return 0;
+        }
+        // what Crash's damage script holds as the death it plays next (deathClip), for the log
+        std::string crash_death_clip()
+        {
+            const auto damage = crash_damage_script();
+            const auto at = damage ? field_offset(value<Address>(damage + 56), "deathClip", 8) : 0;
+            return at ? pointer_brief(value<Address>(damage + at)) : std::string("?");
+        }
+        // V1.3.27: the angel death, tenth try. V1.3.26's log: his hit message reached Crash's damage script, which kept his
+        // death in it (deathClip "Death_Common_Spin", the attacker) and went no further. When his spin really kills Crash,
+        // the damage script sends itself sdoxdefr right then, then a0rx8wy2 and 0xblwcwf (the death, played from deathClip).
+        // So that next step, when the game didn't take it: from Crash's damage script, by its own node for it (Crash himself
+        // its one value) when that's found, else by a node of ours (as DeathLink's death is sent)
+        bool crash_die_step(std::ostream &out)
+        {
+            const bool sender_ok = event_hook.installed || code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0});
+            const auto damage = crash_damage_script();
+            if (!damage || !sender_ok)
+            {
+                out << (damage ? "the game's message sender differs" : "Crash's damage script wasn't found");
+                return false;
+            }
+            const auto meta = value<Address>(damage + 56);
+            Address message = 0, target = 0;
+            for (const auto delegator : list(value<Address>(meta + 160), 128))
+            {
+                const auto m = value<Address>(delegator + 24), to = value<Address>(delegator + 32);
+                if (typed(delegator, 0x13bc268) && typed(m, 0x17b6578) && typed(to, 0x13bbcb8) &&
+                    string(value<Address>(m + 16), 120) == "Crash_DamageManager_c.New_Graph_Event_1_id_sdoxdefr")
+                {
+                    message = m, target = to;
+                    break;
+                }
+            }
+            if (!message)
+            {
+                out << "Crash's damage script doesn't take sdoxdefr here";
+                return false;
+            }
+            const auto right = [&](Address node) {
+                const auto args = value<Address>(node + 32);
+                const auto values = list(args, 16);
+                return typed(node, 0x13bc390) && value<Address>(node + 16) == message && typed(args, 0x1745070) && values.size() == 4 && typed(values[0], 0x13bbcb8);
+            };
+            // (looked for once for each script description)
+            static Address found_for = 0, found = 0;
+            if (found_for != meta)
+            {
+                found_for = meta, found = 0;
+                std::ostringstream seen;
+                unsigned count = 0;
+                for (const auto n : aku_send_nodes(meta, message))
+                {
+                    if (count++ < 6)
+                        seen << "\nBoss rule: a sender of sdoxdefr in Crash's damage script" << send_arguments(n) << (right(n) && !found ? " (this one)" : "");
+                    if (!found && right(n))
+                        found = n;
+                }
+                std::cout << "Boss rule: Crash's damage script sends sdoxdefr from " << count << " nodes" << seen.str() << "\n" << std::flush;
+            }
+            const Address node = found && right(found) ? found : 0;
+            std::array<Address, 11> own{base() + 0x13bc390, 0, message, target};
+            std::array<Address, 6> context{damage};
+            reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(node ? node : reinterpret_cast<Address>(own.data()), reinterpret_cast<Address>(context.data()));
+            out << (node ? "by its own node" : "by a node of ours");
+            return true;
+        }
+        // the angel death's texts (see red_constants): every "Death..." text constant (+0x1755b20, the text at +24) around
+        // Crash's damage script description says clip; how many, and which texts they held
+        [[maybe_unused]] unsigned swap_death_constants(Address damage, Address clip, std::string &texts)
+        {
+            const auto meta = value<Address>(damage + 56);
+            std::set<Address> pages;
+            const auto page = meta & ~Address{0xfff};
+            for (Address p = page > 0x100000 ? page - 0x80000 : 0x10000; p <= page + 0x80000; p += 0x1000)
+                pages.insert(p);
+            std::set<std::string> held;
+            std::vector<Address> words(512);
+            std::lock_guard lock(red_constant_mutex);
+            for (const auto pg : pages)
+            {
+                if (!readable(pg, 0x1000) || !read(pg, words))
+                    continue;
+                for (unsigned i = 0; i + 4 < words.size(); ++i)
+                {
+                    if (words[i] != base() + 0x1755b20)
+                        continue;
+                    const auto at = pg + i * 8 + 24;
+                    const auto text_at = words[i + 3];
+                    if (!text_at || text_at == clip)
+                        continue;
+                    const auto text = printable_text(text_at);
+                    if (text.rfind("Death", 0) != 0)
+                        continue;
+                    SIZE_T done = 0;
+                    if (WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(at), &clip, sizeof(clip), &done))
+                        red_constants.emplace_back(at, text_at), held.insert(text);
+                }
+            }
+            red_constants_out = static_cast<unsigned>(red_constants.size());
+            for (const auto &text : held)
+                texts += (texts.empty() ? "" : ", ") + text;
+            return static_cast<unsigned>(red_constants.size());
+        }
+        void boss_rule_hit(BossTuning &t, std::ostream &out)
+        {
+            const auto crash = player();
+            const auto [state, mask_out] = aku_manager_state(crash);
+            const int masks = mask_out ? std::clamp(state, 1, 3) : 0;
+            if (masks >= 3)
+            {
+                out << "; Crash is invincible (three masks): no hit";
+                return;
+            }
+            // (V1.3.27) still blinking from a hit: no hit, as the game does then
+            if (crash_game_flag("DamagedInvulnerable") == 1)
+            {
+                out << "; Crash is still blinking from a hit: no hit";
+                return;
+            }
+            if (masks >= 1)
+            {
+                // (V1.3.14 to V1.3.18 set the mask count one lower: his mask stayed on screen and Crash didn't flinch, but
+                // the next hit then killed him. V1.3.21: the game's own message to Aku Aku)
+                if (!aku_take_hit(out))
+                    out << "; Crash has a mask: no hit";
+                return;
+            }
+            // V1.3.24: his attack's own hit message, with his death in it (V1.3.25, see replay_real_hit): the death it gives is
+            // the angel's (V1.3.15 to V1.3.22 tried to make DeathLink's falling death into it: it always makes a falling death)
+            std::ostringstream replay;
+            if (replay_real_hit(t, replay))
+            {
+                // (V1.3.27) and his damage script's next step to the death if it stops short (see crash_die_step)
+                const auto now = GetTickCount64();
+                t.die_step_at = now + 150, t.die_steps_seen = die_steps.load();
+                t.replay_check_at = now + 800;
+                t.replay_deaths = death_values.load(), t.replay_angels = angel_deaths.load();
+                out << "; no mask: his attack's own hit message for Crash, with his death (the angel)";
+                return;
+            }
+            out << replay.str();
+            // DeathLink's falling death when there's no hit of his to send
+            bool died = false;
+            std::string how = "the falling death";
+            try
+            {
+                const auto body = controlled_actor();
+                died = body && request_scripted_death(body);
+            }
+            catch (const std::exception &e)
+            {
+                out << " (" << e.what() << ")";
+            }
+            out << (died ? "; no mask: Crash loses a life, " + how : std::string("; no mask, and Crash's life couldn't be taken"));
+        }
+        // his health as the game keeps it, wherever that is (V1.3.8: not a whole number on his actor): his actor's first
+        // 0x1000 bytes and each of his parts' first 0x400, as 4-byte words
+        std::vector<std::pair<Address, std::vector<std::uint32_t>>> health_places(Address actor)
+        {
+            std::vector<std::pair<Address, std::vector<std::uint32_t>>> places;
+            std::vector<std::uint32_t> words(0x1000 / 4);
+            if (read(actor, words))
+                places.emplace_back(actor, words);
+            for (const auto c : list(value<Address>(actor + 24), 128))
+            {
+                std::vector<std::uint32_t> part(0x400 / 4);
+                if (c && read(c, part))
+                    places.emplace_back(c, part);
+            }
+            return places;
+        }
+        // a hit on him while red taken back: his health (the one number on him or his parts that went down by just as much
+        // since he turned red; V1.3.10's log: his health part's +0x310, the damage taken as a negative number), his spin
+        // length and his hit count
+        // V1.3.13: not his last hit. V1.3.12's log: that one was taken back too, after he had already gone down (state 4):
+        // he stayed down with health left, and the fight never ended. The last one counts, so the fight ends
+        bool put_back_papu(BossTuning &t, std::ostream &line)
+        {
+            const bool down = t.state_at && value<int>(t.papu_ai + t.state_at) == 4;
+            if (down || (health_getter_ok() && typed(t.papu, 0x1592220) && actor_health(t.papu) <= 0))
+            {
+                line << "; it was his last hit: it counts, so the fight ends";
+                return false;
+            }
+            // the hit taken back: his health (as the game's getter sees it) went down; the one number in his actor
+            // that went down (or up) by just as much since he turned red goes back
+            if (t.red_health > 0 && health_getter_ok() && !t.red_snapshot.empty())
+            {
+                const int now_health = actor_health(t.papu), drop = t.red_health - now_health;
+                line << "; his health " << t.red_health << " -> " << now_health;
+                if (drop > 0)
+                {
+                    // a whole number or a decimal that moved by just as much, on him or one of his parts
+                    struct Moved
+                    {
+                        Address place, at;
+                        std::uint32_t before, after;
+                        bool decimal;
+                    };
+                    std::vector<Moved> found;
+                    for (const auto &[place, before] : t.red_snapshot)
+                    {
+                        std::vector<std::uint32_t> after(before.size());
+                        if (!read(place, after))
+                            continue;
+                        for (std::size_t i = 2; i < before.size(); ++i)
+                        {
+                            if (before[i] == after[i])
+                                continue;
+                            const int a = static_cast<int>(before[i]), b = static_cast<int>(after[i]);
+                            float fa = 0, fb = 0;
+                            std::memcpy(&fa, &before[i], 4), std::memcpy(&fb, &after[i], 4);
+                            if (std::abs(a - b) == drop)
+                                found.push_back({place, place + i * 4, before[i], after[i], false});
+                            else if (std::isfinite(fa) && std::isfinite(fb) && std::abs(std::abs(fa - fb) - drop) < 0.01f)
+                                found.push_back({place, place + i * 4, before[i], after[i], true});
+                        }
+                    }
+                    // where a number is: on him, or which of his parts (its script, or its type)
+                    const auto where = [&](const Moved &f) {
+                        std::string part = "his";
+                        if (f.place != t.papu)
+                        {
+                            part = typed(f.place, 0x13bbbd0) ? string(value<Address>(value<Address>(f.place + 56) + 16), 80) : object_brief(f.place);
+                            if (part.rfind("Scripts.Graph.", 0) == 0)
+                                part.erase(0, 14);
+                        }
+                        return part + " +" + hex(static_cast<unsigned>(f.at - f.place));
+                    };
+                    // more than one: his health part (+0x14da2c0, V1.3.10's log) if it's one of them
+                    if (found.size() > 1)
+                        for (const auto &f : found)
+                            if (typed(f.place, 0x14da2c0))
+                            {
+                                found = {f};
+                                break;
+                            }
+                    if (found.size() == 1)
+                    {
+                        write(found[0].at, found[0].before);
+                        line << ", " << where(found[0]) << (found[0].decimal ? " (decimal)" : "") << " put back: " << actor_health(t.papu);
+                    }
+                    else
+                    {
+                        line << ", couldn't tell where (" << found.size() << " numbers moved by " << drop << ":";
+                        for (const auto &f : found)
+                        {
+                            float fa = 0, fb = 0;
+                            std::memcpy(&fa, &f.before, 4), std::memcpy(&fb, &f.after, 4);
+                            line << " " << where(f) << " " << (f.decimal ? std::to_string(fa) + "->" + std::to_string(fb) : std::to_string(static_cast<int>(f.before)) + "->" + std::to_string(static_cast<int>(f.after)));
+                        }
+                        line << ")";
+                    }
+                }
+            }
+            if (t.red_laps >= 0 && t.laps_total_at && value<int>(t.papu_ai + t.laps_total_at) != t.red_laps)
+                line << "; spin length " << value<int>(t.papu_ai + t.laps_total_at) << " -> " << t.red_laps, write(t.papu_ai + t.laps_total_at, t.red_laps);
+            if (t.red_hits >= 0 && t.hit_count_at && value<int>(t.papu_ai + t.hit_count_at) != t.red_hits)
+                line << "; hit count " << value<int>(t.papu_ai + t.hit_count_at) << " -> " << t.red_hits, write(t.papu_ai + t.hit_count_at, t.red_hits);
+            return true;
+        }
+        // Crash's hit for landing on him while red: once per landing
+        void punish_crash(BossTuning &t, std::ostream &line, std::uint64_t now)
+        {
+            if (t.crash_hit_at && now - t.crash_hit_at < 2000)
+            {
+                line << "; Crash already took the hit for this landing";
+                return;
+            }
+            t.crash_hit_at = now;
+            // V1.3.13's log: the game's hit message sent again (ha5y20l3, with his attack's values) did nothing. It carries
+            // his attack's damage, which is only there while his attack touches Crash, and without a mask his spin's hit
+            // isn't that message at all (Crash's damage script takes his life, "Death_Common_Spin"). So the game's rule,
+            // done directly: a mask less, nothing while invincible, a life without a mask
+            const auto [state, mask_out] = aku_manager_state(player());
+            t.hit_masks = mask_out ? std::clamp(state, 1, 3) : 0;
+            boss_rule_hit(t, line);
+            if (t.hit_masks == 1 || t.hit_masks == 2)
+                t.hit_check_at = now + 1000;
+        }
+        // V1.3.28 research, in case the immunity isn't what keeps him from being hit (see papu_immunity): what on him is
+        // one value every time he can be hit (sitting, 0.4 s on, not red) and another every time he can't (getting up from a
+        // hit, 0.4 to 2.2 s in): his actor's first 0x800 bytes and his parts' (not his scripts) first 0x100, every quarter
+        // second. Once each was seen three times, those numbers go to the log, with what they are while he's red within his
+        // immunity
+        void vuln_research(BossTuning &t, bool red, int s, std::uint64_t now)
+        {
+            if (t.vuln_logged || now < t.vuln_next)
+                return;
+            t.vuln_next = now + 250;
+            const auto in_state = now - t.state_since;
+            int c = -1;
+            if (s == 1 && !red && in_state > 400)
+                c = 0;
+            else if (s == 3 && in_state > 400 && in_state < 2200)
+                c = 1;
+            else if (s == 1 && red)
+                c = 2;
+            if (c != t.vuln_class)
+            {
+                if (c >= 0)
+                    ++t.vuln_episodes[c];
+                t.vuln_class = c;
+            }
+            if (c < 0)
+                return;
+            t.vuln_parts.clear();
+            t.vuln_parts.emplace_back(t.papu, value<Address>(t.papu));
+            for (const auto part : list(value<Address>(t.papu + 24), 128))
+                if (part && !typed(part, 0x13bbbd0))
+                    t.vuln_parts.emplace_back(part, value<Address>(part));
+            for (const auto &[part, type] : t.vuln_parts)
+            {
+                std::vector<std::uint32_t> words((part == t.papu ? 0x800 : 0x100) / 4);
+                if (!read(part, words))
+                    continue;
+                for (std::size_t i = 2; i < words.size(); ++i)
+                {
+                    auto &w = t.vuln[part + i * 4];
+                    if (!w.seen[c])
+                        w.seen[c] = true, w.value[c] = words[i];
+                    else if (w.value[c] != words[i])
+                        w.steady[c] = false;
+                }
+            }
+            if (t.vuln_episodes[0] < 3 || t.vuln_episodes[1] < 3)
+                return;
+            t.vuln_logged = true;
+            std::ostringstream out;
+            unsigned found = 0;
+            for (const auto &[part, type] : t.vuln_parts)
+            {
+                const unsigned span = part == t.papu ? 0x800 : 0x100;
+                for (unsigned off = 8; off < span; off += 4)
+                {
+                    const auto it = t.vuln.find(part + off);
+                    if (it == t.vuln.end())
+                        continue;
+                    const auto &w = it->second;
+                    if (!w.seen[0] || !w.seen[1] || !w.steady[0] || !w.steady[1] || w.value[0] == w.value[1] || found++ >= 40)
+                        continue;
+                    out << "\nBoss rule research: " << (part == t.papu ? std::string("his actor") : "his part type " + hex(static_cast<unsigned>(type - base()))) << " +" << hex(off)
+                        << ": " << static_cast<int>(w.value[0]) << " when he can be hit, " << static_cast<int>(w.value[1]) << " getting up";
+                    if (w.seen[2])
+                        out << ", " << (w.steady[2] ? std::to_string(static_cast<int>(w.value[2])) : std::string("varying")) << " red right after a hit";
+                }
+            }
+            std::cout << "Boss rule research: " << found << " of his numbers are one value whenever he can be hit and another whenever he's getting up from a hit ("
+                      << t.vuln_episodes[0] << " and " << t.vuln_episodes[1] << " times seen)" << out.str() << "\n" << std::flush;
+            t.vuln.clear();
+        }
+        // (V1.3.28) Crash bounced off Papu Papu the way his deflect script does it: its own node for Crash's bounce, as it
+        // last sent it (it bounces Crash off after each hit too, so it's known after his first)
+        bool papu_bounce()
+        {
+            const auto node = papu_bounce_node.load(), component = papu_bounce_component.load(), message = papu_bounce_message.load();
+            const bool sender_ok = event_hook.installed || code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0});
+            if (!sender_ok || !node || !component || !message || !typed(node, 0x13bc390) || value<Address>(node + 16) != message || !typed(component, 0x13bbbd0) ||
+                value<Address>(component + 24) != papu_entity.load())
+                return false;
+            std::array<Address, 6> context{component};
+            reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(node, reinterpret_cast<Address>(context.data()));
+            return true;
+        }
+        // V1.3.28: a landing on him while he's red, with his immunity on (see papu_immunity): his deflect script bounces
+        // Crash off the stomp (the game's own: no hit for him), or (if the immunity doesn't reach it) the stomp is let
+        // through and nothing takes it, and Crash is bounced off here. Either one is a hit for Crash. (His deflect script
+        // also bounces Crash off the stomp of a hit that counts, right after it: that one isn't a landing on red.) Every
+        // stomp goes to the log, for the research: what took it, how long after his last hit
+        void papu_landings(BossTuning &t, const Shared &state, bool red, int s, std::uint64_t now)
+        {
+            const auto since_hit = [&] { return t.valid_hit_at ? seconds(now - t.valid_hit_at) + " after his last hit" : std::string("no hit yet"); };
+            int landing = 0; // 1: his deflect script bounced Crash off; 2: nothing took the stomp
+            if (const auto n = papu_deflects.load(); n != t.deflects_seen)
+            {
+                t.deflects_seen = n;
+                const auto at = papu_deflect_at.load(), hit = papu_hit_at.load();
+                const bool same_stomp = hit && at >= hit && at - hit < 700;
+                if (t.stomp_lines < 40)
+                    ++t.stomp_lines, std::cout << "Boss rule: his deflect script bounced Crash off a stomp (state " << s << (red ? ", red" : "") << ", " << since_hit()
+                                               << (same_stomp ? "; the stomp of that hit" : "") << ")\n" << std::flush;
+                if (state.boss_rules && red && !same_stomp)
+                    landing = 1;
+            }
+            // (V1.3.29) his health script bouncing Crash off without a hit (V1.3.28's log: that's a stomp while he can't
+            // be hit; the bounce of a hit that counts comes right after the hit)
+            if (const auto n = papu_hh_bounces.load(); n != t.hh_bounces_seen)
+            {
+                t.hh_bounces_seen = n;
+                const auto at = papu_hh_bounce_at.load(), hit = papu_hit_at.load();
+                const bool with_hit = hit && at >= hit && at - hit < 400;
+                if (!with_hit)
+                {
+                    if (t.stomp_lines < 40)
+                        ++t.stomp_lines, std::cout << "Boss rule: his health script bounced Crash off a stomp without a hit (state " << s << (red ? ", red" : "") << ", "
+                                                   << since_hit() << ")\n" << std::flush;
+                    if (state.boss_rules && red && landing == 0)
+                        landing = 3;
+                }
+            }
+            if (const auto n = papu_stomps.load(); n != t.stomps_seen)
+                t.stomps_seen = n, t.stomp_at = papu_stomp_at.load(), t.stomp_check_at = now + 250;
+            if (t.stomp_check_at && now >= t.stomp_check_at)
+            {
+                t.stomp_check_at = 0;
+                const bool taken = papu_hit_at.load() >= t.stomp_at, deflected = papu_deflect_at.load() >= t.stomp_at;
+                if (t.stomp_lines < 40)
+                    ++t.stomp_lines, std::cout << "Boss rule: a stomp on him, let through by his deflect script (state " << s << (red ? ", red" : "") << ", " << since_hit()
+                                               << "): " << (taken ? "his health script took it" : deflected ? "then it bounced Crash off" : "nothing took it") << "\n" << std::flush;
+                if (state.boss_rules && red && !taken && !deflected && landing == 0)
+                    landing = 2;
+            }
+            if (!landing || (t.crash_hit_at && now - t.crash_hit_at < 2000))
+                return;
+            std::ostringstream line;
+            line << "Boss rule: Crash landed on Papu Papu while he was red (" << seconds(now - t.red_since) << " into it)";
+            if (landing == 3)
+                line << "; he bounced off (the game's own bounce while Papu Papu can't be hit: no hit for him)";
+            else if (landing == 1)
+                line << "; he bounced off (the game's own bounce, with Papu Papu's immunity: no hit for him)";
+            else
+                line << "; the stomp did nothing, " << (papu_bounce() ? "so he's bounced off the way the deflect script does it" : "and the deflect script's bounce isn't known yet");
+            // (in case the stomp hurt him after all)
+            if (t.red_health > 0 && health_getter_ok() && actor_health(t.papu) < t.red_health)
+                put_back_papu(t, line);
+            punish_crash(t, line, now);
+            std::cout << line.str() << "\n" << std::flush;
+            t.blocked_told = now, t.blocked_seen = boss_blocked.load();
+        }
+        std::string offsets_text(const std::vector<unsigned> &list)
+        {
+            std::string out;
+            for (const auto off : list)
+                out += (out.empty() ? "" : ", ") + hex(off);
+            return out.empty() ? std::string("none") : out;
+        }
+        // V1.3.31: his immunity's timer (his health script's TimerAction, type +0x17610b8, made at his first hit; see
+        // papu_immunity), or 0
+        Address papu_timer(const BossTuning &t)
+        {
+            if (!t.hh || !t.hh_timer_at || !typed(t.hh, 0x13bbbd0))
+                return 0;
+            const auto timer = value<Address>(t.hh + t.hh_timer_at);
+            return timer && typed(timer, 0x17610b8) ? timer : 0;
+        }
+        // V1.3.34 research: an object's first bytes, 8 at a time, each as what it points to: the .exe ("exe+0x..."), the
+        // object itself ("self+0x..."), a name ("...") or a plain number
+        std::string qwords_text(Address p, unsigned bytes)
+        {
+            if (p < 0x10000)
+                return " (none)";
+            std::ostringstream out;
+            for (unsigned off = 0; off < bytes; off += 8)
+            {
+                if (!readable(p + off, 8))
+                {
+                    out << " " << hex(off) << "=?";
+                    break;
+                }
+                const auto q = value<Address>(p + off);
+                out << " " << hex(off) << "=";
+                if (q >= base() && q < module_end())
+                    out << "exe" << hex(static_cast<unsigned>(q - base()));
+                else if (q >= p && q < p + 0x1000)
+                    out << "self" << hex(static_cast<unsigned>(q - p));
+                else if (const auto text = printable_text(q); !text.empty())
+                    out << "\"" << text << "\"";
+                else
+                    out << "0x" << std::hex << q << std::dec;
+            }
+            return out.str();
+        }
+        // V1.3.34: a list as the game keeps them (as list() reads them: its count at +0x10, its room at +0x14, its items at
+        // +0x20) that holds the name: as a name, or as an object named at +0x28 (V1.3.33's log: his health script's list
+        // of the attacks that hurt him shows "BounceDamage" at +0x28 of what it points to). Its count and items
+        bool id_list_holds(Address x, const std::string &name, unsigned &count, Address &items)
+        {
+            if (x < 0x10000 || !readable(x, 0x30))
+                return false;
+            if (const auto vt = value<Address>(x); vt < base() || vt >= module_end())
+                return false;
+            count = value<unsigned>(x + 0x10), items = value<Address>(x + 0x20);
+            const auto room = value<unsigned>(x + 0x14);
+            if (count < 1 || count > 16 || room < count || room > 4096 || items < 0x10000)
+                return false;
+            // (its items 8 bytes apart, or 0x30: V1.3.33's log has his deflect script's two names 0x30 apart)
+            for (const unsigned stride : {8u, 0x30u})
+            {
+                if (!readable(items, stride * (count - 1) + 8))
+                    continue;
+                for (unsigned i = 0; i < count; ++i)
+                {
+                    const auto item = value<Address>(items + i * stride);
+                    if (printable_text(item) == name)
+                        return true;
+                    if (item >= 0x10000 && readable(item, 0x30))
+                        if (const auto ivt = value<Address>(item); ivt >= base() && ivt < module_end() && printable_text(value<Address>(item + 0x28)) == name)
+                            return true;
+                }
+            }
+            return false;
+        }
+        // V1.3.34 (Eric, V1.3.33: "I'm able to hit him in the beginning when he's red... I still died, but I was still able to
+        // hit him and he flinched"): the first fight of a visit starts red before his first hit, and the game's immunity
+        // (his health script's timer) is only made at that hit, so a landing then was a hit for the game. His health script
+        // takes a hit only from the attacks on its list (DamageOnAttackIdentifierList; V1.3.33's log: "BounceDamage", the
+        // landing), so for red without the game's immunity that list is emptied (see papu_list_block). Here: that list as the
+        // game keeps it (its count at +0x10), looked for once a visit; and (research) his health and deflect scripts' lists to
+        // the log, 8 bytes at a time
+        void papu_lists(BossTuning &t)
+        {
+            if (t.lists_done || !t.papu || !t.hh || !typed(t.hh, 0x13bbbd0))
+                return;
+            t.lists_done = true;
+            const auto setting = [](Address c, const char *name, std::string &about) -> Address {
+                const auto data = value<Address>(c + 16);
+                const auto field = typed(data, 0x13bbb10) ? field_named(value<Address>(data + 32), name) : 0;
+                if (!field)
+                {
+                    about = "not found";
+                    return 0;
+                }
+                const auto kind = value<Address>(field);
+                const unsigned off = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                about = "@" + hex(off) + ", " + std::to_string(bytes) + " bytes, field type " +
+                        (kind >= base() && kind < module_end() ? hex(static_cast<unsigned>(kind - base())) : std::string("?"));
+                return bytes == 8 ? value<Address>(data + off) : 0;
+            };
+            const auto dump = [](const std::string &who, Address v) {
+                std::cout << "Boss research: " << who << " = 0x" << std::hex << v << std::dec << ":" << qwords_text(v, 0x60) << "\n";
+                const auto r = resolve(v);
+                if (r && r != v)
+                    std::cout << "Boss research: " << who << " -> 0x" << std::hex << r << std::dec << ":" << qwords_text(r, 0x90) << "\n";
+                // (and what +0x20 points to, a list's items, when that's somewhere else)
+                for (const auto x : {v, r})
+                    if (x >= 0x10000 && readable(x, 0x30))
+                        if (const auto items = value<Address>(x + 0x20); items >= 0x10000 && (items < x || items >= x + 0x90) && readable(items, 8))
+                            std::cout << "Boss research: " << who << (x == v ? "" : " ->") << " +0x20 -> 0x" << std::hex << items << std::dec << ":" << qwords_text(items, 0x60)
+                                      << "\n";
+            };
+            std::string about;
+            const auto v = setting(t.hh, "DamageOnAttackIdentifierList", about);
+            dump("his health script's DamageOnAttackIdentifierList (" + about + ")", v);
+            for (const auto &[c, script] : entity_scripts(t.papu))
+                if (script == "common_BossInvulnerableDeflectPlayerHandler")
+                {
+                    std::string deflect;
+                    const auto w = setting(c, "String_List_id_57rybnyp", deflect);
+                    dump("his deflect script's String_List_id_57rybnyp (" + deflect + ")", w);
+                }
+            // (and Crash's settings that name an attack: what his landing calls itself)
+            if (const auto crash = player())
+            {
+                unsigned shown = 0;
+                for (const auto &[c, script] : entity_scripts(crash, 256))
+                {
+                    const auto data = value<Address>(c + 16);
+                    if (!typed(data, 0x13bbb10))
+                        continue;
+                    const auto dmeta = value<Address>(data + 32);
+                    const unsigned count = value<unsigned>(dmeta + 24);
+                    const auto fields = value<Address>(dmeta + 40);
+                    for (unsigned i = 0; fields && count <= 512 && i < count && shown < 16; ++i)
+                    {
+                        const auto field = value<Address>(fields + i * 8);
+                        const auto field_name = string(value<Address>(field + 48), 120);
+                        if (value<std::uint16_t>(field + 22) != 8 || (field_name.find("Identifier") == std::string::npos && field_name.find("Bounce") == std::string::npos))
+                            continue;
+                        ++shown;
+                        std::cout << "Boss research: Crash's " << script << " " << field_name << " = " << pointer_brief(value<Address>(data + value<std::uint16_t>(field + 24)))
+                                  << "\n";
+                    }
+                }
+            }
+            for (const auto x : {v, resolve(v)})
+            {
+                unsigned count = 0;
+                Address items = 0;
+                if (x && id_list_holds(x, "BounceDamage", count, items))
+                {
+                    t.id_list = x, t.id_items = items, t.id_type = value<Address>(x), t.id_count = count;
+                    break;
+                }
+            }
+            std::cout << "Boss rule: his health script's list of the attacks that hurt him "
+                      << (t.id_list ? "found (" + std::to_string(t.id_count) + " in it, " + (t.id_list == v ? "the setting itself" : "the one the setting names") + ")"
+                                    : std::string("not found as a list: red without the game's immunity stays as it was (a landing then is a hit taken back)"))
+                      << "\n" << std::flush;
+        }
+        // V1.3.34: the emptied list put back (its count), if it's still the same list and still empty
+        void id_list_restore(const char *why)
+        {
+            auto &b = list_block_now;
+            if (!b.list)
+                return;
+            const bool same = readable(b.list, 0x30) && value<Address>(b.list) == b.type && value<unsigned>(b.list + 0x10) == 0 && value<Address>(b.list + 0x20) == b.items;
+            if (same)
+                write(b.list + 0x10, b.count);
+            std::cout << "Boss rule: his health script's list of the attacks that hurt him "
+                      << (same ? "put back (" + std::to_string(b.count) + " in it)" : std::string("is no longer the same one (left as it is)")) << ": " << why << "\n"
+                      << std::flush;
+            b = {};
+        }
+        // V1.3.34: red without the game's immunity (the fight's start before his first hit in this visit, or a timer of his
+        // that doesn't run again): his health script's list emptied (see papu_lists), so a landing on him is no hit for the
+        // game, and his can-be-hit flag held clear (see papu_rule), so his deflect script bounces Crash off as it does while
+        // he can't be hit (V1.3.29's log); the landing is a hit for Crash (see papu_landings). Both back as red ends
+        void papu_list_block(BossTuning &t, bool on, std::uint64_t now, const std::string &why)
+        {
+            auto &b = list_block_now;
+            if (on == (b.list != 0))
+                return;
+            if (!on)
+            {
+                id_list_restore(why.c_str());
+                return;
+            }
+            if (!t.id_list || !readable(t.id_list, 0x30) || value<Address>(t.id_list) != t.id_type || value<unsigned>(t.id_list + 0x10) != t.id_count ||
+                value<Address>(t.id_list + 0x20) != t.id_items)
+            {
+                if (t.block_lines < 4)
+                    ++t.block_lines, std::cout << "Boss rule: red without the game's immunity (" << why << "), and his health script's list "
+                                               << (t.id_list ? "isn't as it was" : "wasn't found") << ": a landing on him now is a hit for the game, taken back\n" << std::flush;
+                return;
+            }
+            write(t.id_list + 0x10, 0u);
+            b.list = t.id_list, b.items = t.id_items, b.type = t.id_type, b.count = t.id_count;
+            t.block_at = now, t.hold_writes = 0, t.block_had_timer = papu_timer(t) != 0;
+            if (t.block_lines < 30)
+                ++t.block_lines, std::cout << "Boss rule: red without the game's immunity (" << why << "): his health script's list of the attacks that hurt him emptied ("
+                                           << t.id_count << " -> 0), and his can-be-hit flag held clear (his deflect script's bounce)\n" << std::flush;
+        }
+        // V1.3.34 (Eric: "start making stuff for speed up"): with /boss_speed above 100 every wait of his AI is shorter: each of
+        // his AI's timers (its TimerActions, the kind his health script's immunity is: +0x48 its length, +0x50 its time left,
+        // V1.3.31's log) has its time left cut by the speed as it starts (its length stays, so one that starts over isn't
+        // cut twice). Each one's length goes to the log as it starts (research: which wait is which)
+        void papu_speed_timers(BossTuning &t, unsigned percent, int s)
+        {
+            for (auto &a : t.ai_timers)
+            {
+                const auto timer = value<Address>(t.papu_ai + a.at);
+                if (!timer || !typed(timer, 0x17610b8))
+                {
+                    a.timer = 0, a.left = 0;
+                    continue;
+                }
+                const float length = value<float>(timer + 0x48), left = value<float>(timer + 0x50);
+                if (!std::isfinite(length) || !std::isfinite(left))
+                    continue;
+                // (a start: a new timer, or its time left back up, to its length; a timer counting up never starts at its length)
+                const bool fresh = left > 0.05f && length < 60.0f && std::abs(left - length) < 0.25f;
+                const bool started = fresh && (timer != a.timer || left > a.left + 0.05f);
+                a.timer = timer;
+                if (!started)
+                {
+                    a.left = left;
+                    continue;
+                }
+                ++a.starts;
+                float cut = left;
+                if (percent > 100)
+                    cut = left * 100.0f / static_cast<float>(percent), write(timer + 0x50, cut);
+                a.left = cut;
+                if (t.speed_lines < 40 && a.starts <= 3)
+                    ++t.speed_lines, std::cout << "Boss speed: his AI's wait " << a.id << " started (" << length << " s, state " << s << ")"
+                                               << (percent > 100 ? ", cut to " + std::to_string(cut).substr(0, 4) + " s" : std::string()) << "\n" << std::flush;
+            }
+        }
+        // V1.3.35: seconds, finer than GetTickCount64's (how fast a clock of his counts, see papu_clocks)
+        double precise_seconds()
+        {
+            static const double frequency = [] {
+                LARGE_INTEGER f{};
+                QueryPerformanceFrequency(&f);
+                return static_cast<double>(f.QuadPart);
+            }();
+            LARGE_INTEGER c{};
+            QueryPerformanceCounter(&c);
+            return static_cast<double>(c.QuadPart) / frequency;
+        }
+        // V1.3.35 (Eric, V1.3.34: "im not seeing any speed changes"; V1.3.34's log: his laps took 1.2 s each at x1, x1.5 and x2,
+        // writing his AI's spin speed, currAttackSpinSpeedMultiplier, changed nothing, and only the game's own steps after his
+        // hits made his laps a little shorter). The game takes those steps from his settings' list of spin speeds, one for each
+        // hit (Float_List_id_2p8swjzh: 1, 1.08, ...; V1.3.34's log has it next to his deflect script's list), as it sets them. So
+        // /boss_speed goes into that list, worked out from the game's own numbers (as first seen while the game runs: the
+        // settings stay loaded from one visit to the next), and they're the game's again at 100%
+        std::vector<float> game_spin_list;
+        void papu_spin_list(BossTuning &t, Address c, unsigned percent)
+        {
+            const auto data = value<Address>(c + 16);
+            const auto field = typed(data, 0x13bbb10) ? field_named(value<Address>(data + 32), "Float_List_id_2p8swjzh") : 0;
+            if (!field || value<std::uint16_t>(field + 22) != 8)
+            {
+                tell_once(t, "spinlist", "Boss speed: his settings' list of spin speeds (Float_List_id_2p8swjzh) isn't there");
+                return;
+            }
+            const auto v = value<Address>(data + value<std::uint16_t>(field + 24));
+            Address list = 0;
+            for (const auto x : {v, resolve(v)})
+                if (x >= 0x10000 && readable(x, 0x30) && value<Address>(x) == base() + 0x17a6b28)
+                {
+                    list = x;
+                    break;
+                }
+            const unsigned count = list ? value<unsigned>(list + 0x10) : 0, room = list ? value<unsigned>(list + 0x14) : 0;
+            const auto items = list ? value<Address>(list + 0x20) : 0;
+            std::vector<float> now(std::clamp(count, 1u, 16u));
+            if (!list || count < 1 || count > 16 || room < count || items < 0x10000 || !readable(items, count * 4) || !read(items, now) ||
+                !std::all_of(now.begin(), now.end(), [](float f) { return std::isfinite(f) && f > 0.05f && f < 20.0f; }))
+            {
+                tell_once(t, "spinlist?", "Boss speed: his settings' list of spin speeds isn't a list of numbers as expected:" + qwords_text(list ? list : v, 0x40));
+                return;
+            }
+            if (game_spin_list.size() != count)
+                game_spin_list = now;
+            // (V1.3.36, Eric: at 200% "a little too fast... during the last two hits... it becomes impossible", and "drop down the
+            // speed a little bit" when "he speeds up" at the end. V1.3.35's log: his last two steps at 200% were 2.46 and 2.6, laps
+            // of half a second; his third, 2.3, was beatable. So past 2.3 he keeps only 30% of each step up: 2.35 and 2.39 at 200%,
+            // still a little faster at the end. Never slower than the game's own)
+            constexpr float soft = 2.3f;
+            const auto speed_for = [&](float game) {
+                float v = game * static_cast<float>(percent) / 100.0f;
+                if (v > soft)
+                    v = soft + (v - soft) * 0.3f;
+                return std::max(game, v);
+            };
+            std::ostringstream from, to;
+            bool differs = false, capped = false;
+            for (unsigned i = 0; i < count; ++i)
+            {
+                const float want = speed_for(game_spin_list[i]);
+                differs = differs || std::abs(now[i] - want) > 0.0001f;
+                capped = capped || want < game_spin_list[i] * static_cast<float>(percent) / 100.0f - 0.0001f;
+                from << (i ? ", " : "") << game_spin_list[i];
+                to << (i ? ", " : "") << want;
+            }
+            if (!differs)
+                return;
+            for (unsigned i = 0; i < count; ++i)
+                write(items + i * 4, speed_for(game_spin_list[i]));
+            boss_pace_changed = boss_pace_changed || percent != 100;
+            std::cout << "Boss speed: his spin speeds (one for each hit, his settings') " << from.str() << " -> " << to.str() << " (" << percent << "%"
+                      << (capped ? std::string(", past 2.3 only 30% of each step up") : std::string()) << ")\n" << std::flush;
+        }
+        // V1.3.35: the places where what plays his moves may be: his actor, his parts (not his scripts) and what each of them
+        // points to, two steps deep. Each one's words start at `first` in a snapshot
+        void papu_clock_regions(BossTuning &t)
+        {
+            t.clock_regions.clear();
+            ReadableRegions ok;
+            std::set<Address> seen;
+            std::size_t first = 0;
+            const auto add = [&](Address at, unsigned bytes, const std::string &where) {
+                if (t.clock_regions.size() >= 600 || !seen.insert(at).second || !ok(at, bytes))
+                    return false;
+                BossTuning::ClockRegion r;
+                r.at = at, r.type = value<Address>(at), r.bytes = bytes, r.where = where, r.first = first;
+                t.clock_regions.push_back(r);
+                first += bytes / 4;
+                return true;
+            };
+            const auto object_type = [&](Address p) -> Address {
+                if (p < 0x10000 || (p & 7) || !ok(p, 16))
+                    return 0;
+                const auto vt = value<Address>(p);
+                return vt >= base() && vt < module_end() && vt != base() + 0x13bbbd0 ? vt - base() : 0;
+            };
+            const auto pointers = [&](Address p, unsigned bytes) {
+                std::vector<Address> out(bytes / 8);
+                if (!read(p, out))
+                    out.clear();
+                return out;
+            };
+            add(t.papu, 0x800, "his actor");
+            for (const auto part : list(value<Address>(t.papu + 24), 128))
+            {
+                const auto type = object_type(part);
+                if (!type)
+                    continue;
+                const auto name = "his part " + hex(static_cast<unsigned>(type));
+                if (!add(part, 0x400, name))
+                    continue;
+                const auto inner = pointers(part, 0x200);
+                for (std::size_t i = 1; i < inner.size(); ++i)
+                {
+                    const auto p = inner[i];
+                    const auto ptype = object_type(p);
+                    if (!ptype || p == t.papu)
+                        continue;
+                    const auto where = name + " " + hex(static_cast<unsigned>(i * 8)) + " -> " + hex(static_cast<unsigned>(ptype));
+                    if (!add(p, 0x300, where))
+                        continue;
+                    const auto deeper = pointers(p, 0x100);
+                    for (std::size_t j = 1; j < deeper.size(); ++j)
+                        if (const auto qtype = object_type(deeper[j]); qtype && deeper[j] != t.papu)
+                            add(deeper[j], 0x200, where + " " + hex(static_cast<unsigned>(j * 8)) + " -> " + hex(static_cast<unsigned>(qtype)));
+                }
+            }
+        }
+        void clock_snapshot(const BossTuning &t, std::vector<std::uint32_t> &out)
+        {
+            std::size_t total = 0;
+            for (const auto &r : t.clock_regions)
+                total += r.bytes / 4;
+            out.assign(total, 0x7fc00000u); // (not a number where a place couldn't be read)
+            for (const auto &r : t.clock_regions)
+            {
+                std::vector<std::uint32_t> words(r.bytes / 4);
+                if (read(r.at, words))
+                    std::copy(words.begin(), words.end(), out.begin() + static_cast<std::ptrdiff_t>(r.first));
+            }
+        }
+        double snap_value(const std::vector<std::uint32_t> &snap, std::size_t word, bool dbl)
+        {
+            if (word >= snap.size() || (dbl && word + 1 >= snap.size()))
+                return std::nan("");
+            if (dbl)
+            {
+                const std::uint64_t bits = snap[word] | (static_cast<std::uint64_t>(snap[word + 1]) << 32);
+                double d = 0;
+                std::memcpy(&d, &bits, 8);
+                return d;
+            }
+            float f = 0;
+            std::memcpy(&f, &snap[word], 4);
+            return f;
+        }
+        // how fast a number counts up with the time, a second: 0.2 to 5 (seconds, or a move's share of its length: V1.3.35 found
+        // nothing counting at 1 a second), or 20 to 80 (frames); 0 if it doesn't
+        float clock_unit(double from, double to, double seconds)
+        {
+            if (!std::isfinite(from) || !std::isfinite(to) || seconds <= 0.05 || std::abs(from) > 1e6)
+                return 0;
+            const double rate = (to - from) / seconds;
+            return (rate >= 0.2 && rate <= 5) || (rate >= 20 && rate <= 80) ? static_cast<float>(rate) : 0.0f;
+        }
+        // (two rates of the same clock)
+        bool same_rate(float a, float b, float slack)
+        {
+            return a > 0 && b > 0 && std::abs(a - b) <= slack * std::max(a, b);
+        }
+        double clock_now(const BossTuning::Clock &k)
+        {
+            return k.dbl ? value<double>(k.at) : static_cast<double>(value<float>(k.at));
+        }
+        // (his moves' speed once found, by where it is (see papu_slam_rate): tried first in the next visits)
+        std::string rate_found_where;
+        // V1.3.35 (Eric: "make... a detection... scan the speed of his normal speed and then add it to the logs and then go off on
+        // that"): what plays his moves. In his first two slams of a visit (he stands, and slams a second later), the places
+        // around him (see papu_clock_regions) are read as he stands, 0.3 s later and 0.6 s later: a number that counts the
+        // seconds up in both steps (or frames, 30 or 60 a second) is a clock; one that starts over by his next slam and counts
+        // again is a clock of his moves. To the log, and papu_slam_rate looks for its speed next to it
+        void papu_clocks(BossTuning &t, int s, std::uint64_t now)
+        {
+            if (t.clock_period >= 2 || !t.papu)
+                return;
+            if (s != 1)
+            {
+                t.clock_step = 0; // (a stand cut short: its snapshots are dropped)
+                return;
+            }
+            const auto since = now - t.stand_seen;
+            if ((t.clock_step == 0 && since > 100) || (t.clock_step > 0 && since < 300u * static_cast<unsigned>(t.clock_step)))
+                return;
+            if (t.clock_step == 0 && t.clock_regions.empty())
+                papu_clock_regions(t);
+            if (t.clock_regions.empty())
+                return;
+            clock_snapshot(t, t.clock_snap[static_cast<std::size_t>(t.clock_step)]);
+            t.clock_t[static_cast<std::size_t>(t.clock_step)] = precise_seconds();
+            if (++t.clock_step < 3)
+                return;
+            t.clock_step = 0;
+            const auto &a = t.clock_snap[0], &b = t.clock_snap[1], &c = t.clock_snap[2];
+            const double ab = t.clock_t[1] - t.clock_t[0], bc = t.clock_t[2] - t.clock_t[1];
+            std::ostringstream out;
+            unsigned shown = 0;
+            if (t.clock_period == 0)
+            {
+                // (his first slam: every number counting up with the time)
+                for (std::size_t r = 0; r < t.clock_regions.size() && t.clocks.size() < 48; ++r)
+                {
+                    const auto &region = t.clock_regions[r];
+                    const unsigned words = region.bytes / 4;
+                    for (unsigned i = 0; i < words && t.clocks.size() < 48; ++i)
+                        for (const bool dbl : {false, true})
+                        {
+                            if (dbl && (i % 2 || i + 1 >= words))
+                                continue;
+                            const auto w = region.first + i;
+                            const double va = snap_value(a, w, dbl), vb = snap_value(b, w, dbl), vc = snap_value(c, w, dbl);
+                            const float u1 = clock_unit(va, vb, ab), u2 = clock_unit(vb, vc, bc);
+                            if (!same_rate(u1, u2, 0.15f))
+                                continue;
+                            BossTuning::Clock k;
+                            k.at = region.at + i * 4, k.where = region.where + " " + hex(i * 4) + (dbl ? " (8 bytes)" : ""), k.dbl = dbl, k.unit = (u1 + u2) / 2;
+                            k.last = vc, k.region = r;
+                            t.clocks.push_back(k);
+                            if (shown++ < 16)
+                                out << "\n  " << k.where << ": " << va << " -> " << vb << " -> " << vc << " (" << k.unit << " a second)";
+                        }
+                }
+                std::cout << "Boss speed research: in his first slam, " << t.clocks.size() << " numbers around him count up with the time (" << t.clock_regions.size()
+                          << " places looked at, " << ab + bc << " s)" << out.str() << "\n" << std::flush;
+            }
+            else
+            {
+                // (his second slam: the ones that started over, lower than at the end of the first, and count up again)
+                unsigned confirmed = 0;
+                for (auto &k : t.clocks)
+                {
+                    const auto w = t.clock_regions[k.region].first + static_cast<std::size_t>((k.at - t.clock_regions[k.region].at) / 4);
+                    const double va = snap_value(a, w, k.dbl), vb = snap_value(b, w, k.dbl), vc = snap_value(c, w, k.dbl);
+                    k.confirmed = va < k.last - 0.05 * k.unit && same_rate(clock_unit(va, vb, ab), k.unit, 0.25f) && same_rate(clock_unit(vb, vc, bc), k.unit, 0.25f);
+                    if (k.confirmed && shown++ < 16)
+                        out << "\n  " << k.where << ": " << k.last << " at the end of his first slam, then " << va << " -> " << vb << " -> " << vc;
+                    confirmed += k.confirmed ? 1 : 0;
+                    k.last = vc;
+                }
+                // (the speed next to each of them that isn't his actor's own: the numbers that are 1 within 0x80 bytes of it, nearest
+                // first, 4 for each at most and 12 in all, see papu_slam_rate)
+                std::set<Address> taken;
+                for (std::size_t i = 0; i < t.clocks.size() && t.rate_candidates.size() < 12; ++i)
+                {
+                    const auto &k = t.clocks[i];
+                    if (!k.confirmed || k.where.rfind("his actor", 0) == 0)
+                        continue;
+                    const auto &region = t.clock_regions[k.region];
+                    std::vector<std::pair<Address, Address>> nearby;
+                    for (unsigned off = 0; off + 4 <= region.bytes; off += 4)
+                    {
+                        const Address at = region.at + off, dist = at > k.at ? at - k.at : k.at - at;
+                        if (dist == 0 || dist > 0x80 || (k.dbl && dist < 8) || b[region.first + off / 4] != 0x3f800000u || taken.count(at))
+                            continue;
+                        nearby.emplace_back(dist, at);
+                    }
+                    std::sort(nearby.begin(), nearby.end());
+                    unsigned added = 0;
+                    for (const auto &[dist, at] : nearby)
+                        if (t.rate_candidates.size() < 12 && added++ < 4)
+                        {
+                            BossTuning::RateCandidate rc;
+                            rc.at = at, rc.where = region.where + " " + hex(static_cast<unsigned>(at - region.at)), rc.region = k.region, rc.clock = i;
+                            t.rate_candidates.push_back(rc);
+                            taken.insert(at);
+                        }
+                }
+                // (the one found in an earlier visit first)
+                for (std::size_t i = 1; i < t.rate_candidates.size(); ++i)
+                    if (!rate_found_where.empty() && t.rate_candidates[i].where == rate_found_where)
+                        std::rotate(t.rate_candidates.begin(), t.rate_candidates.begin() + static_cast<std::ptrdiff_t>(i), t.rate_candidates.begin() + static_cast<std::ptrdiff_t>(i) + 1);
+                out << "\n  next to them: " << t.rate_candidates.size() << " numbers that are 1 (tried as his moves' speed with /boss_speed above 100)";
+                for (const auto &rc : t.rate_candidates)
+                    out << "\n    " << rc.where;
+                std::cout << "Boss speed research: in his second slam, " << confirmed << " of them started over and counted up again (clocks of his moves)" << out.str() << "\n"
+                          << std::flush;
+            }
+            ++t.clock_period;
+        }
+        // V1.3.35 (Eric: "I want the speed for the slam and spin to be faster"): his slam is a move the game plays (V1.3.34's log:
+        // 0.9 s from when he stands to the slam at every speed, with no timer of his AI in it). With /boss_speed above 100 the
+        // numbers that are 1 next to a clock of his moves (see papu_clocks), or next to his spin speed (see papu_spin_search),
+        // are tried as his moves' speed, one in each stand: set to the speed as he stands. V1.3.36: the try is checked by his
+        // slam itself (V1.3.35's log found no clock): if it comes clearly sooner than the game's own (the shortest seen while
+        // nothing of ours was set), that's his moves' speed, and from then on each of his stands (his slam, and the wait after
+        // it) plays at the speed; the 1 goes back as he spins (his spin has its own, see papu_spin_list). One that doesn't make
+        // his slam sooner goes back to 1 after the slam
+        void papu_slam_rate(BossTuning &t, int s, unsigned percent, std::uint64_t now)
+        {
+            const float factor = static_cast<float>(percent) / 100.0f;
+            // (as he stands: the next one to try, once his slam's own time is known)
+            if (!t.rate_found && !t.rate_trying && s == 1 && percent > 100 && t.slam_normal && t.rate_stand != t.stand_seen && t.rate_next < t.rate_candidates.size())
+                t.rate_trying = true, t.rate_retries = 0;
+            const bool have = (t.rate_found || t.rate_trying) && t.rate_next < t.rate_candidates.size();
+            const auto &rc = have ? t.rate_candidates[t.rate_next] : BossTuning::RateCandidate{};
+            // (the object it's in still the one it was found in: nothing is set anywhere else)
+            const auto same = [&] {
+                return have && rc.region < t.clock_regions.size() && typed(t.clock_regions[rc.region].at, t.clock_regions[rc.region].type - base());
+            };
+            // (what we set goes back to 1, if it's still what we set)
+            const auto put_back = [&] {
+                if (t.rate_written && same() && std::abs(value<float>(rc.at) - t.rate_value) < 0.0001f)
+                    write(rc.at, 1.0f);
+                t.rate_written = false;
+            };
+            if (s != 1 || percent <= 100)
+            {
+                if (t.rate_written)
+                {
+                    put_back();
+                    // (a try cut short before his slam: tried again in his next stand, twice at most)
+                    if (t.rate_trying && !t.rate_checked && ++t.rate_retries > 2)
+                        t.rate_trying = false, ++t.rate_next, t.rate_retries = 0;
+                }
+                return;
+            }
+            const auto since = now - t.stand_seen;
+            // as he stands: his moves' speed set (the one found, or the next to try)
+            if (t.rate_stand != t.stand_seen && since < 150)
+            {
+                t.rate_stand = t.stand_seen;
+                if (!have)
+                    return;
+                if (!same() || std::abs(value<float>(rc.at) - 1.0f) > 0.0001f)
+                {
+                    if (t.rate_lines < 30)
+                        ++t.rate_lines, std::cout << "Boss speed: " << (t.rate_found ? "his moves' speed" : "the number tried as his moves' speed") << " (" << rc.where << ") isn't 1 as he stands"
+                                                  << (same() ? " (" + std::to_string(value<float>(rc.at)) + ")" : std::string(" (its object is gone)")) << ": left as it is\n" << std::flush;
+                    if (!t.rate_found)
+                        t.rate_trying = false, ++t.rate_next;
+                    return;
+                }
+                write(rc.at, factor);
+                t.rate_written = true, t.rate_value = factor, t.rate_checked = false, t.try_stand = t.stand_seen;
+                if (t.rate_found && t.rate_lines < 30 && t.rate_uses++ < 6)
+                    ++t.rate_lines, std::cout << "Boss speed: he stands; his slam plays at x" << factor << "\n" << std::flush;
+                return;
+            }
+            // a try: his slam in this stand, sooner than the game's own or not
+            if (t.rate_found || !t.rate_trying || !t.rate_written || t.rate_checked || t.try_stand != t.stand_seen)
+                return;
+            const bool slammed = t.slam_seen_at >= t.stand_seen && t.slam_seen_at;
+            if (!slammed && since < t.slam_normal * 2 + 500)
+                return;
+            t.rate_checked = true;
+            std::ostringstream line;
+            line << "Boss speed: " << rc.where << " tried as his moves' speed (x" << factor << "): ";
+            if (!slammed)
+            {
+                // (no slam in this stand: tried again in his next, twice at most)
+                put_back();
+                line << "no slam came; tried again";
+                if (++t.rate_retries > 2)
+                    t.rate_trying = false, ++t.rate_next, t.rate_retries = 0, line << " (no: the next one)";
+            }
+            else if (const auto took = t.slam_seen_at - t.stand_seen; static_cast<double>(took) < static_cast<double>(t.slam_normal) * 0.8)
+            {
+                t.rate_found = true, t.rate_trying = false, rate_found_where = rc.where;
+                line << "his slam came " << seconds(took) << " after he stood (" << seconds(t.slam_normal) << " as the game plays it): that's his moves' speed. From now on his slams play at the speed";
+            }
+            else
+            {
+                put_back();
+                t.rate_trying = false, ++t.rate_next, t.rate_retries = 0;
+                line << "his slam came " << seconds(took) << " after he stood, as always: not it (back to 1)";
+            }
+            if (t.rate_lines < 30)
+                ++t.rate_lines, std::cout << line.str() << "\n" << std::flush;
+        }
+        // (a fight that starts over from his throne: his parts may be new, so what was found in them is looked for again)
+        void papu_clocks_reset(BossTuning &t)
+        {
+            t.clock_regions.clear(), t.clocks.clear(), t.rate_candidates.clear(), t.spin_places.clear();
+            t.clock_period = t.clock_step = 0, t.rate_next = t.rate_clock = 0;
+            t.rate_found = t.rate_trying = t.rate_written = t.rate_checked = false;
+            t.spin_candidates = false, t.spin_last_v = 0;
+        }
+        // V1.3.35 research: where his spin speed is, a little into each spin: the places around him (see papu_clock_regions)
+        // and his scripts holding that number, and how many of the last search's places hold the new one too (they follow his
+        // spin speed: what turns him). Not for 1, which too many numbers are
+        void papu_spin_search(BossTuning &t, float v)
+        {
+            if (t.spin_searches >= 6 || !t.papu || !(v > 0.05f) || std::abs(v - 1.0f) < 0.001f)
+                return;
+            ++t.spin_searches;
+            if (t.clock_regions.empty())
+                papu_clock_regions(t);
+            const auto close = [&](float f) { return std::abs(f - v) < 0.0005f; };
+            const bool changed = std::abs(v - t.spin_last_v) > 0.001f;
+            t.spin_last_v = v;
+            std::ostringstream follow;
+            unsigned following = 0;
+            std::vector<BossTuning::SpinPlace> found;
+            for (auto p : t.spin_places)
+                if (close(value<float>(p.at)))
+                {
+                    ++p.follows;
+                    p.moved = p.moved || changed;
+                    if (following++ < 8)
+                        follow << "\n  follows it (" << p.follows + 1 << " spins in a row" << (p.moved ? ", from one number to another" : "") << "): " << p.where;
+                    found.push_back(p);
+                }
+            const auto known = [&](Address at) { return std::any_of(found.begin(), found.end(), [&](const BossTuning::SpinPlace &p) { return p.at == at; }); };
+            const auto scan = [&](Address at, unsigned bytes, const std::string &where, std::size_t region) {
+                std::vector<float> words(bytes / 4);
+                if (!read(at, words))
+                    return;
+                for (unsigned i = 0; i < words.size() && found.size() < 400; ++i)
+                    if (close(words[i]) && at + i * 4 != t.papu_ai + t.spin_at && !known(at + i * 4))
+                    {
+                        BossTuning::SpinPlace p;
+                        p.at = at + i * 4, p.where = where + " " + hex(i * 4), p.region = region;
+                        found.push_back(p);
+                    }
+            };
+            for (std::size_t r = 0; r < t.clock_regions.size(); ++r)
+                scan(t.clock_regions[r].at, t.clock_regions[r].bytes, t.clock_regions[r].where, r);
+            for (const auto &[c, script] : entity_scripts(t.papu))
+                scan(c, 0x200, "his script " + script, static_cast<std::size_t>(-1));
+            std::ostringstream fresh;
+            unsigned shown = 0;
+            for (const auto &p : found)
+                if (!p.follows && shown++ < 10)
+                    fresh << "\n  " << p.where;
+            // (V1.3.36: next to a place that followed his spin speed from one number to another, the numbers that are 1 are tried
+            // as his moves' speed too, see papu_slam_rate: the game keeps his moves' numbers together there)
+            std::ostringstream added;
+            if (!t.spin_candidates)
+                for (const auto &p : found)
+                {
+                    if (!p.moved || p.region >= t.clock_regions.size())
+                        continue;
+                    t.spin_candidates = true;
+                    const auto &region = t.clock_regions[p.region];
+                    std::vector<std::uint32_t> words(region.bytes / 4);
+                    if (!typed(region.at, region.type - base()) || !read(region.at, words))
+                        continue;
+                    for (unsigned off = 0; off + 4 <= region.bytes && t.rate_candidates.size() < 20; off += 4)
+                    {
+                        const Address at = region.at + off, dist = at > p.at ? at - p.at : p.at - at;
+                        if (dist == 0 || dist > 0x40 || words[off / 4] != 0x3f800000u ||
+                            std::any_of(t.rate_candidates.begin(), t.rate_candidates.end(), [&](const BossTuning::RateCandidate &rc) { return rc.at == at; }))
+                            continue;
+                        BossTuning::RateCandidate rc;
+                        rc.at = at, rc.where = region.where + " " + hex(off), rc.region = p.region;
+                        t.rate_candidates.push_back(rc);
+                        added << "\n    " << rc.where;
+                    }
+                }
+            std::cout << "Boss speed research: his spin speed " << v << " (spin " << t.spin_searches << "): " << found.size() << " places around him hold it; "
+                      << following << " of them held his last spin speed too" << follow.str() << fresh.str()
+                      << (added.str().empty() ? std::string() : "\n  next to the one that follows it, tried as his moves' speed with /boss_speed above 100:" + added.str()) << "\n"
+                      << std::flush;
+            t.spin_places = std::move(found);
+        }
+        // V1.3.36: an angle between -pi and pi. (V1.3.38: without a loop. V1.3.37 took 2 pi off until it was below pi, and his
+        // facing search (see papu_yaw_research) gave it every number around him: for a huge one taking 2 pi off changes
+        // nothing, and the game froze as he first stood after his spin)
+        float wrap_angle(float a)
+        {
+            if (!std::isfinite(a))
+                return a;
+            return std::remainder(a, 6.2831853f);
+        }
+        // the way a matrix faces along one of its axes (see BossTuning::face_axis), flat on the ground
+        bool matrix_facing(const Matrix &m, int axis, float &x, float &y)
+        {
+            x = axis < 2 ? m[0] : m[4], y = axis < 2 ? m[1] : m[5];
+            if (axis % 2)
+                x = -x, y = -y;
+            const float length = std::hypot(x, y);
+            if (!std::isfinite(length) || length < 0.3f)
+                return false;
+            x /= length, y /= length;
+            return true;
+        }
+        const char *axis_name(int axis)
+        {
+            static const char *names[]{"X", "-X", "Y", "-Y"};
+            return names[std::clamp(axis, 0, 3)];
+        }
+        // V1.3.36: which way he faces, checked as he jumps into the arena: the axis of his matrix pointing the way he moves fast
+        // (each look a vote). His X axis, as Crash's is (see learn_facing), unless the jump clearly says another
+        void papu_face_vote(BossTuning &t, const Matrix &m, float vx, float vy)
+        {
+            const float length = std::hypot(vx, vy);
+            if (t.face_checked || !std::isfinite(length) || length < 1)
+                return;
+            vx /= length, vy /= length;
+            for (int axis = 0; axis < 4; ++axis)
+            {
+                float x = 0, y = 0;
+                if (matrix_facing(m, axis, x, y))
+                    t.face_votes[static_cast<std::size_t>(axis)] += x * vx + y * vy;
+            }
+            ++t.face_samples;
+        }
+        void papu_face_decide(BossTuning &t)
+        {
+            if (t.face_checked || t.face_samples < 2)
+                return;
+            t.face_checked = true;
+            int best = 0;
+            for (int axis = 1; axis < 4; ++axis)
+                if (t.face_votes[static_cast<std::size_t>(axis)] > t.face_votes[static_cast<std::size_t>(best)])
+                    best = axis;
+            const float score = t.face_votes[static_cast<std::size_t>(best)] / static_cast<float>(t.face_samples);
+            if (score > 0.8f)
+                t.face_axis = best;
+            std::cout << "Boss rule: jumping into the arena he moved along his " << axis_name(best) << " axis (" << score << " of 1, " << t.face_samples
+                      << " looks): his slam is aimed along his " << axis_name(t.face_axis) << " axis\n" << std::flush;
+        }
+        // V1.3.36: his facing turned to an angle (yaw, radians, along his X axis): his transform's matrix turned about his up axis.
+        // (V1.3.37 also set the two other places his transform keeps his turn, an angle at +0x68 and a quaternion at +0x10,
+        // (0, 0, -sin(yaw / 2), cos(yaw / 2)). V1.3.38's log: with those set the game turned him back every frame, also after a
+        // hit, where V1.3.36's matrix alone had stayed (23 frames of 26): they're left as the game has them again)
+        bool papu_turn_matrix(Address transform, const Matrix &m, float yaw, float target)
+        {
+            const float d = wrap_angle(target - yaw), cs = std::cos(d), sn = std::sin(d);
+            std::array<float, 12> rows{};
+            for (std::size_t r = 0; r < 3; ++r)
+            {
+                const float x = m[r * 4], y = m[r * 4 + 1];
+                rows[r * 4] = x * cs - y * sn, rows[r * 4 + 1] = x * sn + y * cs, rows[r * 4 + 2] = m[r * 4 + 2], rows[r * 4 + 3] = m[r * 4 + 3];
+            }
+            return write(transform + 32, rows);
+        }
+        // V1.3.39: V1.3.38's log, the game put his facing back every frame (52 to 54 frames of each stand): it keeps his facing
+        // in two of his parts too (the facing search found them following his facing from stand to stand: his part
+        // +0x150c710 at +0xd8, his part +0x150ee50 at +0x88), and puts him back from there. Those (by part type and place), and
+        // any the search finds following his facing in a later stand
+        std::set<std::pair<Address, unsigned>> facing_stores{{0x150c710, 0xd8}, {0x150ee50, 0x88}};
+        std::vector<BossTuning::FacingPlace> papu_facing_places(Address papu)
+        {
+            std::vector<BossTuning::FacingPlace> out;
+            for (const auto part : list(value<Address>(papu + 24), 128))
+            {
+                const auto vt = value<Address>(part);
+                if (vt < base() || vt >= module_end())
+                    continue;
+                for (const auto &[type, off] : facing_stores)
+                    if (vt - base() == type && out.size() < 8)
+                    {
+                        BossTuning::FacingPlace p;
+                        p.at = part + off, p.type = type, p.offset = off, p.name = "his part " + hex(static_cast<unsigned>(type)) + " " + hex(off);
+                        out.push_back(p);
+                    }
+            }
+            return out;
+        }
+        // (V1.3.39) his facing's places set to target: each one that holds his facing now (as the game has it) or what was set
+        // there last frame; as it keeps the angle (radians or degrees, found from his facing and kept for the visit), its whole
+        // turns kept. One that holds something else is left alone
+        void papu_facing_set(BossTuning &t, float yaw, float target)
+        {
+            for (auto &p : t.facing_places)
+            {
+                const float v = value<float>(p.at);
+                const bool was = p.written;
+                p.written = false;
+                if (!std::isfinite(v) || std::abs(v) > 100000)
+                    continue;
+                if (was)
+                    ++(std::abs(v - p.wrote) <= 0.0001f * std::max(1.0f, std::abs(p.wrote)) ? p.held : p.reset);
+                const auto as = [&](int unit, float angle) {
+                    return unit == 1 ? std::abs(v) < 1000 && std::abs(wrap_angle(v - angle)) < 0.02f : std::abs(std::remainder(v - angle * 57.29578f, 360.0f)) < 1.0f;
+                };
+                int &unit = t.facing_unit[p.at];
+                if (!unit)
+                {
+                    const bool r = as(1, yaw), d = as(2, yaw);
+                    if (r != d)
+                        unit = r ? 1 : 2;
+                }
+                const bool ours = was && std::abs(v - p.wrote) <= 0.001f * std::max(1.0f, std::abs(p.wrote));
+                if (!unit || (!ours && !as(unit, yaw)))
+                    continue;
+                const float turn = wrap_angle(target - (unit == 1 ? v : v / 57.29578f));
+                const float to = unit == 1 ? v + turn : v + turn * 57.29578f;
+                if (std::abs(turn) < 0.0005f || write(p.at, to))
+                    p.wrote = std::abs(turn) < 0.0005f ? v : to, p.written = true, p.set += std::abs(turn) >= 0.0005f;
+            }
+        }
+        // (V1.3.41) the engine's own entry for a type of the game's, by its function table: the engine's list of its types
+        // (each entry has its name at +16, its fields at +40, +24 of them (each with its size at +22, its place at +24 and its
+        // name at +48), its size at +90 and its function table at +56) is gone through once, and kept (V1.3.40 went through it
+        // again for each name: after the code review, once)
+        Address engine_meta(Address vt)
+        {
+            static std::unordered_map<Address, Address> metas;
+            static bool built = false;
+            if (!built)
+            {
+                const auto context = value<Address>(base() + 0x1acbe40);
+                const auto registry = context ? value<Address>(context + 32) : 0;
+                const auto count = registry ? value<unsigned>(registry) : 0;
+                const auto data = registry ? value<Address>(registry + 16) : 0;
+                std::vector<Address> list(count && count <= 65535 && data ? count : 0);
+                if (!list.empty() && read(data, list))
+                {
+                    built = true;
+                    for (const auto meta : list)
+                        if (const auto v = meta ? value<Address>(meta + 56) : 0; v >= base() && v < module_end())
+                            metas.emplace(v, meta);
+                }
+            }
+            const auto it = metas.find(vt);
+            return it == metas.end() ? 0 : it->second;
+        }
+        // (V1.3.41) an object's size, from its type's entry (a script's from its own): 0 if not known
+        unsigned object_size(Address object, Address type)
+        {
+            Address meta = 0;
+            if (type == 0x13bbbd0)
+            {
+                meta = value<Address>(object + 56);
+                if (string(value<Address>(meta + 16), 120).rfind("Scripts.Graph.", 0) != 0)
+                    return 0;
+            }
+            else
+                meta = engine_meta(base() + type);
+            return meta ? value<std::uint16_t>(meta + 90) : 0;
+        }
+        // V1.3.39 research: what a type of the game's is, by its function table: its C++ name (from the table's type
+        // information) and the engine's own name for it with the field at an offset (see engine_meta)
+        std::string engine_type_text(Address type, unsigned offset)
+        {
+            static std::map<std::pair<Address, unsigned>, std::string> known;
+            if (const auto k = known.find({type, offset}); k != known.end())
+                return k->second;
+            std::ostringstream out;
+            const auto vt = base() + type;
+            const auto locator = value<Address>(vt - 8);
+            std::array<std::uint32_t, 6> col{};
+            if (locator && read(locator, col) && col[0] == 1 && base() + col[5] == locator)
+                if (const auto name = string(base() + col[3] + 16, 120); !name.empty())
+                    out << name;
+            if (const auto meta = engine_meta(vt))
+            {
+                out << (out.tellp() > 0 ? ", " : "") << "the engine's " << string(value<Address>(meta + 16), 96) << " (" << value<std::uint16_t>(meta + 90) << " bytes";
+                const auto n = value<unsigned>(meta + 24);
+                const auto fields = value<Address>(meta + 40);
+                std::string at, below, above;
+                unsigned below_at = 0, above_at = ~0u;
+                for (unsigned i = 0; fields && n <= 1024 && i < n; ++i)
+                {
+                    const auto f = value<Address>(fields + i * 8);
+                    const unsigned off = value<std::uint16_t>(f + 24), size = value<std::uint16_t>(f + 22);
+                    const auto name = string(value<Address>(f + 48), 64);
+                    if (offset >= off && offset < off + std::max(size, 1u))
+                        at = name + (off == offset ? std::string() : " +" + std::to_string(offset - off)) + " (" + std::to_string(size) + " bytes)";
+                    else if (off < offset && off >= below_at)
+                        below_at = off, below = name + " " + hex(off);
+                    else if (off > offset && off < above_at)
+                        above_at = off, above = name + " " + hex(off);
+                }
+                out << ", " << n << " fields): " << (at.empty() ? "no field of its own at " + hex(offset) + " (before it " + (below.empty() ? "none" : below) +
+                                                                     ", after it " + (above.empty() ? "none" : above) + ")"
+                                                               : "its " + at);
+            }
+            return known[{type, offset}] = out.tellp() > 0 ? out.str() : std::string("no name found");
+        }
+        // (V1.3.41) the name of what's at a place in one of his objects: for a script, its setting there (from the script's own
+        // list of them); for anything else, the engine's name for its type and the field there (see engine_type_text)
+        std::string turn_place_name(const BossTuning::TurnPlace &p)
+        {
+            if (p.type == 0x13bbbd0)
+            {
+                const auto meta = value<Address>(p.object + 56);
+                const auto script = string(value<Address>(meta + 16), 96);
+                const auto count = value<unsigned>(meta + 24);
+                const auto fields = value<Address>(meta + 40);
+                for (unsigned i = 0; fields && count <= 1024 && i < count; ++i)
+                {
+                    const auto f = value<Address>(fields + i * 8);
+                    const unsigned off = value<std::uint16_t>(f + 24), size = value<std::uint16_t>(f + 22);
+                    if (p.offset >= off && p.offset < off + std::max(size, 1u))
+                        return script + "'s " + string(value<Address>(f + 48), 64) + (off == p.offset ? std::string() : " +" + std::to_string(p.offset - off));
+                }
+                return script + " (no setting there)";
+            }
+            return engine_type_text(p.type, p.offset);
+        }
+        // V1.3.41 research (Eric: "the spin doesn't start exactly where he slammed at. It just kind of glitches to, jumps to a
+        // different location, and then he starts spinning"): V1.3.40's log, the one place of his facing that was set (in his
+        // CBehaviorComponent, +0xd8: the same place as his CBehaviorPhysicsGenericShapeComponent's _gimbalAngles' last
+        // number) was put back by the game every frame, and his spin started from where the game had him. So the game keeps
+        // his facing somewhere else too, in a form the facing search doesn't see: an angle that keeps counting as he spins,
+        // a direction, or a quaternion. What turns with him is found by how it changes as he spins: a little into each of his
+        // first spins of a visit, everything around him (his actor, all his parts, scripts too, and what they point to) is
+        // read three times, 0.13 s apart, while his turning is followed frame by frame; what changed by as much as he turned
+        // in both steps turns with him (as an angle in radians, degrees or turns, either way; a direction; or a quaternion's
+        // turn about his up axis). Those are set with his facing as he's aimed (see papu_turn_set)
+        void papu_turn_regions(BossTuning &t)
+        {
+            t.turn_regions.clear();
+            ReadableRegions ok;
+            std::set<Address> seen;
+            std::size_t total = 0;
+            const auto full = [&] { return t.turn_regions.size() >= 1500 || total > 0x800000; };
+            const auto add = [&](Address at, unsigned bytes, const std::string &where, bool writable) {
+                if (full() || at < 0x10000 || (at & 3) || !seen.insert(at).second)
+                    return false;
+                while (bytes >= 0x100 && !ok(at, bytes))
+                    bytes /= 2;
+                if (bytes < 0x100)
+                    return false;
+                BossTuning::TurnRegion r;
+                r.at = at, r.type = value<Address>(at), r.bytes = bytes, r.where = where, r.writable = writable;
+                t.turn_regions.push_back(r);
+                total += bytes;
+                return true;
+            };
+            const auto object_type = [&](Address p) -> Address {
+                if (p < 0x10000 || (p & 7) || !ok(p, 16))
+                    return 0;
+                const auto vt = value<Address>(p);
+                return vt >= base() && vt < module_end() ? vt - base() : 0;
+            };
+            const auto pointers = [&](Address p, unsigned bytes) {
+                std::vector<Address> out(bytes / 8);
+                if (!read(p, out))
+                    out.clear();
+                return out;
+            };
+            add(t.papu, 0x1000, "his actor", true);
+            // (his transform's own turn is left to the aim, see papu_turn_matrix: V1.3.38's log, setting its angle and quaternion
+            // had the game put him back every frame)
+            t.turn_transform = value<Address>(t.papu + 48);
+            if (t.turn_transform)
+                add(t.turn_transform, 0x100, "his transform", false);
+            // (level by level, so every part is read before what they point to, and that before what it points to: the reading
+            // has a size limit)
+            std::vector<std::pair<Address, std::string>> level, next;
+            for (const auto part : list(value<Address>(t.papu + 24), 128))
+                if (const auto type = object_type(part); type && !full())
+                {
+                    const auto name = "his part " + hex(static_cast<unsigned>(type));
+                    if (add(part, 0x1000, name, true))
+                        level.emplace_back(part, name);
+                }
+            for (const unsigned bytes : {0x800u, 0x400u})
+            {
+                next.clear();
+                for (const auto &[object, name] : level)
+                {
+                    if (full())
+                        break;
+                    const auto inner = pointers(object, bytes == 0x800 ? 0x400 : 0x200);
+                    for (std::size_t i = 1; i < inner.size() && !full(); ++i)
+                    {
+                        const auto p = inner[i];
+                        const auto ptype = object_type(p);
+                        if (!ptype || p == t.papu || seen.count(p))
+                            continue;
+                        const auto where = name + " " + hex(static_cast<unsigned>(i * 8)) + " -> " + hex(static_cast<unsigned>(ptype));
+                        if (add(p, bytes, where, true))
+                            next.emplace_back(p, where);
+                    }
+                }
+                level.swap(next);
+            }
+            // (after the code review: no window reaches into the next object read, so each number is in the one object it's
+            // really in; the actor's 4 KB could otherwise take in his transform)
+            std::sort(t.turn_regions.begin(), t.turn_regions.end(), [](const BossTuning::TurnRegion &a, const BossTuning::TurnRegion &b) { return a.at < b.at; });
+            for (std::size_t i = 0; i + 1 < t.turn_regions.size(); ++i)
+                if (auto &r = t.turn_regions[i]; r.at + r.bytes > t.turn_regions[i + 1].at)
+                    r.bytes = static_cast<unsigned>((t.turn_regions[i + 1].at - r.at) & ~Address(3));
+            t.turn_regions.erase(std::remove_if(t.turn_regions.begin(), t.turn_regions.end(), [](const BossTuning::TurnRegion &r) { return r.bytes < 8; }), t.turn_regions.end());
+            std::size_t first = 0;
+            for (auto &r : t.turn_regions)
+                r.first = first, first += r.bytes / 4;
+        }
+        void papu_turn_snap(const BossTuning &t, std::vector<float> &out)
+        {
+            std::size_t total = 0;
+            for (const auto &r : t.turn_regions)
+                total += r.bytes / 4;
+            out.assign(total, std::nanf(""));
+            for (const auto &r : t.turn_regions)
+            {
+                SIZE_T got = 0;
+                if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(r.at), out.data() + r.first, r.bytes, &got) || got != r.bytes)
+                    std::fill(out.begin() + static_cast<std::ptrdiff_t>(r.first), out.begin() + static_cast<std::ptrdiff_t>(r.first + r.bytes / 4), std::nanf(""));
+            }
+        }
+        // (the three readings compared: what turned with him in both steps)
+        void papu_turn_find(BossTuning &t)
+        {
+            const auto &a = t.turn_snaps[0], &b = t.turn_snaps[1], &c = t.turn_snaps[2];
+            const double d1 = t.turn_marks[1] - t.turn_marks[0], d2 = t.turn_marks[2] - t.turn_marks[1];
+            std::ostringstream head;
+            head << "Boss rule research: what turns with him as he spins (spin " << t.turn_spins << ", " << t.turn_regions.size() << " places around him read; he turned "
+                 << static_cast<int>(d1 * 57.29578) << " and " << static_cast<int>(d2 * 57.29578) << " degrees in the two steps)";
+            if (std::abs(d1) < 0.35 || std::abs(d2) < 0.35 || std::abs(d1) > 3 || std::abs(d2) > 3 || a.size() != b.size() || b.size() != c.size())
+            {
+                if (t.turn_lines < 12)
+                    ++t.turn_lines, std::cout << head.str() << ": not read (he turned too little or too much to tell)\n" << std::flush;
+                return;
+            }
+            struct Found
+            {
+                Address at;
+                int kind;
+                float unit, sign;
+                std::size_t region;
+                unsigned offset;
+            };
+            std::vector<Found> found;
+            std::set<std::pair<Address, int>> have;
+            const auto keep = [&](const Found &f) {
+                if (found.size() < 400 && have.insert({f.at, f.kind}).second)
+                    found.push_back(f);
+            };
+            const auto turned_by = [](double from, double to, double want) {
+                return std::abs(std::remainder(to - from - want, 6.283185307179586)) <= 0.04 * std::abs(want) + 0.01;
+            };
+            const auto unit_long = [](float x, float y) { return std::abs(x * x + y * y - 1) < 0.03f; };
+            const float units[3] = {1.0f, 57.29578f, 0.15915494f};
+            for (std::size_t r = 0; r < t.turn_regions.size(); ++r)
+            {
+                const auto &reg = t.turn_regions[r];
+                const std::size_t n = reg.bytes / 4;
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    const std::size_t k = reg.first + i;
+                    const float x0 = a[k], x1 = b[k], x2 = c[k];
+                    if (!std::isfinite(x0) || !std::isfinite(x1) || !std::isfinite(x2) || std::abs(x0) > 1e6f || std::abs(x1) > 1e6f || std::abs(x2) > 1e6f)
+                        continue;
+                    // an angle (one that may keep counting past a turn, or start over after one)
+                    if (x0 != x1 && x1 != x2)
+                        for (const float u : units)
+                            for (const float sgn : {1.0f, -1.0f})
+                            {
+                                const auto fits = [&](double change, double turned) {
+                                    const double want = sgn * u * turned, period = 6.283185307179586 * u, slack = 0.04 * std::abs(want) + 1e-4;
+                                    return std::abs(change - want) <= slack || std::abs(change - want - period) <= slack || std::abs(change - want + period) <= slack;
+                                };
+                                if (fits(static_cast<double>(x1) - x0, d1) && fits(static_cast<double>(x2) - x1, d2))
+                                    keep({reg.at + i * 4, 1, u, sgn, r, static_cast<unsigned>(i * 4)});
+                            }
+                    if (i + 1 >= n)
+                        continue;
+                    const float y0 = a[k + 1], y1 = b[k + 1], y2 = c[k + 1];
+                    if (!std::isfinite(y0) || !std::isfinite(y1) || !std::isfinite(y2) || !unit_long(x0, y0) || !unit_long(x1, y1) || !unit_long(x2, y2))
+                        continue;
+                    // a direction (x, y)
+                    const double p0 = std::atan2(y0, x0), p1 = std::atan2(y1, x1), p2 = std::atan2(y2, x2);
+                    for (const float sgn : {1.0f, -1.0f})
+                        if (turned_by(p0, p1, sgn * d1) && turned_by(p1, p2, sgn * d2))
+                            keep({reg.at + i * 4, 2, 1, sgn, r, static_cast<unsigned>(i * 4)});
+                    // a quaternion's turn about his up axis (its last two numbers, after two that stay about 0)
+                    if (i >= 2)
+                    {
+                        bool flat = true;
+                        for (const auto *snap : {&a, &b, &c})
+                            flat = flat && std::abs((*snap)[k - 2]) < 0.03f && std::abs((*snap)[k - 1]) < 0.03f;
+                        const double q0 = 2 * std::atan2(x0, y0), q1 = 2 * std::atan2(x1, y1), q2 = 2 * std::atan2(x2, y2);
+                        for (const float sgn : {1.0f, -1.0f})
+                            if (flat && turned_by(q0, q1, sgn * d1) && turned_by(q1, q2, sgn * d2))
+                                keep({reg.at + i * 4, 3, 1, sgn, r, static_cast<unsigned>(i * 4)});
+                    }
+                }
+            }
+            // (after the code review: each one's own angle less his facing at each reading, which has to stay the same as he
+            // turns (0.25 radians either way); it's kept, to check it against him as he stands before anything is set there)
+            const auto phase_at = [&](const Found &f, const std::vector<float> &snap, float yaw) {
+                const auto k = t.turn_regions[f.region].first + f.offset / 4;
+                const double own = f.kind == 1 ? snap[k] / f.unit : f.kind == 2 ? std::atan2(snap[k + 1], snap[k]) : 2 * std::atan2(snap[k], snap[k + 1]);
+                return static_cast<float>(std::remainder(own - f.sign * yaw, 6.283185307179586));
+            };
+            // (into what's known: one found again stays, a new one joins, one not found twice in a row is dropped)
+            for (auto &p : t.turn_places)
+                p.missed += 1;
+            unsigned out_of_step = 0;
+            for (const auto &f : found)
+            {
+                const auto &reg = t.turn_regions[f.region];
+                const float ph0 = phase_at(f, a, t.turn_yaws[0]), ph1 = phase_at(f, b, t.turn_yaws[1]), ph2 = phase_at(f, c, t.turn_yaws[2]);
+                if (std::abs(wrap_angle(ph1 - ph0)) > 0.25f || std::abs(wrap_angle(ph2 - ph1)) > 0.25f)
+                {
+                    ++out_of_step;
+                    continue;
+                }
+                auto it = std::find_if(t.turn_places.begin(), t.turn_places.end(), [&](const BossTuning::TurnPlace &p) { return p.at == f.at && p.kind == f.kind; });
+                if (it == t.turn_places.end())
+                {
+                    BossTuning::TurnPlace p;
+                    p.at = f.at, p.object = reg.at, p.type = reg.type >= base() && reg.type < module_end() ? reg.type - base() : 0, p.offset = f.offset, p.kind = f.kind;
+                    p.unit = f.unit, p.sign = f.sign, p.where = reg.where + " " + hex(f.offset);
+                    // (set only inside its object as the game says it's sized (the first 256 bytes when that's not known), and
+                    // nothing in his transform)
+                    const unsigned size = p.type ? object_size(p.object, p.type) : 0, width = p.kind == 1 ? 4 : 8;
+                    p.writable = reg.writable && f.offset + width <= (size ? size : 0x100u) &&
+                                 !(t.turn_transform && p.at + width > t.turn_transform && p.at < t.turn_transform + 0x100);
+                    t.turn_places.push_back(p);
+                    it = t.turn_places.end() - 1;
+                }
+                ++it->spins, it->missed = 0, it->unit = f.unit, it->sign = f.sign, it->phase = ph2;
+            }
+            const auto before = t.turn_places.size();
+            t.turn_places.erase(std::remove_if(t.turn_places.begin(), t.turn_places.end(), [](const BossTuning::TurnPlace &p) { return p.missed >= 2; }), t.turn_places.end());
+            if (t.turn_lines >= 12)
+                return;
+            ++t.turn_lines;
+            std::ostringstream out;
+            out << head.str() << ": " << found.size() << " turned with him" << (out_of_step ? " (" + std::to_string(out_of_step) + " of them not in step with him, left out)" : std::string())
+                << (before != t.turn_places.size() ? ", " + std::to_string(before - t.turn_places.size()) + " found before didn't (dropped)" : std::string());
+            unsigned shown = 0;
+            for (const auto &f : found)
+            {
+                if (shown++ >= 24)
+                {
+                    out << "\n  ... and " << found.size() - 24 << " more";
+                    break;
+                }
+                const auto it = std::find_if(t.turn_places.begin(), t.turn_places.end(), [&](const BossTuning::TurnPlace &p) { return p.at == f.at && p.kind == f.kind; });
+                if (it == t.turn_places.end())
+                    continue;
+                out << "\n  " << it->where << ": " << (f.kind == 1 ? std::string("an angle in ") + (f.unit == 1 ? "radians" : f.unit > 2 ? "degrees" : "turns") : f.kind == 2 ? std::string("a direction") : std::string("a quaternion's turn"))
+                    << (f.sign > 0 ? "" : ", the other way") << ", " << static_cast<int>(std::lround(it->phase * 57.29578f)) << " degrees from his facing"
+                    << (it->writable ? "" : " (not set: " + std::string(t.turn_transform && it->at >= t.turn_transform && it->at < t.turn_transform + 0x100 ? "his transform's own, left to the aim" : "past its object's size") + ")")
+                    << " (" << turn_place_name(*it) << ")" << (it->spins > 1 ? ", " + std::to_string(it->spins) + " spins" : std::string());
+            }
+            std::cout << out.str() << "\n" << std::flush;
+        }
+        // (each frame: a research spin started (his first three spins of a visit), followed, read three times, and compared)
+        void papu_turn_research(BossTuning &t, int s, std::uint64_t now, bool rules)
+        {
+            // (only with the boss rules on: it's what the aim needs, and it takes a few milliseconds)
+            if (!rules && !t.turn_tracking)
+                return;
+            Matrix m{};
+            float fx = 0, fy = 0;
+            const auto transform = value<Address>(t.papu + 48);
+            const bool facing = transform && read(transform + 32, m) && std::all_of(m.begin(), m.end(), [](float f) { return std::isfinite(f); }) &&
+                                matrix_facing(m, t.face_axis, fx, fy);
+            const float yaw = facing ? std::atan2(fy, fx) : 0.0f;
+            if (s == 2 && t.state == 1 && !t.turn_tracking && t.turn_spins < 3 && facing)
+            {
+                // (V1.3.41: called as his spin starts, before his state is noted)
+                t.turn_tracking = true, t.turn_total = 0, t.turn_yaw = yaw, t.turn_snaps.clear(), t.turn_marks.clear(), t.turn_yaws.clear();
+                t.turn_due = {now + 150, now + 280, now + 410};
+                return;
+            }
+            if (!t.turn_tracking)
+                return;
+            if (s != 2 || !facing)
+            {
+                t.turn_tracking = false; // (his spin ended or was cut short: the next one is read instead)
+                return;
+            }
+            t.turn_total += wrap_angle(yaw - t.turn_yaw), t.turn_yaw = yaw;
+            const auto k = t.turn_snaps.size();
+            if (k >= 3 || now < t.turn_due[k])
+                return;
+            if (k == 0)
+                papu_turn_regions(t);
+            t.turn_snaps.emplace_back();
+            papu_turn_snap(t, t.turn_snaps.back());
+            t.turn_marks.push_back(t.turn_total), t.turn_yaws.push_back(yaw);
+            if (t.turn_snaps.size() == 3)
+            {
+                t.turn_tracking = false, ++t.turn_spins;
+                papu_turn_find(t);
+                t.turn_snaps.clear(), t.turn_regions.clear();
+            }
+        }
+        // (V1.3.41) what turns with him set to his aim: each from what it held as he stood, turned by as much as his aim turned
+        // him (d) in its own way. Only what turned with him in two of his spins, in an object that's still of the same type.
+        // The log says how often the game left it, or put it back
+        bool papu_turn_usable(const BossTuning::TurnPlace &p)
+        {
+            // (an angle in turns isn't set: one that counts a turn as 1 could be an animation's time, if one plays once a lap)
+            return p.writable && p.spins >= 2 && p.type && !(p.kind == 1 && p.unit < 0.5f) && value<Address>(p.object) == base() + p.type;
+        }
+        void papu_turn_set(BossTuning &t, float d)
+        {
+            unsigned used = 0;
+            for (auto &p : t.turn_places)
+            {
+                if (used >= 32 || !papu_turn_usable(p))
+                    continue;
+                ++used;
+                std::array<float, 2> now{};
+                if (!read(p.at, now[0]) || (p.kind != 1 && !read(p.at + 4, now[1])) || !std::isfinite(now[0]) || !std::isfinite(now[1]))
+                    continue;
+                if (!p.started)
+                {
+                    p.from = now, p.started = true, p.written = false;
+                    // (after the code review: it has to hold his facing as he stands, in its own way, as it did as he spun;
+                    // anything else there is left alone this stand)
+                    const double own = p.kind == 1 ? now[0] / p.unit : p.kind == 2 ? std::atan2(now[1], now[0]) : 2 * std::atan2(now[0], now[1]);
+                    p.out_of_step = std::abs(std::remainder(own - p.sign * t.aim_from - p.phase, 6.283185307179586)) > 0.05;
+                }
+                if (p.out_of_step)
+                    continue;
+                if (p.written)
+                    ++(std::abs(now[0] - p.wrote[0]) <= 1e-4f * std::max(1.0f, std::abs(p.wrote[0])) && std::abs(now[1] - p.wrote[1]) <= 1e-4f ? p.held : p.reset);
+                std::array<float, 2> to = p.from;
+                const float turn = p.sign * d;
+                if (p.kind == 1)
+                    to[0] = p.from[0] + p.unit * turn;
+                else if (p.kind == 2)
+                    to = {p.from[0] * std::cos(turn) - p.from[1] * std::sin(turn), p.from[0] * std::sin(turn) + p.from[1] * std::cos(turn)};
+                else
+                    to = {p.from[0] * std::cos(turn / 2) + p.from[1] * std::sin(turn / 2), p.from[1] * std::cos(turn / 2) - p.from[0] * std::sin(turn / 2)};
+                const bool same = to == now;
+                if (same || (p.kind == 1 ? write(p.at, to[0]) : write(p.at, to)))
+                    p.wrote = to, p.written = true, p.set += !same;
+            }
+        }
+        // V1.3.37 research, in case the game still turns him back: the places on him holding his facing (as an angle, in radians
+        // or degrees) as he stands, and those of the last stand holding the new one too (they follow his facing)
+        void papu_yaw_research(BossTuning &t, float yaw)
+        {
+            if (t.yaw_searches >= 4 || t.clock_regions.empty())
+                return;
+            const float degrees = yaw * 57.29578f;
+            // (only numbers an angle can be: radians within a few turns, degrees within a turn either way)
+            const auto matches = [&](float f) {
+                return std::isfinite(f) && std::abs(f) < 1000 &&
+                       ((std::abs(f) < 30 && std::abs(wrap_angle(f - yaw)) < 0.004f) || std::abs(f - degrees) < 0.2f || std::abs(f - degrees - 360) < 0.2f ||
+                        std::abs(f - degrees + 360) < 0.2f);
+            };
+            std::ostringstream follow;
+            unsigned following = 0;
+            const bool moved = std::abs(wrap_angle(yaw - t.yaw_last)) > 0.3f;
+            for (const auto &[at, where, region] : t.yaw_places)
+                if (moved && std::isfinite(value<float>(at)) && matches(value<float>(at)))
+                {
+                    if (following++ < 8)
+                        follow << "\n  follows it: " << where;
+                    // (V1.3.39: one in one of his parts itself is set with his facing from now on, see papu_facing_set)
+                    if (region >= t.clock_regions.size())
+                        continue;
+                    const auto &reg = t.clock_regions[region];
+                    if (reg.where.rfind("his part", 0) == 0 && reg.where.find("->") == std::string::npos && reg.type >= base() &&
+                        reg.type < module_end() && value<Address>(reg.at) == reg.type && at >= reg.at && at - reg.at < reg.bytes)
+                        facing_stores.emplace(reg.type - base(), static_cast<unsigned>(at - reg.at));
+                }
+            t.yaw_places.clear();
+            for (std::size_t r = 0; r < t.clock_regions.size(); ++r)
+            {
+                const auto &reg = t.clock_regions[r];
+                std::vector<float> words(reg.bytes / 4);
+                if (!read(reg.at, words))
+                    continue;
+                for (unsigned i = 0; i < words.size() && t.yaw_places.size() < 64; ++i)
+                    if (std::isfinite(words[i]) && std::abs(words[i]) > 0.05f && matches(words[i]))
+                        t.yaw_places.emplace_back(reg.at + i * 4, reg.where + " " + hex(i * 4), r);
+            }
+            ++t.yaw_searches;
+            std::cout << "Boss rule research: his facing as he stands (" << degrees << " degrees): " << t.yaw_places.size() << " places around him hold it"
+                      << (t.yaw_searches > 1 ? "; " + std::to_string(following) + " of the last stand's held his new facing too" : std::string()) << follow.str() << "\n" << std::flush;
+            t.yaw_last = yaw;
+        }
+        // V1.3.36 (Eric: "when he slams, he always targets you... the last location that Crash was"): as he stands for his slam he
+        // turns to Crash for the first half of the time to his slam, then holds that facing. V1.3.37: fast (900 degrees a second),
+        // and held until his slam (V1.3.36 let go halfway, and after a spin the game turned him back); not his first slam after
+        // he comes into the arena (Eric: "the first slam he ever does when you first start the boss... we can leave that
+        // normal"). The log says how far he turned and whether the turn stayed from frame to frame.
+        // V1.3.39 (Eric: "He's not always targeting me... whenever he decides to do a spin cycle again, he should always be
+        // slamming towards Crash last location"): V1.3.38's log, the game put him back every frame, so each frame's turn was a
+        // new small one from the game's facing (15 degrees at most) and he never got around to Crash. Now the turn is kept from
+        // frame to frame (from his facing as he stood, toward Crash), and his facing's own places in his parts are set too (see
+        // papu_facing_set), so the game itself has him facing Crash. If the game still puts him back to his own facing every
+        // frame for 10 frames, only his matrix is set (what stayed after a hit in V1.3.36), and if it still does, he's let be
+        // for that slam (no flicker between the two facings)
+        // (V1.3.41) his facing now, as his matrix has it (false if it can't be read)
+        bool papu_yaw_now(const BossTuning &t, float &yaw)
+        {
+            Matrix m{};
+            float fx = 0, fy = 0;
+            const auto transform = value<Address>(t.papu + 48);
+            if (!transform || !read(transform + 32, m) || !std::all_of(m.begin(), m.end(), [](float f) { return std::isfinite(f); }) ||
+                !matrix_facing(m, t.face_axis, fx, fy))
+                return false;
+            yaw = std::atan2(fy, fx);
+            return true;
+        }
+        void papu_aim(BossTuning &t, const Shared &state, int s, std::uint64_t now)
+        {
+            // (V1.3.41: his spin's first frames after an aimed stand, from where his aim was held: does it start there?)
+            if (t.spin_frames)
+            {
+                float yaw = 0;
+                if (s != 2 || !papu_yaw_now(t, yaw))
+                    t.spin_frames = 0;
+                else
+                    t.spin_trace += (t.spin_trace.empty() ? "" : ", ") + std::to_string(static_cast<int>(std::lround(wrap_angle(yaw - t.spin_from) * 57.29578f))), --t.spin_frames;
+                if (!t.spin_frames && !t.spin_trace.empty() && t.spin_lines < 12)
+                    ++t.spin_lines, std::cout << "Boss rule: his spin's first frames, his facing from where his aim was held (degrees): " << t.spin_trace << "\n" << std::flush;
+            }
+            // (half the time to his slam: the game's own, or shorter once his slam plays faster, see papu_slam_rate)
+            const double factor = t.rate_found ? std::clamp(state.boss_speed, 100u, 200u) / 100.0 : 1.0;
+            const auto window = static_cast<std::uint64_t>(static_cast<double>(t.slam_normal ? t.slam_normal : 900) / factor / 2);
+            const bool stand = state.boss_rules && t.papu && s == 1 && t.stand_seen && !t.aim_skip;
+            const auto since = now - t.stand_seen;
+            const bool slammed = t.slam_seen_at && t.slam_seen_at >= t.stand_seen;
+            // (V1.3.41: held until he stops standing, his spin's start too, not only until his slam: what's set has to be there
+            // as his spin starts)
+            const bool aiming = stand && since <= window, holding = stand && !aiming && since < 3000;
+            if (!aiming && !holding)
+            {
+                if (t.aim_wrote)
+                {
+                    t.aim_wrote = false;
+                    // (his spin started: where from, against where his aim was held)
+                    float yaw = 0;
+                    const bool spun = s == 2 && papu_yaw_now(t, yaw);
+                    const int jump = spun ? static_cast<int>(std::lround(wrap_angle(yaw - t.aim_lock) * 57.29578f)) : 0;
+                    if (spun)
+                        t.spin_from = t.aim_lock, t.spin_trace = std::to_string(jump), t.spin_frames = 5;
+                    // (V1.3.41: a jump once what turns with him has been looked for in two spins: the watch, see papu_who)
+                    if (spun && std::abs(jump) > 25 && t.turn_spins >= 2 && !t.watch_step)
+                        t.watch_due = true;
+                    if (t.aim_lines < 14)
+                    {
+                        ++t.aim_lines;
+                        std::ostringstream places;
+                        for (const auto &p : t.facing_places)
+                            places << "; " << p.name << " (" << (t.facing_unit[p.at] == 1 ? "radians" : t.facing_unit[p.at] == 2 ? "degrees" : "not his facing") << ") set "
+                                   << p.set << " times, it held " << p.held << ", the game put it back " << p.reset;
+                        unsigned turned = 0, held = 0, reset = 0, apart = 0;
+                        std::ostringstream each;
+                        for (const auto &p : t.turn_places)
+                            if (p.started && papu_turn_usable(p) && (apart += p.out_of_step, !p.out_of_step))
+                            {
+                                held += p.held, reset += p.reset;
+                                if (turned++ < 8)
+                                    each << "\n  " << p.where << ": set " << p.set << ", held " << p.held << ", put back " << p.reset;
+                            }
+                        std::cout << "Boss rule: he aimed his slam at Crash: turned " << static_cast<int>(wrap_angle(t.aim_lock - t.aim_from) * 57.29578f)
+                                  << " degrees from his own facing and held it " << (spun ? "until his spin started" : slammed ? "after his slam until he stopped standing" : "until he stopped standing")
+                                  << " (" << t.aim_kept << " frames it stayed, " << t.aim_overridden << " the game moved him; "
+                                  << (t.aim_modes & 4 ? "the game kept putting him back: let be after " + std::to_string(t.aim_kept + t.aim_overridden) + " frames"
+                                      : t.aim_modes & 2 ? std::string("what was set didn't hold him: then only his matrix")
+                                                        : std::string("what turns with him and his matrix"))
+                                  << ")" << (spun ? "; his spin started " + std::to_string(std::abs(jump)) + " degrees from his aim" + (std::abs(jump) <= 25 ? " (where he slammed)" : " (a jump)") : std::string())
+                                  << (turned ? "; " + std::to_string(turned) + " places that turn with him set (held " + std::to_string(held) + " frames, put back " + std::to_string(reset) + ")" : std::string("; nothing found yet that turns with him"))
+                                  << (apart ? "; " + std::to_string(apart) + " out of step with his facing as he stood, left alone" : std::string())
+                                  << places.str() << each.str() << (t.aim_trace.empty() ? std::string() : "\n  frame by frame, his facing as the game had it / what was set (degrees from his own): " + t.aim_trace)
+                                  << "\n" << std::flush;
+                    }
+                    t.aim_kept = t.aim_overridden = 0, t.aim_where = 0, t.aim_trace.clear();
+                }
+                if (state.boss_rules && s == 1 && t.aim_skip && t.aim_skip_told != t.stand_seen && t.aim_lines < 14)
+                    t.aim_skip_told = t.stand_seen, ++t.aim_lines, std::cout << "Boss rule: his first slam after coming into the arena isn't aimed (left as the game has it)\n" << std::flush;
+                return;
+            }
+            const auto transform = value<Address>(t.papu + 48);
+            Matrix m{}, c{};
+            const auto crash = player();
+            if (!transform || value<Address>(t.papu + 16) || !read(transform + 32, m) || !crash || !entity_matrix(crash, c) ||
+                !std::all_of(m.begin(), m.end(), [](float f) { return std::isfinite(f); }) || std::abs(m[15] - 1) > 0.001f)
+                return;
+            float fx = 0, fy = 0;
+            if (!matrix_facing(m, t.face_axis, fx, fy))
+                return;
+            const float yaw = std::atan2(fy, fx);
+            bool tracing = false;
+            if (!t.aim_wrote)
+            {
+                papu_yaw_research(t, yaw);
+                // (this stand's start: his facing as the game has it, and his facing's places on him)
+                // (nothing set yet: the first frame's look compares only with what this one sets)
+                t.aim_lock = t.aim_from = yaw, t.aim_yaw = std::nanf(""), t.aim_mode = 0, t.aim_mode_frames = t.aim_mode_kept = 0, t.aim_modes = 1;
+                t.facing_places = papu_facing_places(t.papu);
+                // (V1.3.41: what turns with him, from its own reading as he stands; his facing's places it has already left out)
+                for (auto &p : t.turn_places)
+                    p.started = p.written = false, p.set = p.held = p.reset = 0;
+                t.facing_places.erase(std::remove_if(t.facing_places.begin(), t.facing_places.end(),
+                                                     [&](const BossTuning::FacingPlace &f) {
+                                                         return std::any_of(t.turn_places.begin(), t.turn_places.end(), [&](const BossTuning::TurnPlace &p) { return p.at == f.at && papu_turn_usable(p); });
+                                                     }),
+                                      t.facing_places.end());
+                {
+                    // (one of each place: V1.3.40's log, his CBehaviorComponent's +0xd8 and his physics shape's +0x88 are one place)
+                    std::set<Address> once;
+                    t.facing_places.erase(std::remove_if(t.facing_places.begin(), t.facing_places.end(), [&](const BossTuning::FacingPlace &f) { return !once.insert(f.at).second; }),
+                                          t.facing_places.end());
+                }
+                t.aim_trace.clear(), tracing = t.aim_traces < 2;
+                t.aim_traces += tracing;
+                // (the first stands of a visit: what each of them holds, and what they are, from the game's own names)
+                if (t.facing_told < 2)
+                {
+                    ++t.facing_told;
+                    std::ostringstream out;
+                    out << "Boss rule research: his facing as he stands is " << yaw * 57.29578f << " degrees (" << yaw << " radians); his facing's places:";
+                    for (const auto &p : t.facing_places)
+                        out << "\n  " << p.name << " (at 0x" << std::hex << p.at << std::dec << ") holds " << value<float>(p.at)
+                            << (t.facing_told == 1 ? " (" + engine_type_text(p.type, p.offset) + ")" : std::string());
+                    if (t.facing_places.empty())
+                        out << " none (besides what turns with him)";
+                    std::cout << out.str() << "\n" << std::flush;
+                }
+            }
+            else if (t.aim_mode < 2)
+            {
+                // (it stayed if he faces what was set last frame, or the frame before: the game may follow a frame late)
+                const auto faces = [&](float a) { return std::abs(wrap_angle(yaw - a)) <= 0.03f; }; // (false for nothing set yet)
+                const bool back = !faces(t.aim_yaw) && !faces(t.aim_prev);
+                ++(back ? t.aim_overridden : t.aim_kept);
+                ++t.aim_mode_frames, t.aim_mode_kept += !back;
+                // (the next way, see above: after 10 frames where none stayed and the game had him back at his own facing, or
+                // 30 where none stayed, while he's still turned away from his aim. V1.3.40: a game that follows a frame late, or
+                // turns him toward what's set a little at a time, isn't given up on)
+                // (V1.3.41: not after his slam: what's set is kept as it is until his spin starts)
+                const bool undone = std::abs(wrap_angle(yaw - t.aim_from)) < 0.05f;
+                if (!slammed && t.aim_mode_frames >= 10 && !t.aim_mode_kept && std::abs(wrap_angle(yaw - t.aim_lock)) > 0.17f && (undone || t.aim_mode_frames >= 30))
+                {
+                    // (his facing's places and what turns with him back as the game had them, so they can't be what puts him
+                    // back now)
+                    if (t.aim_mode == 0)
+                        papu_facing_set(t, yaw, t.aim_from), papu_turn_set(t, 0);
+                    ++t.aim_mode, t.aim_mode_frames = t.aim_mode_kept = 0, t.aim_modes |= 1u << t.aim_mode;
+                }
+            }
+            tracing = tracing || !t.aim_trace.empty();
+            const float dt = t.aim_wrote && t.aim_last ? std::clamp(static_cast<float>(now - t.aim_last) / 1000.0f, 0.005f, 0.05f) : 0.016f;
+            t.aim_prev = t.aim_yaw, t.aim_last = now, t.aim_wrote = true, t.aim_yaw = yaw;
+            if (aiming)
+            {
+                const float dx = c[12] - m[12], dy = c[13] - m[13];
+                const float most = 15.708f * dt;
+                if (std::hypot(dx, dy) >= 1)
+                    t.aim_lock = wrap_angle(t.aim_lock + std::clamp(wrap_angle(std::atan2(dy, dx) - t.aim_lock), -most, most));
+            }
+            const float target = t.aim_lock;
+            if (tracing && t.aim_trace.size() < 1400)
+                t.aim_trace += (t.aim_trace.empty() ? "" : " ") + std::to_string(static_cast<int>(std::lround(wrap_angle(yaw - t.aim_from) * 57.29578f))) + "/" +
+                               std::to_string(static_cast<int>(std::lround(wrap_angle(target - t.aim_from) * 57.29578f)));
+            if (t.aim_mode >= 2)
+                return;
+            // (nothing set in his places while the watch is on, see papu_who: only the game's own writes are caught)
+            if (t.aim_mode == 0 && t.watch_step != 1)
+                papu_facing_set(t, yaw, target), papu_turn_set(t, wrap_angle(target - t.aim_from));
+            if (std::abs(wrap_angle(target - yaw)) >= 0.0005f && papu_turn_matrix(transform, m, yaw, target))
+                t.aim_yaw = target;
+        }
+        // V1.3.35 (Eric: "scan the speed of his normal speed and then add it to the logs"): his slams and laps as they come (the
+        // rest of each cycle's times, see papu_rule: from when he stands to his slam, from the slam to his spin, his spin).
+        // V1.3.36: and his slam's own time from when he stands (the shortest seen while nothing of ours was set, see papu_slam_rate)
+        void papu_cycle(BossTuning &t, int s, std::uint64_t now)
+        {
+            if (const auto n = papu_slams.load(); n != t.slams_cycle)
+            {
+                t.slams_cycle = n, t.slam_seen_at = now;
+                if (s == 1 && t.stand_seen && !t.rate_written && now - t.stand_seen > 500 && now - t.stand_seen < 3000)
+                    t.slam_normal = t.slam_normal ? std::min(t.slam_normal, now - t.stand_seen) : now - t.stand_seen;
+            }
+            if (s == 2 && t.laps_at)
+            {
+                const int laps = value<int>(t.papu_ai + t.laps_at);
+                if (laps > t.laps_last)
+                    t.lap_times += (t.lap_times.empty() ? "" : ", ") + seconds(now - t.lap_at), t.lap_at = now;
+                t.laps_last = laps;
+            }
+        }
+        // second later the ones that counted the time down (or up), for papu_cut; half a second after a cut, whether his
+        // flag came back
+        void papu_immune_watch(BossTuning &t, bool immune, int s, std::uint64_t now)
+        {
+            const auto timer = papu_timer(t);
+            if (immune && !t.immune_flag)
+            {
+                t.immune_since = now, t.cut_done = false, t.cut_checked = true, t.timer_sampled = false, t.timer_start_at = 0;
+                t.red_spun = false, t.slam_wait = false; // (V1.3.32: red until the slam after his next spin)
+                if (timer && read(timer, t.timer_start))
+                {
+                    t.timer_start_at = now, t.timer_started = timer;
+                    float a = 0, b = 0;
+                    std::memcpy(&a, &t.timer_start[0x48 / 4], 4), std::memcpy(&b, &t.timer_start[0x50 / 4], 4);
+                    if (std::isfinite(a) && std::isfinite(b) && std::max(a, b) > 0.5f && std::max(a, b) < 60)
+                        t.timer_length = std::max(a, b);
+                }
+            }
+            else if (!immune && t.immune_flag && t.timer_lines < 60)
+                ++t.timer_lines, std::cout << "Boss rule: his immunity is over (his can-be-hit flag is back), " << seconds(now - t.immune_since) << " after it started (state " << s
+                                           << (t.cut_done ? ", " + seconds(now - t.cut_at) + " after the cut" : std::string()) << ")\n" << std::flush;
+            if (immune && t.timer_start_at && !t.timer_sampled && now - t.timer_start_at >= 300)
+            {
+                t.timer_sampled = true;
+                std::array<std::uint32_t, 32> words{};
+                if (timer && timer == t.timer_started && read(timer, words))
+                {
+                    const float dt = static_cast<float>(now - t.timer_start_at) / 1000.0f, tolerance = 0.25f * dt + 0.03f;
+                    std::vector<unsigned> down, up;
+                    std::ostringstream moved;
+                    for (unsigned i = 2; i < 32; ++i)
+                    {
+                        if (words[i] == t.timer_start[i])
+                            continue;
+                        float a = 0, b = 0;
+                        std::memcpy(&a, &t.timer_start[i], 4), std::memcpy(&b, &words[i], 4);
+                        moved << " " << hex(i * 4) << " " << a << " -> " << b;
+                        if (!std::isfinite(a) || !std::isfinite(b))
+                            continue;
+                        if (a > 0.5f && a < 60 && std::abs((a - b) - dt) < tolerance)
+                            down.push_back(i * 4);
+                        else if (std::abs(a) < 0.3f && std::abs((b - a) - dt) < tolerance)
+                            up.push_back(i * 4);
+                    }
+                    if (!down.empty() || !up.empty())
+                        t.timer_down = down, t.timer_up = up;
+                    if (t.timer_lines < 60)
+                        ++t.timer_lines, std::cout << "Boss rule research: his immunity's timer (" << t.timer_length << " s), " << dt << " s in:"
+                                                   << (moved.str().empty() ? std::string(" nothing moved") : moved.str()) << "; counting down: " << offsets_text(down)
+                                                   << ", counting up: " << offsets_text(up) << "\n" << std::flush;
+                }
+            }
+            if (t.cut_done && !t.cut_checked && now - t.cut_at >= 500)
+            {
+                t.cut_checked = true;
+                if (t.cut_lines < 40)
+                    ++t.cut_lines, std::cout << "Boss rule: " << (immune ? "half a second after the cut his can-be-hit flag isn't back: the cut didn't end his immunity (he stays red until it ends)"
+                                                                         : "the cut ended his immunity (his can-be-hit flag came back)")
+                                             << "\n" << std::flush;
+            }
+            t.immune_flag = immune;
+        }
+        // V1.3.31 (Eric: red from when he gets up "until the cycle's done", the end of his first spin after the hit). His
+        // immunity is the game's own (see papu_immunity), set to outlast that spin; as the spin ends, its timer is run to
+        // its end (its countdown to nearly 0, or its time past its length), so the game ends the immunity itself: his
+        // can-be-hit flag comes back, and his red glow goes with it (see papu_rule)
+        void papu_cut(BossTuning &t, std::uint64_t now)
+        {
+            t.cut_done = true, t.cut_at = now, t.cut_checked = false;
+            std::ostringstream line;
+            line << "Boss rule: his immunity ends, " << seconds(now - t.immune_since) << " in: ";
+            const auto timer = papu_timer(t);
+            if (!timer)
+                line << "its timer isn't there (it runs to its end)", t.cut_checked = true;
+            else if (!t.timer_down.empty() || t.timer_up.empty())
+            {
+                // (V1.3.31's log: its countdown is +0x50. V1.3.33: one run again at the fight's start that doesn't count down
+                // is put below 0, as it wouldn't run out by itself)
+                const auto down = t.timer_down.empty() ? std::vector<unsigned>{0x50} : t.timer_down;
+                const bool still = t.start_timer && t.start_timer_checked && !t.start_timer_ticks;
+                for (const auto off : down)
+                    write(timer + off, still ? -1.0f : 0.02f);
+                line << "its timer's countdown (" << offsets_text(down) << ") set to its end" << (still ? " (below 0: it doesn't count down)" : "");
+            }
+            else if (!t.timer_up.empty() && t.timer_length > 0)
+            {
+                for (const auto off : t.timer_up)
+                    write(timer + off, t.timer_length + 0.5f);
+                line << "its timer's time (" << offsets_text(t.timer_up) << ") set past its length (" << t.timer_length << " s)";
+            }
+            if (t.cut_lines < 40)
+                ++t.cut_lines, std::cout << line.str() << "\n" << std::flush;
+        }
+        // V1.3.32 (Eric: "start off red" once the fight starts: "red, you get to hit him, and then red"): from the fight's
+        // start (and its start over after Crash dies) he's red until the slam after his first spin, as after a hit. The
+        // game's immunity only runs after a hit (its timer is made at his first hit), so when its timer is there (a fight
+        // after his first hit in this visit) it's run again for that long, and a landing on him is the game's own bounce.
+        // Before that (V1.3.33: a landing then was a hit for the game, taken back, with his flinch) his health script's list
+        // of the attacks that hurt him is emptied for that red instead (V1.3.34, see papu_list_block)
+        void papu_start_red(BossTuning &t, std::uint64_t now)
+        {
+            t.start_red = true, t.red_spun = false, t.slam_wait = false, t.start_timer = false, t.start_timer_ticks = false;
+            std::ostringstream line;
+            line << "Boss rule: the fight starts; he's red until the slam after his first spin";
+            if (const auto timer = papu_timer(t))
+            {
+                const float length = papu_red_time(t);
+                write(timer + 0x48, length), write(timer + 0x50, length);
+                t.start_timer = true, t.start_timer_at = now, t.start_timer_set = length, t.start_timer_checked = false;
+                line << "; his immunity's timer runs again for " << length << " s";
+            }
+            else
+                line << " (his immunity's timer isn't made yet, at his first hit: V1.3.34 empties his health script's list instead)";
+            std::cout << line.str() << "\n" << std::flush;
+        }
+        // V1.3.32 (Eric: red goes away "after he slams, and then you can jump on him"): his red ends with the slam after his
+        // first spin since he turned red (his AI's 3rnyv3pq), or if he starts another spin first, or 2.5 s after the spin
+        // without a slam. The game's immunity ends there too (see papu_cut)
+        void papu_red_end(BossTuning &t, bool immune, std::uint64_t now, const char *why)
+        {
+            if (t.cut_lines < 40)
+                ++t.cut_lines, std::cout << "Boss rule: his red ends: " << why << " (" << seconds(now - t.slam_wait_since) << " after his spin)\n" << std::flush;
+            t.slam_wait = false, t.start_red = false;
+            if (immune || t.start_timer)
+                papu_cut(t, now);
+            t.start_timer = false;
+        }
+        void papu_who(BossTuning &t, int s, std::uint64_t now); // (V1.3.41, below the write watch it uses)
+        void papu_who_off(BossTuning &t, const char *why);
+        void papu_rule(BossTuning &t, const Shared &state, std::uint64_t now)
+        {
+            if (!t.papu || !t.papu_ai || !event_owner(t.papu))
+                return;
+            papu_entity = t.papu;
+            const int s = value<int>(t.papu_ai + t.state_at);
+            // V1.3.31: his immunity as the game has it: his actor's can-be-hit flag (+0x7c, 0x8). V1.3.29's log: it clears at
+            // each hit the game takes and comes back exactly as long after it as the immunity was set for (OnTakeHitImmuneTime).
+            // (V1.3.34: not while we hold it clear ourselves, see papu_list_block)
+            const bool immune = (value<std::uint32_t>(t.papu + 0x7c) & 0x8) == 0 && !t.flag_held;
+            papu_lists(t);
+            probe_state_at = t.papu_ai + t.state_at;
+            probe_timer_at = t.hh && t.hh_timer_at && typed(t.hh, 0x13bbbd0) ? t.hh + t.hh_timer_at : 0;
+            probe_damage_at = t.health_part && typed(t.health_part, 0x14da2c0) ? t.health_part + 0x310 : 0;
+            // where he is and which way he faces, from his matrix (V1.3.4: +32 stays put; V1.3.5: he doesn't move while he
+            // spins, he turns in place)
+            Matrix m{};
+            if (now - t.sample_at >= 100 && entity_matrix(t.papu, m))
+            {
+                const std::array<float, 3> at{m[12], m[13], m[14]};
+                const float yaw = std::atan2(m[1], m[0]) * 57.29578f;
+                if (t.sample_at)
+                {
+                    const float dt = (now - t.sample_at) / 1000.0f;
+                    t.speed = std::hypot(at[0] - t.sample[0], at[1] - t.sample[1]) / dt;
+                    t.top_speed = std::max(t.top_speed, t.speed);
+                    // (V1.3.36: which way he faces, as he jumps into the arena, see papu_face_vote)
+                    if (s == 5 && t.speed > 500)
+                        papu_face_vote(t, m, (at[0] - t.sample[0]) / dt, (at[1] - t.sample[1]) / dt);
+                    if (t.yaw_known)
+                    {
+                        float d = yaw - t.yaw;
+                        while (d > 180)
+                            d -= 360;
+                        while (d < -180)
+                            d += 360;
+                        t.turn = d / dt;
+                        t.turn_most = std::max(t.turn_most, t.turn), t.turn_least = std::min(t.turn_least, t.turn);
+                    }
+                }
+                t.sample = at, t.sample_at = now, t.yaw = yaw, t.yaw_known = true;
+            }
+            // his spin speed (currAttackSpinSpeedMultiplier: the game sets it at the fight's start and at each hit, from his settings'
+            // list of spin speeds). V1.3.35: /boss_speed goes into that list (see papu_spin_list); V1.3.34's log, writing this one
+            // changed nothing (his laps took 1.2 s at x1, x1.5 and x2). Its changes go to the log, with where else that number is
+            // found on him then (research, see papu_spin_search)
+            const unsigned percent = std::clamp(state.boss_speed, 100u, 200u);
+            if (t.spin_at)
+            {
+                const float v = value<float>(t.papu_ai + t.spin_at);
+                if (v > 0 && std::abs(v - t.spin_written) > 0.0001f)
+                {
+                    t.spin_written = v;
+                    if (t.speed_lines < 40)
+                        ++t.speed_lines, std::cout << "Boss speed: his spin speed is now " << v << " (state " << s << ")\n" << std::flush;
+                }
+            }
+            const float spin = t.spin_at ? value<float>(t.papu_ai + t.spin_at) : 0.0f;
+            // V1.3.34: his AI's waits, shorter with /boss_speed (see papu_speed_timers)
+            papu_speed_timers(t, percent, s);
+            // V1.3.41: what turns with him, looked for in his first spins of a visit (see papu_turn_research; before his state
+            // is noted, so his spin's start is seen)
+#ifndef CRASH_NST_STABLE
+            papu_turn_research(t, s, now, state.boss_rules != 0); // (not in the Stable build: research for the aim)
+#endif
+            // (after the code review: when the fight starts over from his throne his parts may be new, so what was found is
+            // looked for again)
+            if (s == 6 && (t.turn_spins || !t.turn_places.empty() || t.turn_tracking))
+                t.turn_places.clear(), t.turn_spins = 0, t.turn_tracking = false, t.turn_snaps.clear();
+            if (s != t.state)
+            {
+                if (t.state >= 0)
+                    std::cout << "Boss rule: Papu Papu state " << t.state << " -> " << s << " after " << seconds(now - t.state_since) << " (laps "
+                              << value<int>(t.papu_ai + t.laps_at) << ", spin speed " << spin << ", turning " << static_cast<int>(t.turn_least) << " to "
+                              << static_cast<int>(t.turn_most) << " degrees a second, top speed " << static_cast<int>(t.top_speed) << "/s)\n" << std::flush;
+                // a hit (3) or the last one (4) while he was red: it doesn't count, and it's a hit for Crash
+                if (state.boss_rules && t.was_red && (s == 3 || s == 4) && now - t.blocked_told > 1000)
+                {
+                    std::ostringstream line;
+                    line << "Boss rule: Crash landed on Papu Papu while he was red (" << seconds(now - t.red_since) << " into it)";
+                    if (put_back_papu(t, line))
+                        punish_crash(t, line, now), t.forbidden = s == 3;
+                    std::cout << line.str() << "\n" << std::flush;
+                    // (the messages kept from him for this landing are this same landing)
+                    t.blocked_told = now, t.blocked_seen = boss_blocked.load();
+                }
+                else if (s == 3 || s == 4)
+                    t.valid_hit_at = now; // (a hit that counts)
+                // (V1.3.30) any hit the game takes starts its immunity, as long as it's set for that hit
+                if (s == 3 || s == 4)
+                {
+                    const float length = std::clamp(t.immune_at ? value<float>(t.immune_at) : 0.0f, 0.0f, 30.0f);
+                    t.immune_until = now + static_cast<std::uint64_t>(length * 1000), t.game_hit_at = now;
+                    if (state.boss_rules && s == 3 && t.red_lines < 80)
+                        ++t.red_lines, std::cout << "Boss rule: his hit starts his immunity: " << length << " s at most (he's red once he's up, until his next spin is over)\n"
+                                                 << std::flush;
+                }
+                // V1.3.32: the fight starts (or starts over): red from the start (see papu_start_red). V1.3.33: as he comes into
+                // the arena (state 5), not once he's there (V1.3.32's log: Crash landed on him there before red started)
+                if (s == 5 && t.state != 5 && state.boss_rules)
+                    papu_start_red(t, now);
+                // V1.3.32: his first spin since he turned red is over: red ends with the slam after it (see papu_red_end)
+                if (t.state == 2 && s == 1 && (immune || t.start_red) && state.boss_rules && !t.red_spun)
+                    t.red_spun = true, t.slam_wait = true, t.slam_wait_since = now, t.slams_seen = papu_slams.load();
+                else if (t.state == 1 && s == 2 && t.slam_wait)
+                    papu_red_end(t, immune, now, "his next spin started before a slam");
+                // research: what in his health part changed since the last state began
+                if (!t.health_part || !typed(t.health_part, 0x14da2c0))
+                {
+                    t.health_part = 0, t.health_words.clear();
+                    for (const auto c : list(value<Address>(t.papu + 24), 128))
+                        if (typed(c, 0x14da2c0))
+                            t.health_part = c;
+                }
+                if (t.health_part)
+                {
+                    std::vector<std::uint32_t> words(0x400 / 4);
+                    if (read(t.health_part, words))
+                    {
+                        if (t.health_words.size() == words.size() && t.health_lines < 60)
+                        {
+                            std::ostringstream out;
+                            unsigned changed = 0;
+                            for (std::size_t i = 2; i < words.size(); ++i)
+                                if (words[i] != t.health_words[i] && changed++ < 16)
+                                {
+                                    float a = 0, b = 0;
+                                    std::memcpy(&a, &t.health_words[i], 4), std::memcpy(&b, &words[i], 4);
+                                    out << " +" << hex(static_cast<unsigned>(i * 4)) << " " << static_cast<int>(t.health_words[i]) << "->" << static_cast<int>(words[i]);
+                                    if (std::isfinite(a) && std::isfinite(b) && std::abs(b) > 1e-6f && std::abs(b) < 1e7f)
+                                        out << " (" << a << "->" << b << ")";
+                                }
+                            if (changed)
+                            {
+                                ++t.health_lines;
+                                std::cout << "Boss research: his health part, state " << t.state << " -> " << s << ":" << out.str() << (changed > 16 ? " ..." : "") << "\n"
+                                          << std::flush;
+                            }
+                        }
+                        t.health_words = std::move(words);
+                    }
+                }
+                // V1.3.35: his cycles timed (see papu_cycle): as his spin ends, the cycle to the log; as it starts, from his stand to
+                // his slam and from the slam to the spin (and a search for his spin speed a little into it, see papu_spin_search)
+                if (t.state == 2 && s == 1 && t.spin_start_at && t.cycle_lines < 30)
+                    ++t.cycle_lines, std::cout << "Boss speed: his moves (" << percent << "%): " << t.cycle_head << "; his spin " << seconds(now - t.spin_start_at)
+                                               << " (laps: " << t.lap_times << (t.lap_times.empty() ? "" : ", ") << seconds(now - t.lap_at) << ")\n" << std::flush;
+                if (t.state == 1 && s == 2)
+                {
+                    t.cycle_head = t.stand_at && t.slam_seen_at >= t.stand_at
+                                       ? "his slam " + seconds(t.slam_seen_at - t.stand_at) + " after he stood, his spin " + seconds(now - t.slam_seen_at) + " after the slam"
+                                       : "no slam in this stand (" + seconds(now - t.stand_at) + ")";
+                    t.spin_start_at = t.lap_at = now, t.laps_last = 0, t.lap_times.clear(), t.spin_search_due = now + 150;
+                }
+                if (s != 2)
+                    t.spin_start_at = 0;
+                if (s == 1)
+                    t.stand_at = t.stand_seen = now, t.aim_skip = t.state == 5; // (V1.3.37: his slam as he comes into the arena isn't aimed, see papu_aim)
+                // (V1.3.36: his jump into the arena is over: which way he faces, see papu_face_decide)
+                if (t.state == 5)
+                    papu_face_decide(t);
+                t.state = s, t.state_since = now, t.top_speed = 0, t.turn_most = -1e9f, t.turn_least = 1e9f;
+            }
+            // V1.3.13: with more health his fight keeps the game's pace: his spin length (spinPlayerLapCount, a lap more with
+            // each hit) and his hit count (e24taaam) go up as over the game's 5 hits, spread over all of his, and reach the
+            // game's last step just before his last hit. V1.3.12's log, 10 hits: his spins grew to 11 laps (the game's
+            // longest is 6), and at his 6th hit his hit count went past the game's last and started over
+            if (t.laps_total_at && t.hit_count_at && t.papu_original > 1 && typed(t.papu, 0x1592220) && health_getter_ok())
+            {
+                const int max = value<int>(t.papu + 0xf8), health = actor_health(t.papu), total = max / 100;
+                if (health == max && (s == 1 || s == 2))
+                {
+                    t.laps_start = value<int>(t.papu_ai + t.laps_total_at), t.hits_start = value<int>(t.papu_ai + t.hit_count_at);
+                    t.starts_known = true;
+                }
+                else if (t.starts_known && total > t.papu_original && health > 0 && health < max && (s == 1 || s == 3) && !t.red)
+                {
+                    const int taken = std::clamp((max - health + 50) / 100, 0, total - 1);
+                    const int step = taken * (t.papu_original - 1) / (total - 1);
+                    const int laps = t.laps_start + step, hits = t.hits_start + step;
+                    const int game_laps = value<int>(t.papu_ai + t.laps_total_at), game_hits = value<int>(t.papu_ai + t.hit_count_at);
+                    if (game_laps != laps || game_hits != hits)
+                    {
+                        write(t.papu_ai + t.laps_total_at, laps), write(t.papu_ai + t.hit_count_at, hits);
+                        std::cout << "Boss pace: Papu Papu took " << taken << " of " << total << " hits: spin length " << game_laps << " -> " << laps
+                                  << ", hit count " << game_hits << " -> " << hits << " (the game's step " << step + 1 << " of " << t.papu_original << ")\n" << std::flush;
+                    }
+                }
+            }
+            if (s == 5 || s == 6)
+                t.immune_until = 0; // the fight starts over (Crash died)
+            if (s != 3)
+                t.forbidden = false;
+            // V1.3.35: his moves timed, what plays them looked for, his slam at the speed (see papu_cycle, papu_clocks and
+            // papu_slam_rate), his spin speed looked for a little into each spin (research, see papu_spin_search); and when the
+            // fight starts over from his throne, what was found in his parts is looked for again
+            papu_cycle(t, s, now);
+            papu_clocks(t, s, now);
+#ifndef CRASH_NST_STABLE
+            // (not in the Stable build: his slam's speed is still being looked for, and the aim's spin start still jumps)
+            papu_slam_rate(t, s, percent, now);
+            papu_aim(t, state, s, now);
+#endif
+            papu_who(t, s, now);
+            if (t.spin_search_due && now >= t.spin_search_due)
+            {
+                t.spin_search_due = 0;
+                if (s == 2 && t.spin_at)
+                    papu_spin_search(t, value<float>(t.papu_ai + t.spin_at));
+            }
+            if (s == 6 && !t.rate_written && (!t.clock_regions.empty() || t.clock_period))
+                papu_clocks_reset(t);
+            papu_immune_watch(t, immune, s, now);
+            if (t.slam_wait && papu_slams.load() != t.slams_seen)
+                papu_red_end(t, immune, now, "his slam");
+            else if (t.slam_wait && now - t.slam_wait_since >= 2500)
+                papu_red_end(t, immune, now, "no slam 2.5 s after his spin");
+            if (t.start_timer && !t.start_timer_checked && now - t.start_timer_at >= 300)
+            {
+                t.start_timer_checked = true;
+                const auto timer = papu_timer(t);
+                const float left = timer ? value<float>(timer + 0x50) : 0.0f;
+                t.start_timer_ticks = timer && std::isfinite(left) && left > 0 && left < t.start_timer_set - 0.15f;
+                std::cout << "Boss rule: his immunity's timer " << (t.start_timer_ticks ? "runs again" : "doesn't count down (it had ended): red goes on without it")
+                          << " (" << left << " of " << t.start_timer_set << " s left " << seconds(now - t.start_timer_at) << " in)\n" << std::flush;
+            }
+            // V1.3.34: red without the game's immunity (no timer yet, or one that didn't run again): his health script's list
+            // emptied and his can-be-hit flag held clear for as long as that red lasts (see papu_list_block); back as red ends,
+            // or as soon as a hit came anyway (then the game's own immunity runs, and the flag is the game's again)
+            {
+                const auto timer = papu_timer(t);
+                // (a timer run again at the fight's start is checked 300 ms in: until then the block stays as it is)
+                const bool pending = t.start_timer && !t.start_timer_checked;
+                const bool no_immunity = !timer || (t.start_timer && t.start_timer_checked && !t.start_timer_ticks);
+                // (a hit the game took anyway: his flinch, or a timer the game made at it while the block was on)
+                const bool came_hit = s == 3 || s == 4 || (timer && list_block_now.list && !t.block_had_timer);
+                const bool want = state.boss_rules && t.lists_done && t.start_red && no_immunity && !came_hit && s != 6;
+                if (!pending && want != (list_block_now.list != 0))
+                {
+                    if (want)
+                        papu_list_block(t, true, now, !timer ? "no timer of his yet: his first fight in this visit" : "his timer didn't run again");
+                    else
+                        papu_list_block(t, false, now, came_hit ? "a hit came anyway (the game's own immunity runs now)" : !state.boss_rules ? "the red rule is off"
+                                                                                                                         : s == 6 ? "the fight starts over from his throne"
+                                                                                                                         : !t.start_red ? "his red is over" : "his timer runs again");
+                }
+                if (list_block_now.list && typed(t.papu, 0x1592220))
+                {
+                    const auto flags = value<std::uint32_t>(t.papu + 0x7c);
+                    if (flags & 0x8)
+                        write(t.papu + 0x7c, flags & ~0x8u), ++t.hold_writes;
+                    t.flag_held = true;
+                }
+                else if (t.flag_held)
+                {
+                    t.flag_held = false;
+                    // (he can be hit again; unless the game's immunity runs now, after a hit or with his timer running again: the
+                    // flag is the game's then)
+                    const bool game_runs = came_hit || (timer && t.start_timer && t.start_timer_ticks);
+                    const auto flags = value<std::uint32_t>(t.papu + 0x7c);
+                    if (!game_runs && !(flags & 0x8) && typed(t.papu, 0x1592220))
+                        write(t.papu + 0x7c, flags | 0x8u);
+                    if (t.block_lines < 30)
+                        ++t.block_lines, std::cout << "Boss rule: his can-be-hit flag let go after " << seconds(now - t.block_at) << " (" << t.hold_writes << " writes to hold it)"
+                                                   << (game_runs ? ", to the game's immunity" : ": he can be hit") << "\n" << std::flush;
+                }
+            }
+            // V1.3.10 (the rule as asked for): after a hit he's red for about one spin cycle, from when he gets up (3 -> 1).
+            // V1.3.30: for as long as the game's immunity of that hit lasts. V1.3.31: as the game has it, his can-be-hit flag
+            // (see papu_immune_watch), which papu_cut ends with his first spin after the hit (Eric: "once the cycle is
+            // done"): he can't be hit whenever he's red, and can be as soon as he isn't
+            const bool red = state.boss_rules && (((immune || t.start_red) && (s == 1 || s == 2)) || (t.start_red && s == 5) || (t.forbidden && s == 3));
+            // (red's end, to see how it fits his spin: the state then, and how long he's been in it)
+            if (t.red && !red && t.red_lines < 80)
+                ++t.red_lines, std::cout << "Boss rule: he's not red any more, " << (t.game_hit_at ? seconds(now - t.game_hit_at) : std::string("?")) << " after his hit ("
+                                         << (s == 2 ? "spinning for " : s == 1 ? "standing for " : "state " + std::to_string(s) + " for ") << seconds(now - t.state_since) << ")\n"
+                                         << std::flush;
+            papu_landings(t, state, red, s, now);
+            vuln_research(t, red, s, now);
+            // research (V1.3.19): Crash's damage and Aku Aku scripts' settings at the fight's start, after a death and after Papu
+            // Papu's attack hits him: what holds the angel death, and what a hit with a mask does
+            const auto crash_scripts = [&](const std::string &when) {
+                if (t.crash_dumps >= 8)
+                    return;
+                ++t.crash_dumps;
+                if (const auto crash = player())
+                {
+                    for (const auto &[c, script] : entity_scripts(crash, 256))
+                        if (script == "Crash_DamageManager")
+                            log_graph_fields(c, "Crash's damage script (" + when + ")");
+                    if (const auto aku = aku_manager_component(crash))
+                        log_graph_fields(aku, "Aku Aku's script (" + when + ")");
+                }
+            };
+            if (t.state == 1 && !t.crash_dumped_start)
+                t.crash_dumped_start = true, crash_scripts("the fight starts");
+            if (death_values.load() != t.death_seen)
+                crash_scripts("Crash's death message came");
+            else if (hit_values.load() != t.death_changed)
+                crash_scripts("Papu Papu's hit came");
+            // research: the death Crash's script played, and the hit Papu Papu's attack gave him
+            if (const auto n = death_values.load(); n != t.death_seen)
+            {
+                t.death_seen = n;
+                const auto v = death_value.load();
+                const auto [behavior, type] = boss_death_behavior(t.papu);
+                std::cout << "Boss research: Crash's death message carried " << pointer_brief(v) << " (0x" << std::hex << v << std::dec << "); Papu Papu's attack's death is "
+                          << pointer_brief(behavior) << " (0x" << std::hex << behavior << std::dec << ")" << (v && v == behavior ? ", the same" : "") << "\n" << std::flush;
+            }
+            if (const auto n = hit_values.load(); n != t.death_changed)
+            {
+                t.death_changed = n;
+                const auto v = hit_value.load();
+                std::cout << "Boss research: the hit message to Crash carried " << pointer_brief(v) << " (0x" << std::hex << v << std::dec << ")\n" << std::flush;
+            }
+            // the angel death for a landing while red: was it swapped in?
+            if (t.death_check_at && now >= t.death_check_at)
+            {
+                t.death_check_at = 0;
+                const bool still_out = red_constants_out.load() != 0;
+                if (still_out)
+                    restore_death_constants();
+                const unsigned angels = red_death_angel.load() - t.death_angels;
+                std::cout << "Boss rule: Crash's death: the death made " << (angels ? "was the angel's kind" : "wasn't the angel's kind")
+                          << (still_out ? " (his death message didn't come within 2.5 s; the death texts were put back now)" : "") << "\n" << std::flush;
+                red_death_until = 0;
+            }
+            // (V1.3.27) his attack's hit message for a landing while red: when Crash's damage script kept his death but
+            // stopped short of it (V1.3.26), its next step (see crash_die_step); not when he has a mask or blinks by then
+            if (t.die_step_at && now >= t.die_step_at)
+            {
+                t.die_step_at = 0;
+                const bool died = death_values.load() != t.replay_deaths, stepped = die_steps.load() != t.die_steps_seen;
+                const bool mask = aku_manager_state(player()).second, blinking = crash_game_flag("DamagedInvulnerable") == 1;
+                std::cout << "Boss rule: after his hit message, Crash's damage script " << (died ? "killed him" : stepped ? "went on to his death itself" : "stopped there")
+                          << " (the death it holds: " << crash_death_clip() << ")";
+                if (died || stepped || mask || blinking)
+                    std::cout << (died || stepped ? "" : mask ? "; he has a mask now: nothing more" : "; he's blinking now: nothing more") << "\n" << std::flush;
+                else
+                {
+                    std::cout << "; its next step to his death is sent\n" << std::flush;
+                    std::ostringstream note;
+                    const bool sent = crash_die_step(note);
+                    std::cout << "Boss rule: Crash's damage script's next step (sdoxdefr) " << (sent ? "sent " : "not sent: ") << note.str() << "\n" << std::flush;
+                }
+            }
+            // (V1.3.24) and whether it killed him, and which kind of death; the falling death if it didn't
+            if (t.replay_check_at && now >= t.replay_check_at)
+            {
+                t.replay_check_at = 0;
+                const bool died = death_values.load() != t.replay_deaths, angel = angel_deaths.load() != t.replay_angels;
+                std::cout << "Boss rule: his hit message: " << (died ? (angel ? "Crash died the angel's death" : "Crash died, but not the angel's death") : "Crash didn't die from it")
+                          << (died ? " (the death " + pointer_brief(death_value.load()) + ")" : std::string()) << "\n" << std::flush;
+                const bool mask = aku_manager_state(player()).second, blinking = crash_game_flag("DamagedInvulnerable") == 1;
+                if (!died && !mask && !blinking)
+                {
+                    bool falling = false;
+                    std::string error;
+                    try
+                    {
+                        const auto body = controlled_actor();
+                        falling = body && request_scripted_death(body);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        error = std::string(" (") + e.what() + ")";
+                    }
+                    std::cout << "Boss rule: " << (falling ? "Crash loses a life the falling way instead" : "his life couldn't be taken the falling way either") << error << "\n"
+                              << std::flush;
+                }
+            }
+            // the mask taken for a landing while red, a second later
+            if (t.hit_check_at && now >= t.hit_check_at)
+            {
+                t.hit_check_at = 0;
+                const auto [aku, out] = aku_manager_state(player());
+                std::cout << "Boss rule: a second after Crash's hit, Aku's manager is in state " << aku << (out ? ", his mask still on screen" : ", no mask on screen")
+                          << " (" << t.hit_masks << " masks before)\n" << std::flush;
+            }
+            if (red != t.red)
+            {
+                if (red)
+                {
+                    t.red_since = now;
+                    t.red_health = health_getter_ok() && typed(t.papu, 0x1592220) ? actor_health(t.papu) : -1;
+                    t.red_snapshot = health_places(t.papu);
+                    t.red_laps = t.laps_total_at ? value<int>(t.papu_ai + t.laps_total_at) : -1;
+                    t.red_hits = t.hit_count_at ? value<int>(t.papu_ai + t.hit_count_at) : -1;
+                }
+                t.red = red;
+            }
+            t.was_red = red;
+            // (V1.3.11 to V1.3.18 also held back the messages his scripts send when he's hit while red. That never kept the
+            // hit from happening (his health is put back instead), and it held back Crash's bounce too: V1.3.18's clip has
+            // Crash standing on him and going through him. Off since V1.3.19)
+            boss_block_actor = 0;
+            boss_block_red = false;
+            // the hit kept from happening (its messages kept): his health and spin length put back, a hit for Crash
+            if (const auto blocked = boss_blocked.load(); blocked != t.blocked_seen)
+            {
+                t.blocked_seen = blocked;
+                if (now - t.blocked_told >= 1000)
+                {
+                    t.blocked_told = now;
+                    std::ostringstream line;
+                    line << "Boss rule: Crash landed on Papu Papu while he was red; the hit was kept from happening (";
+                    {
+                        std::lock_guard lock(boss_block_mutex);
+                        for (std::size_t i = 0; i < boss_blocked_names.size(); ++i)
+                        {
+                            const auto &n = boss_blocked_names[i];
+                            const auto id = n.find("_id_");
+                            line << (i ? " " : "") << (id == std::string::npos ? n : n.substr(id + 4, 8));
+                        }
+                        boss_blocked_names.clear();
+                    }
+                    line << ")";
+                    if (put_back_papu(t, line))
+                        punish_crash(t, line, now);
+                    std::cout << line.str() << "\n" << std::flush;
+                }
+            }
+            if (state.boss_rules || t.tint_bundle)
+                boss_tint(t, t.papu, red);
+        }
+        // research: the messages a script takes (its type's list of them), with their fields; once per kind per fight
+        void log_script_messages(BossTuning &t, Address component, const std::string &who)
+        {
+            const auto meta = value<Address>(component + 56);
+            if (!t.told.insert("messages" + who).second)
+                return;
+            std::ostringstream out;
+            out << "Boss messages: " << who << " takes";
+            unsigned shown = 0;
+            for (const auto delegator : list(value<Address>(meta + 160), 128))
+            {
+                const auto message = value<Address>(delegator + 24);
+                if (!typed(delegator, 0x13bc268) || !typed(message, 0x17b6578))
+                    continue;
+                out << "\n  " << string(value<Address>(message + 16), 120) << ":";
+                const auto count = value<unsigned>(message + 24);
+                const auto fields = value<Address>(message + 40);
+                for (unsigned i = 0; fields && count <= 64 && i < count; ++i)
+                {
+                    const auto field = value<Address>(fields + i * 8);
+                    const auto name = string(value<Address>(field + 48), 64);
+                    if (name.empty() || name[0] == '_')
+                        continue;
+                    out << " " << name << "@" << value<std::uint16_t>(field + 24) << "/" << value<std::uint16_t>(field + 22);
+                }
+                if (++shown >= 60)
+                    break;
+            }
+            std::cout << out.str() << "\n" << std::flush;
+        }
+        void update_boss_tuning(const Shared &state, const std::string &boss)
+        {
+            auto &t = boss_tuning;
+            const auto now = GetTickCount64();
+            if (boss != t.level)
+            {
+                boss_tint_off(t, true);
+                bar_parts_back(t);
+                // (V1.3.34) his health script's list as the game had it, if it's still there
+                id_list_restore("the fight was left");
+                papu_who_off(t, "the fight was left"); // (V1.3.41: never left on past his objects)
+                t = {};
+                t.level = boss, t.entered = now;
+                // (V1.3.28) Papu Papu's stomps from here on only
+                papu_entity = 0, papu_bounce_node = 0, papu_bounce_component = 0, papu_bounce_message = 0, papu_beaten_blocks = 0;
+                probe_count_at = 0, probe_timer_at = 0, probe_state_at = 0, probe_damage_at = 0, probe_lines = 0, other_probe_lines = 0;
+                t.deflects_seen = papu_deflects.load(), t.stomps_seen = papu_stomps.load(), t.hits_seen = papu_hits.load();
+                t.hh_bounces_seen = papu_hh_bounces.load();
+                {
+                    // (a hit kept from his spin belongs to this visit's objects)
+                    std::lock_guard lock(hit_capture_mutex);
+                    hit_capture = {};
+                }
+                // the message research starts over with each fight, and Papu Papu's message keeping stops
+                boss_block_actor = 0, boss_block_red = false;
+                boss_event_since = 0;
+                for (auto &b : boss_event_targets)
+                    b = 0;
+                {
+                    std::lock_guard lock(event_mutex);
+                    boss_event_counts.clear();
+                }
+                boss_event_lines = 0;
+            }
+            if (boss.empty())
+                return;
+            // (V1.3.41, after the code review: the watch on his facing's place never outlives him, see papu_who)
+            if (t.watch_step == 1 && (boss != "B101" || !t.papu || !event_owner(t.papu) || now - t.watch_at > 1500))
+                papu_who_off(t, "he's gone, or 1.5 s went by");
+            if (boss == "B101")
+                papu_rule(t, state, now);
+            stretch_bar_fill(t, state, now);
+            if (now < t.next)
+                return;
+            // every half second: the boss as he starts, Brio's last form as it appears, a retry
+            t.next = now + 500;
+            const unsigned health = std::clamp(state.boss_health, 100u, 200u), speed = std::clamp(state.boss_speed, 100u, 200u);
+            // (research: until the boss is found, also with the game's own settings)
+            if (health == 100 && speed == 100 && !state.boss_rules && boss_event_since.load() && !boss_hits_changed && !boss_immune_changed && !boss_pace_changed)
+                return;
+            for (const auto owner : event_owners())
+            {
+                const auto name = string(value<Address>(owner + 128));
+                for (const auto &[c, script] : entity_scripts(owner))
+                {
+                    // research: the messages this boss gets (and Crash's damage and Aku Aku scripts) go to the log, and once,
+                    // the messages his health and attack scripts and Crash's damage script take
+                    if (script == "common_BossHealthHandler" && std::none_of(boss_event_targets.begin(), boss_event_targets.end(), [&](const auto &b) { return b.load() == owner; }))
+                    {
+                        for (auto &b : boss_event_targets)
+                            if (!b.load())
+                            {
+                                b = owner;
+                                break;
+                            }
+                        if (!boss_event_since.load())
+                            boss_event_since = now;
+                        for (const auto &[other, other_script] : entity_scripts(owner))
+                            if (other_script == "common_BossHealthHandler" || other_script == "common_BossAttackDamageHandler" ||
+                                other_script == "common_BossInvulnerableDeflectPlayerHandler")
+                                log_script_messages(t, other, name + " " + other_script);
+                        if (const auto crash = player())
+                            // (Crash has more than 64 parts: V1.3.14 never found his)
+                            for (const auto &[mine, mine_script] : entity_scripts(crash, 256))
+                                if (mine_script == "Crash_DamageManager")
+                                    log_script_messages(t, mine, "Crash " + mine_script);
+                    }
+                    // (V1.3.28) Papu Papu's immunity after a hit while the red rule is on; the game's again with it off
+                    if (boss == "B101" && script == "common_BossHealthHandler" && name.find("PapuPapu") != std::string::npos &&
+                        (state.boss_rules || boss_immune_changed))
+                        papu_immunity(t, c, name, state.boss_rules != 0, now);
+                    // (also at 100%: a count changed for an earlier fight goes back)
+                    if (script == "common_BossHealthHandler" && (health != 100 || boss_hits_changed))
+                        tune_boss_health(t, boss, owner, name, c, health, state.boss_bar_grow != 0);
+                    else if (speed != 100 || boss_pace_changed)
+                        tune_boss_speed(t, c, name, script, speed);
+                    if (boss == "B101" && script == "BossPapuPapu_AiHandler" && t.papu_ai != c)
+                    {
+                        const auto meta = value<Address>(c + 56);
+                        t.state_at = field_offset(meta, "currState", 4), t.laps_at = field_offset(meta, "currSpinPlayerLapCount", 4);
+                        t.spin_at = field_offset(meta, "currAttackSpinSpeedMultiplier", 4);
+                        t.laps_total_at = field_offset(meta, "spinPlayerLapCount", 4);
+                        t.hit_count_at = field_offset(meta, "InternalStore__internalCounter_id_e24taaam", 4);
+                        if (t.state_at)
+                            t.papu = owner, t.papu_ai = c, t.state = -1;
+                        // V1.3.34: his AI's timers, its waits (see papu_speed_timers)
+                        t.ai_timers.clear();
+                        const unsigned count = value<unsigned>(meta + 24);
+                        const auto fields = value<Address>(meta + 40);
+                        std::string ids;
+                        for (unsigned i = 0; t.state_at && fields && count <= 512 && i < count; ++i)
+                        {
+                            const auto field = value<Address>(fields + i * 8);
+                            const auto field_name = string(value<Address>(field + 48), 120);
+                            const std::string head = "_Internal_TimerAction_id_", tail = "_timer";
+                            if (value<std::uint16_t>(field + 22) != 8 || field_name.size() <= head.size() + tail.size() || field_name.rfind(head, 0) != 0 ||
+                                field_name.compare(field_name.size() - tail.size(), tail.size(), tail) != 0)
+                                continue;
+                            BossTuning::AiTimer a;
+                            a.at = value<std::uint16_t>(field + 24), a.id = field_name.substr(head.size(), field_name.size() - head.size() - tail.size());
+                            ids += (ids.empty() ? "" : ", ") + a.id;
+                            t.ai_timers.push_back(a);
+                        }
+                        std::cout << "Boss speed: his AI has " << t.ai_timers.size() << " timers (its waits" << (ids.empty() ? "" : ": " + ids) << ")"
+                                  << (speed > 100 ? ", each cut to " + std::to_string(10000 / speed) + "% as it starts" : std::string(", left as the game has them (speed 100%)")) << "\n"
+                                  << std::flush;
+                    }
+                    // V1.3.35: his spin speeds times /boss_speed (see papu_spin_list), before his fight starts and each half second
+                    if (boss == "B101" && script == "BossPapuPapu_AiHandler")
+                        papu_spin_list(t, c, speed);
+                }
+            }
+        }
         // requests from /nitro_spawn and the Nitro Trap; a request waits up to 5 seconds for a spot
         void update_nitro_trap(Shared &state, const std::string &level)
         {
+            {
+                const auto boss = boss_zone_key();
+#ifdef CRASH_NST_STABLE
+                // (Stable V1.3.1: harder bosses are Papu Papu's alone, and none of the boss work runs in other boss fights)
+                const auto papu = boss == "B101" ? boss : std::string();
+                update_boss_research(papu);
+                update_boss_tuning(state, papu);
+#else
+                update_boss_research(boss);
+                update_boss_tuning(state, boss);
+#endif
+            }
             // the game's sounds from the last level may be gone with it
             static std::string sound_level;
             if (level != sound_level)
@@ -6305,6 +11133,10 @@ namespace ingame
         std::atomic_bool who_armed{false};
         PVOID who_handler_cookie = nullptr;
         constexpr DWORD who_arm_code = 0xE0C0FFEE; // raised by us: sets this thread's debug registers
+        // (V1.3.41: what's watched, for the log, and whether every write is caught, not only one that changes it: Papu Papu's
+        // facing place is written every frame with the same number while he stands)
+        const char *who_what = "the floor setting";
+        std::atomic_bool who_every{false};
         void who_capture(const CONTEXT &context)
         {
             const auto target = who_target.load();
@@ -6312,7 +11144,7 @@ namespace ingame
                 return;
             ++who_hits;
             const auto v = *reinterpret_cast<volatile std::uint64_t *>(target);
-            if (v == who_last.load())
+            if (v == who_last.load() && !who_every.load())
                 return;
             who_last = v;
             const auto i = who_count.load();
@@ -6469,8 +11301,10 @@ namespace ingame
             {
                 const auto &cap = who_captures[w.reported];
                 std::ostringstream out;
-                out << "Who: write " << (w.reported + 1) << " (thread " << cap.thread << "): the floor setting became 0x" << std::hex
-                    << cap.value << std::dec;
+                float low = 0, high = 0;
+                std::memcpy(&low, &cap.value, 4), std::memcpy(&high, reinterpret_cast<const char *>(&cap.value) + 4, 4);
+                out << "Who: write " << (w.reported + 1) << " (thread " << cap.thread << "): " << who_what << " became 0x" << std::hex
+                    << cap.value << std::dec << " (as two numbers " << low << ", " << high << ")";
                 if (typed(static_cast<Address>(cap.value), 0x13ea4d8))
                     out << " (" << string(value<Address>(value<Address>(static_cast<Address>(cap.value) + 0x18) + 8), 48) << ")";
                 out << "\n";
@@ -6519,6 +11353,10 @@ namespace ingame
         }
         void update_ice_who(unsigned mode, Address actor)
         {
+            // (V1.3.41, after the code review: not while Papu Papu's facing place is watched, see papu_who; the ice test asking
+            // for nothing used to turn that watch off in the frame it went on)
+            if (who_every.load())
+                return;
             auto &w = who_state;
             const auto now = GetTickCount64();
             if (w.mode && mode != w.mode)
@@ -6589,6 +11427,61 @@ namespace ingame
                 ice_note(caught ? "who: caught " + std::to_string(caught) + ". Type /ice_test off and send me the log."
                                 : "who: nothing caught in 30 seconds. Type /ice_test off and send me the log.");
             }
+        }
+        // V1.3.41 research (Eric: his spin "jumps to a different location" after an aimed slam): if his spin still jumps from
+        // his aim once what turns with him is set (or nothing was found that does), what writes his facing's place in his
+        // CBehaviorComponent (+0xd8, which the game put back every frame in V1.3.40) is caught by the write watch above, once a
+        // visit, at his next aimed stand (nothing of ours is set there while it's on): the game's code that writes it, with
+        // the calls that led there, their registers and their code, shows where the game keeps his facing
+        // (the watch off: every thread's debug registers cleared before his objects can go)
+        void papu_who_off(BossTuning &t, const char *why)
+        {
+            if (t.watch_step != 1)
+                return;
+            who_armed = false;
+            who_debug_registers(0);
+            who_target = 0, who_every = false, who_what = "the floor setting";
+            who_state.mode = 0;
+            t.watch_step = 2;
+            std::cout << "Boss rule research: the watch on his facing's place is off, " << why << " (" << who_hits.load() << " writes seen, " << who_count.load() << " caught)\n"
+                      << std::flush;
+        }
+        void papu_who(BossTuning &t, int s, std::uint64_t now)
+        {
+            auto &w = who_state;
+            if (t.watch_step == 1)
+            {
+                who_report();
+                if (who_count.load() >= 3)
+                    papu_who_off(t, "3 writes caught");
+                else if (now - t.watch_at > 1500 || s != 1)
+                    papu_who_off(t, s != 1 ? "his stand is over" : "1.5 s went by");
+                return;
+            }
+            if (t.watch_step || !t.watch_due || s != 1 || !t.aim_wrote || w.mode || IsDebuggerPresent())
+                return;
+            Address target = 0;
+            for (const auto part : list(value<Address>(t.papu + 24), 128))
+                if (typed(part, 0x150c710))
+                    target = part + 0xd8;
+            if (!target || (target & 7))
+            {
+                t.watch_step = 2;
+                return;
+            }
+            for (auto &cap : who_captures)
+                cap = {};
+            who_count = 0, who_hits = 0;
+            w = {};
+            w.started = now; // (its mode stays 0: it's not the ice test's, see update_ice_who)
+            who_last = value<std::uint64_t>(target);
+            who_what = "Papu Papu's facing place (his CBehaviorComponent +0xd8)", who_every = true;
+            who_target = target;
+            who_armed = true;
+            const auto threads = who_debug_registers(target);
+            t.watch_step = 1, t.watch_at = now;
+            std::cout << "Boss rule research: his spin jumped from his aim: a watch on his facing's place (0x" << std::hex << target << std::dec << ") in " << threads
+                      << " threads, to see what writes it\n" << std::flush;
         }
         //  contact (research): the floor change is noticed in the game's code at +0x510b70, called every frame from
         //  Crash's update (+0x4bcc70) with Crash and his ground contact object (type +0x1509a38). This dumps that code
@@ -7681,6 +12574,26 @@ namespace ingame
             nitro_probe();
         }
         update_nitro_trap(state, level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))));
+        // Aku Aku Mask items in a boss fight (V1.3.13, asked for: "one is enough"): a mask comes there only while Crash
+        // has none and none came in this fight yet; the rest wait for the next level. (V1.3.12's log: a release's 57
+        // masks came one every 3 seconds, so Crash had three, invincible, all fight long)
+        {
+            static std::string boss_given;
+            static std::uint64_t checked = 0;
+            const auto now = GetTickCount64();
+            const auto boss = boss_zone_key();
+            if (boss.empty())
+                boss_given.clear(), state.aku_hold = 0;
+            else if (hard_boss_no_masks(state, boss))
+                state.aku_hold = 1; // (V1.3.33: none at all)
+            else if (now - checked >= 250)
+            {
+                checked = now;
+                state.aku_hold = boss_given == boss || aku_manager_state(player()).second ? 1u : 0u;
+            }
+            if (state.aku_give_request != state.aku_give_ack && !boss.empty())
+                boss_given = boss, state.aku_hold = 1;
+        }
         if (state.aku_give_request != state.aku_give_ack)
         {
             state.aku_give_ack = state.aku_give_request;
@@ -7688,7 +12601,20 @@ namespace ingame
         }
         aku_give_followup();
         if (!level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))).empty())
-            update_aku_lock(state.aku_lock != 0);
+        {
+            // V1.3.33 (Eric: "get rid of Aku Aku Mask when we have hard bosses"): in a harder boss fight Crash has no mask:
+            // the Aku Aku lock takes his (even a filler one) and keeps the fight's crates and items from giving one
+            const bool hard = hard_boss_no_masks(state, boss_zone_key());
+            static bool hard_told = false;
+            if (hard != hard_told)
+            {
+                hard_told = hard;
+                std::cout << (hard ? "Boss fight: harder bosses are on, so Crash has no Aku Aku mask here (mask items wait for the next level)\n"
+                                   : "Boss fight over: Aku Aku masks as the seed has them again\n")
+                          << std::flush;
+            }
+            update_aku_lock(state.aku_lock != 0 || hard, hard);
+        }
         // Crash's colors (research), in levels and hubs
         update_crash_tint(state);
         if (state.crash_probe_request != state.crash_probe_ack)
@@ -7837,6 +12763,14 @@ namespace ingame
     {
         std::lock_guard lock(crate_mutex);
         restore_tints(game_thread);
+        // Papu Papu's red glow and message keeping (Harder bosses test), and his health script's list (V1.3.34)
+        boss_block_actor = 0, boss_block_red = false;
+        id_list_restore("the client stopped");
+        papu_who_off(boss_tuning, "the client stopped");
+        if (game_thread)
+            boss_tint_off(boss_tuning, true);
+        else if (boss_tuning.tint_bundle)
+            write(boss_tuning.tint_bundle + 48, default_blend);
         active_style = 0;
         move_lock_until = 0;
         // these guards remain active because an existing actor could retain its crouch component
