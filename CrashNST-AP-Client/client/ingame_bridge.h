@@ -49,6 +49,9 @@ public:
     // the Nitro Trap: countdown, then kind 0 a coin flip, 1 a Nitro falls onto Crash, 2 one appears ahead of him
     void request_nitro_drop(unsigned kind = 0);
     std::string take_ice_note(); // a new console message from the game thread, or empty
+    std::string take_death_note(); // a new DeathLink message from the game thread (V1.3.46), or empty
+    // DeathLinks the game thread handed back since the last call: a level ended while one waited for Crash to get off a ride
+    unsigned take_death_carries();
     void request_nitro_spawn();
     bool nitro_ready();
     bool nitro_drop_ready();
@@ -76,6 +79,8 @@ public:
     void tint_opacity(float opacity);
     void slow_tilt(float tilt);
     void aku_lock(bool on);
+    // Aku Aku Sanity is on in this seed: no free mask after deaths in a row, Aku Aku item or not (V1.3.46)
+    void aku_sanity(bool on);
     // Harder bosses: health and speed in percent (100 the game's own), and the rules on bosses that can be hit any time
     void boss_settings(unsigned health, unsigned speed, bool rules, bool bar_grow, bool masks);
     void bar_try(unsigned target, float factor);
@@ -93,7 +98,7 @@ private:
     HANDLE mapping_ = nullptr, mutex_ = nullptr;
     ingame::Shared *shared_ = nullptr;
     std::uintptr_t tick_ = 0;
-    unsigned ice_note_seen_ = 0;
+    unsigned ice_note_seen_ = 0, death_note_seen_ = 0, death_carry_seen_ = 0;
     std::uintptr_t double_jump_filter_ = 0;
     std::uintptr_t crate_identity_ = 0;
     bool owned_ = false;

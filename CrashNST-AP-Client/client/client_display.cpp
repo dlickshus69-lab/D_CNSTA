@@ -303,6 +303,9 @@ void ClientRuntime::update_display(ClientTick &tick)
         if (aku_lock_override >= 0)
             aku_locked = aku_lock_override == 1;
         box_markers->aku_lock(aku_locked);
+        // (V1.3.46 / Stable V1.3.4, Eric: "You shouldn't receive any free Aku Aku if we have Aku Sanity on") the game's own
+        // free mask after a few deaths in a row stays off with Aku Aku Sanity, Aku Aku item or not
+        box_markers->aku_sanity(session.slot_data()["aku_aku_sanity"] == true);
         // Harder bosses: from the seed (boss_health and boss_speed in percent, boss_rules; older seeds have none), or the
         // test commands
         {

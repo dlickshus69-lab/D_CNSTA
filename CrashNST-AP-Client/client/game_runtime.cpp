@@ -435,6 +435,16 @@ namespace ingame
         std::atomic_uint mercy_deaths{0};
         // when PlayerDied last turned on
         std::atomic<std::uint64_t> died_flag_at{0};
+        // (V1.3.46 / Stable V1.3.4) Aku Aku Sanity's watch on the free mask after deaths in a row: when Crash last died
+        // outside a bonus round, and when he last counted as settled (able to move for 1.5 s). Between the two he is dying,
+        // respawning or loading, and can't break a crate
+        std::atomic<std::uint64_t> free_mask_death_at{0}, settled_at{0};
+        std::atomic_bool aku_free_masks_off{false};
+        bool respawn_window()
+        {
+            const auto death = free_mask_death_at.load();
+            return death && settled_at.load() < death;
+        }
         FunctionHook death_hook;
         // research: every graph event the game sends goes through +0x767da0 (DeathLink sends one through it too)
         FunctionHook event_hook;
@@ -528,7 +538,12 @@ namespace ingame
                 return;
             // every death counts for the trap mercy, sent or not (a received DeathLink, a bonus round)
             if (after)
+            {
                 ++mercy_deaths, died_flag_at = GetTickCount64();
+                // (a bonus round's death puts Crash back in the level as he was, Aku Aku and all)
+                if (!bonus_round_active())
+                    free_mask_death_at = died_flag_at.load();
+            }
             if (!after)
             {
                 remote_death = false;
@@ -933,6 +948,10 @@ namespace ingame
     // the level has opened (Eric's Stable V1.3.1 run: three that came at the game over screen all struck as the level
     // opened again, and the screen stayed white until he restarted the level)
     std::atomic_bool screen_game_over{false}, screen_level_hud{false};
+    // (V1.3.46 / Stable V1.3.4) the box count at a level's end ("...but you missed N boxes", then "Press Enter to
+    // continue"): [NumericCounters] comes up first, then Title_Text_Left, [TITLE] and [Comp_PressToContinue] (Eric's
+    // clip and the logs: DeathLinks that came then killed Crash there, a life lost after the level was won)
+    std::atomic_bool screen_level_end{false};
     std::atomic<std::uint64_t> screen_seen_at{0};
     bool pause_menu_visible()
     {
@@ -983,6 +1002,7 @@ namespace ingame
         const auto now = GetTickCount64();
         screen_game_over = names.count("ContinueText") != 0;
         screen_level_hud = names.count("DummyWumpa") || names.count("[Crash_Wumpa_Fruit1.vfx]");
+        screen_level_end = names.count("[NumericCounters]") || names.count("[Comp_PressToContinue]") || names.count("Title_Text_Left");
         screen_seen_at = now;
         if (names != logged && now >= next_log && lines < 60)
         {
@@ -1410,6 +1430,18 @@ namespace ingame
                 crash_other_metas.insert(meta);
             return false;
         }
+        // (V1.3.46 / Stable V1.3.4) a send of fcbn65ha that hands Crash a mask ("yes": its second value a constant 1) and
+        // isn't a crate's pickup (whose first value reads the crate, a +0x1754fe0 source): the free mask the game gives
+        // after deaths in a row (Eric's log: ?{0,0} +0x1748280{1,0}, sent while Crash died)
+        bool free_mask_send(Address node)
+        {
+            const auto args = value<Address>(node + 32);
+            if (!args || !typed(args, 0x1745070))
+                return false;
+            const auto sources = list(args, 16);
+            return sources.size() == 2 && !typed(sources[0], 0x1754fe0) && typed(sources[1], 0x1748280) &&
+                   (value<std::uint64_t>(sources[1] + 24) & 0xff) == 1;
+        }
         bool aku_give_message(const std::string &name)
         {
             static const char *const gives[]{"tm011evr", "5fw2bzv2", "5bnreye5", "ju9pgu97", "s8h11iit", "fcbn65ha", "ibjgf1k9",
@@ -1798,6 +1830,39 @@ namespace ingame
                                 ++hit_captures;
                             }
                         }
+                    }
+                }
+                // (V1.3.46 / Stable V1.3.4) Aku Aku Sanity, Aku Aku item or not (Eric: "You shouldn't receive any free Aku Aku
+                // if we have Aku Sanity on, unless we get the item"): the mask the game gives for free after a few deaths in a
+                // row (Aku's manager sends himself fcbn65ha with "yes" while Crash dies: Eric's log, once MondoF had sent him
+                // the Aku Aku item) is kept from him, from a death until Crash can move again. Crates' masks (Crash can't
+                // break one then) and the Aku Aku Mask items (the client's own hand-over) still come.
+                // (not only for the Crash bound for DeathLink: after a Continue the new Crash's Aku gets his first messages
+                // before he is bound)
+                if (aku_free_masks_off.load() && !aku_messages_blocked.load() && !own_aku_message.load() && component && target &&
+                    respawn_window() && aku_manager(component, target))
+                {
+                    const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                    if (name.find("fcbn65ha") != std::string::npos && free_mask_send(event))
+                    {
+                        static std::uint64_t told_for = 0;
+                        if (const auto death = free_mask_death_at.load(); death != told_for)
+                        {
+                            told_for = death;
+                            std::cout << "Aku Aku Sanity: kept the free mask the game gives after deaths in a row\n" << std::flush;
+                        }
+                        return 0;
+                    }
+                    // the other messages that can hand Aku a mask, while Crash dies or respawns: let through, but logged
+                    // (once each) in case the free mask comes some other way in Crash 2 or 3
+                    if (aku_give_message(name))
+                    {
+                        std::lock_guard lock(event_mutex);
+                        static std::set<std::string> seen;
+                        const auto id = name.find("_id_");
+                        if (seen.size() < 20 && seen.insert(id == std::string::npos ? name : name.substr(id + 4)).second)
+                            std::cout << "Aku Aku Sanity: while Crash respawned Aku's manager got " << (id == std::string::npos ? name : name.substr(id + 4))
+                                      << send_arguments(event) << " (let through)\n" << std::flush;
                     }
                 }
                 if (aku_messages_blocked.load() && !own_aku_message.load() && component && target && aku_manager(component, target))
@@ -12615,7 +12680,10 @@ namespace ingame
         {
             const bool in_level = !level_key(string(value<Address>(marker_world + 184))).empty();
             const bool camera = scene().camera_active;
-            state.player_ready = in_level && (actor ? player_can_move(actor, camera) : camera) ? 1u : 0u;
+            // (V1.3.46 / Stable V1.3.4) not during the box count at the level's end either: traps and Aku Aku Mask items
+            // wait for the next level
+            const bool level_over = GetTickCount64() - screen_seen_at.load() < 1000 && screen_level_end.load();
+            state.player_ready = in_level && !level_over && (actor ? player_can_move(actor, camera) : camera) ? 1u : 0u;
             // and has been for 1.5 seconds without a break: traps start only then
             static std::uint64_t ready_since = 0;
             const auto tick_now = GetTickCount64();
@@ -12624,6 +12692,10 @@ namespace ingame
             else if (!ready_since)
                 ready_since = tick_now;
             state.player_settled = state.player_ready && tick_now - ready_since >= 1500 ? 1u : 0u;
+            // (V1.3.46) Aku Aku Sanity's free-mask watch: a respawn is over once Crash has settled again
+            if (state.player_settled)
+                settled_at = tick_now;
+            aku_free_masks_off = state.aku_sanity != 0;
             // (V1.3.43) in a level, with a trap running, Crash counted as unable to move for 15 s on end: the log says why
             // (once per stretch, a few times per level)
             {
@@ -12835,14 +12907,29 @@ namespace ingame
                 copy(state.error, "Crashsanity waiting for crouch/slide component. Re-enter the level.");
             }
         }
+        // (V1.3.46 / Stable V1.3.4) a DeathLink waiting because Crash is on a ride (the Crash 2 jet board, Un-Bearable's
+        // polar bear): if the level ends first, it goes back to the client, which keeps it for the next level played on foot
+        // (until then it was dropped)
+        static bool death_waits_on_ride = false;
+        const auto carry_ride_death = [&] {
+            if (state.death_request == state.death_ack || !death_waits_on_ride)
+                return false;
+            ++state.death_carry;
+            state.death_ack = state.death_request;
+            death_waits_on_ride = false;
+            std::cout << "DeathLink: the level ended while Crash was on a ride; the client keeps it for the next level on foot.\n" << std::flush;
+            return true;
+        };
         // Crash's damage scripts are bound in every level, DeathLink or not: Aku Aku Sanity's lock (its NoAkuAkuMasks
         // switch) and the Aku Aku research need them too. Deaths are only sent when DeathLink is on (the client checks)
         if (key.empty())
         {
+            carry_ride_death();
             last_actor = 0;
             death_handle = 0;
             remote_death = false;
             state.death_ack = state.death_request;
+            death_waits_on_ride = false;
 #ifndef CRASH_NST_STABLE
             ride_research_actor = 0;
 #endif
@@ -12857,6 +12944,16 @@ namespace ingame
         {
             state.death_ack = state.death_request;
             std::cout << "DeathLink: Crash is at the game over screen, so the DeathLinks that came there are dropped.\n" << std::flush;
+        }
+        // (V1.3.46 / Stable V1.3.4, Eric: "make sure we don't die when it's showing how many boxes we missed") the box
+        // count at the level's end: the level is won, so a DeathLink then misses (one waiting on a ride goes back to the
+        // client as at any level's end)
+        if (state.death_request != state.death_ack && screen_known && screen_level_end.load() && !carry_ride_death())
+        {
+            state.death_ack = state.death_request;
+            copy(state.death_note, "A DeathLink came during the box count at the end of the level, so it missed you.");
+            ++state.death_note_id;
+            std::cout << "DeathLink: the level's box count is on screen (the level is over), so the DeathLink is dropped.\n" << std::flush;
         }
         static std::uint64_t death_settled_since = 0, death_waiting_since = 0;
         if (!state.player_settled)
@@ -12936,8 +13033,12 @@ namespace ingame
             copy(state.error, "DeathLink death was not observed after the game death script");
         }
         // (V1.3.43) in the Crash 2 jet-board levels (and anywhere else something is ridden) only on foot: the on-foot death
-        // script breaks a ride, so a DeathLink waits on the board for the next part on foot
-        const bool on_foot = !trap_gimmick_level(key) || (actor && body == actor && walking);
+        // script breaks a ride, so a DeathLink waits on the board for the next part on foot. (V1.3.46 / Stable V1.3.4)
+        // Un-Bearable too (Guicho: held as "on a ride" while he ran from the giant polar bear): on foot it strikes, on the
+        // polar bear it waits
+        const bool on_foot = !trap_gimmick_level(key) || (actor && body == actor && walking) ||
+                             (key == "L215" && actor && body == actor && typed(value<Address>(actor + 424), 0x1589128));
+        death_waits_on_ride = state.death_request != state.death_ack && !on_foot;
         if (state.death_request != state.death_ack && alive && !remote_death && !state.console_open && level_open && on_foot &&
             death_controls_ready(body, scene().camera_active))
         {
