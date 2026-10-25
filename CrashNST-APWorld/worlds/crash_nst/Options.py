@@ -493,7 +493,9 @@ class Boxsanity(Range):
 class Crashsanity(Toggle):
     """Experimental: assign Crash 1/2/3 basic movement rules per regular level.
 
-    F10 restores vanilla controls if a style prevents progress."""
+    Crash 1 controls have no Body Slam, Crouch Jump or Slide (even once found), and only Crash 3 controls double jump.
+    A level only gets controls that can do its clear, power crystal, gems and secret exit, and boxes its controls can't
+    reach are left out of the box checks. F10 restores vanilla controls as a last resort."""
 
     display_name = "Crashsanity"
 
