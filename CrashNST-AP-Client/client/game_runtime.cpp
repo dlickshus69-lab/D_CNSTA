@@ -5565,6 +5565,14 @@ namespace ingame
             float timer_seen50 = 0, timer_kept48 = 0, timer_kept50 = 0;
             bool timer_ticking = false, timer_kept = false;
             unsigned hit_hold_lines = 0;
+            // V1.3.60 (see papu_reverse): his spin turned the other way once: the spin it's for (its start), when, whether it
+            // was and when; the game's own turn since his last lap (or the switch), to see his laps still count; and off for
+            // this visit if they don't
+            std::uint64_t rev_spin = 0, rev_at = 0, rev_done_at = 0;
+            bool rev_done = false, rev_off = false, rev_g_known = false;
+            float rev_g_last = 0, rev_g_turned = 0, rev_meant = 0;
+            int rev_laps = 0, rev_laps_at_switch = 0;
+            unsigned rev_lines = 0;
             unsigned slams_seen = 0;
             float start_timer_set = 0;
             // V1.3.29 (see bar_count): the bar's own count of notches left (two copies), found at the fight's start and
@@ -8756,8 +8764,12 @@ namespace ingame
         // from there. Every copy notes the game's own turn (steer_game)
         constexpr std::uint64_t steer_copy = 0xf8fa38, steer_after = 0xf8fa3d;
         std::atomic<std::uint64_t> steer_body{0}, steer_arm_address{0}; // (his physics' data: the copy's rax + rcx)
-        std::atomic_int steer_mode{0};                                   // 0: only noted, 1: to steer_target, 2: by steer_delta
+        std::atomic_int steer_mode{0}; // 0: only noted, 1: to steer_target, 2: by steer_delta, 3: the other way from steer_pivot
         std::atomic<float> steer_target{0}, steer_delta{0}, steer_game{0};
+        // V1.3.60 (see papu_reverse): his spin turned the other way from where the game's own turn was at the switch
+        // (steer_pivot): as the game turns him on, he turns back by as much (his turn is the game's + steer_delta + 2 (steer_pivot
+        // - the game's)), so he goes on from where he was, the other way
+        std::atomic<float> steer_pivot{0};
         std::atomic_uint steer_copies{0}, steer_turned{0};
         std::atomic_bool steer_rewound{false};
         constexpr DWORD steer_arm_code = 0xE0C0FFEF; // raised by us: sets this thread's debug registers 1 and 2
@@ -9051,6 +9063,58 @@ namespace ingame
             yaw = std::atan2(fy, fx);
             return true;
         }
+        // V1.3.60 (Eric: "move on to the pattern"; on his list: turning the other way in the middle of a spin): with the harder
+        // rules on and his turn steered (see papu_steer), each spin of his turns the other way once, at a time picked at random
+        // as it starts: 30% to 70% of the way through it as the game would have it (its laps, spinPlayerLapCount, times a lap's
+        // time, 1.3 s over his spin speed), 0.25 s in at the least. He goes on from where he was (see steer_pivot), no jump.
+        // His laps are watched after it: if none is counted while the game's own turn goes on by two whole turns, his laps may
+        // count his turn's way (and his spin wouldn't end), so he turns back the first way and the switch is off for this
+        // visit (the log says so)
+        void papu_reverse(BossTuning &t, const Shared &state, int s, std::uint64_t now)
+        {
+            if (s != 2 || !state.boss_rules || !t.steer_on || !t.spin_start_at)
+            {
+                t.rev_spin = 0;
+                return;
+            }
+            const float g = steer_game.load();
+            const int laps = t.laps_at ? value<int>(t.papu_ai + t.laps_at) : 0;
+            if (t.rev_spin != t.spin_start_at)
+            {
+                // (a new spin: when it turns the other way)
+                t.rev_spin = t.spin_start_at, t.rev_done = false, t.rev_at = 0, t.rev_g_known = false, t.rev_g_turned = 0, t.rev_laps = laps;
+                const int length = t.laps_total_at ? value<int>(t.papu_ai + t.laps_total_at) : 0;
+                const float spin = t.spin_at ? value<float>(t.papu_ai + t.spin_at) : 1.0f;
+                if (t.rev_off || length < 1 || length > 30 || !std::isfinite(spin))
+                    return;
+                static std::mt19937 rng{std::random_device{}()};
+                const float expected = static_cast<float>(length) * 1.3f / std::clamp(spin, 0.5f, 4.0f);
+                t.rev_meant = std::max(0.25f, std::uniform_real_distribution<float>(0.3f, 0.7f)(rng) * expected);
+                t.rev_at = t.spin_start_at + static_cast<std::uint64_t>(t.rev_meant * 1000);
+            }
+            // (the game's own turn since his last lap or the switch)
+            if (t.rev_g_known)
+                t.rev_g_turned += std::abs(wrap_angle(g - t.rev_g_last));
+            t.rev_g_last = g, t.rev_g_known = true;
+            if (laps != t.rev_laps)
+                t.rev_laps = laps, t.rev_g_turned = 0;
+            if (!t.rev_done && t.rev_at && now >= t.rev_at && steer_mode.load() == 2)
+            {
+                steer_pivot = g, steer_mode = 3;
+                t.rev_done = true, t.rev_done_at = now, t.rev_g_turned = 0, t.rev_laps_at_switch = laps;
+                if (t.rev_lines < 30)
+                    ++t.rev_lines, std::cout << "Boss pattern: his spin turns the other way, " << seconds(now - t.spin_start_at) << " in (lap " << laps + 1 << " of "
+                                             << (t.laps_total_at ? value<int>(t.papu_ai + t.laps_total_at) : 0) << ")\n" << std::flush;
+            }
+            else if (t.rev_done && steer_mode.load() == 3 && t.rev_g_turned > 4 * 3.14159265f)
+            {
+                // (turned back the first way from where he is: his turn by steer_delta again, that much further)
+                steer_delta = wrap_angle(steer_delta.load() + 2 * wrap_angle(steer_pivot.load() - g)), steer_mode = 2;
+                t.rev_off = true;
+                std::cout << "Boss pattern: no lap of his counted while the game turned him two whole turns after he turned the other way (" << seconds(now - t.rev_done_at)
+                          << "): his laps may count his turn's way; turned back the first way, and no more turning the other way in this visit\n" << std::flush;
+            }
+        }
         void papu_aim(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
             // (V1.3.52: the steering only with the harder rules on: off, he goes back to the game's own turn)
@@ -9058,7 +9122,7 @@ namespace ingame
                 t.steer_on = false, papu_steer_off();
             // (and only while he fights: as he stands, spins or is hit; going back to his throne or coming into the arena,
             // he has the game's own turn again)
-            if (s != 1 && s != 2 && s != 3 && steer_mode.load() == 2)
+            if (s != 1 && s != 2 && s != 3 && steer_mode.load() >= 2)
                 steer_mode = 0;
             // (V1.3.41: his spin's first frames after an aimed stand, from where his aim was held: does it start there?)
             if (t.spin_frames)
@@ -9692,6 +9756,7 @@ namespace ingame
             papu_stand_clock(t, s, now); // (V1.3.56)
             papu_slam_rate(t, s, percent, now);
             papu_aim(t, state, s, now);
+            papu_reverse(t, state, s, now); // (V1.3.60)
 #endif
             papu_who(t, s, now);
             if (t.spin_search_due && now >= t.spin_search_due)
@@ -11866,6 +11931,7 @@ namespace ingame
             const int mode = steer_mode.load(std::memory_order_acquire);
             const float d = mode == 1   ? wrap_angle(steer_target.load(std::memory_order_relaxed) - game)
                             : mode == 2 ? steer_delta.load(std::memory_order_relaxed)
+                            : mode == 3 ? wrap_angle(steer_delta.load(std::memory_order_relaxed) + 2 * wrap_angle(steer_pivot.load(std::memory_order_relaxed) - game))
                                         : 0.0f;
             if (!std::isfinite(d) || std::abs(d) < 1e-5f)
                 return;

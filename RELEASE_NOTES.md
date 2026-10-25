@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Papu Papu stays red after every hit** until the slam after his next spin (some hits ended it as his spin started).
-- **His hit window goes by speed:** 2 s at 200%, up to 4 s at 100%. `/boss_window` sets the 200% time.
-- **His faster slam from his first stand** of a fight (it took two stands before).
+- **Papu Papu turns the other way in the middle of each spin**, at a random moment (not in his first spin after he comes in).
+- From V1.3.59: he stays red after every hit until the slam after his next spin.
+- From V1.3.59: his hit window goes by speed: 2 s at 200%, up to 4 s at 100% (`/boss_window` sets the 200% time).
+- From V1.3.59: his faster slam from his first stand of a fight.
 - From V1.3.57: his slam paced by boss speed (0.9 s after he stands at 100%, 0.45 s at 200%).
-- From V1.3.52: his spin starts where he slammed.
