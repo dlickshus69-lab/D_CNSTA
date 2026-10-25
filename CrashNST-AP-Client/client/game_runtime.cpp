@@ -5801,6 +5801,11 @@ namespace ingame
             std::array<float, 2> source_wrote{};
             bool source_written = false, source_searched = false, source_watched = false;
             unsigned source_set = 0, source_held = 0, source_reset = 0, source_told = 0;
+            // V1.3.50: the record it's in and his physics it was found for (a new one of his objects lets it go), and the
+            // watches this visit (V1.3.49 had one: a second can go on his physics' source once the first found it)
+            Address source_record = 0, source_body = 0;
+            unsigned watches = 0;
+            bool watch_source = false; // (the next watch goes on his physics' source: the game put that back, see papu_aim)
             // V1.3.36 (see papu_slam_rate): his slam's time from when he stands, as the game plays it (the shortest seen while
             // nothing of ours is set), and the stand a try was set in
             std::uint64_t slam_normal = 0, try_stand = 0;
@@ -8682,16 +8687,34 @@ namespace ingame
             const auto at = record + value<std::int16_t>(record + 0x14);
             return at >= 0x10000 && !(at & 15) ? at : 0;
         }
+        // (V1.3.50) a place and a turn (x, y, z, then a quaternion at +0x10) that hold the same as another's, to a little (the
+        // game's copy is a frame's, and the numbers move a little as he stands), and a turn about his up axis only
+        bool papu_same_place_turn(const std::array<float, 8> &a, const std::array<float, 8> &b)
+        {
+            for (const int i : {0, 1, 2, 4, 5, 6, 7})
+                if (!std::isfinite(a[i]) || !std::isfinite(b[i]) || std::abs(a[i] - b[i]) > 1e-3f * std::max(1.0f, std::abs(a[i])))
+                    return false;
+            return true;
+        }
+        bool papu_up_turn(const std::array<float, 8> &r)
+        {
+            for (const int i : {0, 1, 2, 4, 5, 6, 7})
+                if (!std::isfinite(r[i]))
+                    return false;
+            return std::abs(r[4]) < 0.02f && std::abs(r[5]) < 0.02f && std::abs(r[4] * r[4] + r[5] * r[5] + r[6] * r[6] + r[7] * r[7] - 1) < 0.02f;
+        }
         // (V1.3.49) his physics' source: the record the game's physics step copies his place and turn from each frame (48
         // bytes: a place, a turn and one more, into his physics, at +0xf8fa30..+0xf8fa3d). While nothing of ours is set it holds
-        // the same 48 bytes as his physics, a little way from it (V1.3.48's: 0x8b20 bytes past it): a 16-byte aligned copy
-        // inside a record that leads to it (the game's records keep their data's offset at +0x14, as his physics' does). Only
-        // one such copy within 1 MB counts; with none or several, the watch finds it (see papu_who)
+        // what his physics does, a little way from it (V1.3.48's: 0x8b20 bytes past it): a 16-byte aligned copy inside a
+        // record that leads to it (the game's records keep their data's offset at +0x14, as his physics' does). Only one such
+        // copy within 1 MB counts; with none or several, the watch finds it (see papu_who). V1.3.50: his place and turn only,
+        // to a little, and a record up to 0x2000 bytes either side (V1.3.49's 48 bytes exactly, the record within 0x400 before
+        // it, found none in Eric's run)
         Address papu_source_search(Address body_at, unsigned &matches)
         {
             matches = 0;
-            std::array<unsigned char, 48> body{};
-            if (!body_at || !read(body_at, body))
+            std::array<float, 8> body{};
+            if (!body_at || !read(body_at, body) || !papu_up_turn(body))
                 return 0;
             ReadableRegions ok;
             const Address from = (body_at > 0x110000 ? body_at - 0x100000 : 0x10000) & ~Address{0xfff}, to = body_at + 0x100000;
@@ -8705,14 +8728,16 @@ namespace ingame
                 SIZE_T got = 0;
                 if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(p), page.data(), n, &got) || got < 0x1000)
                     continue;
-                for (std::size_t i = 0; i < 0x1000 && i + 48 <= got; i += 16)
+                for (std::size_t i = 0; i < 0x1000 && i + 48 <= got && matches < 8; i += 16)
                 {
                     const Address d = p + i;
-                    if (d == body_at || std::memcmp(page.data() + i, body.data(), 48) != 0)
+                    std::array<float, 8> here{};
+                    std::memcpy(here.data(), page.data() + i, sizeof here);
+                    if (d == body_at || !papu_same_place_turn(body, here))
                         continue;
                     bool record = false;
-                    for (Address r = (d - 8) & ~Address{7}; r + 0x400 >= d && !record; r -= 8)
-                        record = ok(r + 0x14, 2) && r + value<std::int16_t>(r + 0x14) == d;
+                    for (Address r = (d - 0x2000) & ~Address{7}; r <= d + 0x2000 && !record; r += 8)
+                        record = r != d && ok(r + 0x14, 2) && r + value<std::int16_t>(r + 0x14) == d;
                     if (record)
                         ++matches, found = d;
                 }
@@ -8729,15 +8754,19 @@ namespace ingame
             if (!t.body_at || !read(t.body_at, rec) || !std::all_of(rec.begin(), rec.end(), [](float f) { return std::isfinite(f); }))
                 return;
             // (V1.3.49) his physics' source: looked for once a visit, while it still holds what his physics does; one that no
-            // longer does (his objects made again) is let go
+            // longer does (his objects made again) is let go. V1.3.50: his place and turn, to a little, for the same physics
+            // (V1.3.49 wanted all 48 bytes the same)
             if (t.source_at)
             {
-                std::array<unsigned char, 48> a{}, b{};
-                if (!read(t.body_at, a) || !read(t.source_at, b) || a != b)
+                std::array<float, 8> a{}, b{};
+                if (t.source_body != t.body_at || !read(t.body_at, a) || !read(t.source_at, b) || !papu_up_turn(b) || !papu_same_place_turn(a, b))
                 {
                     std::cout << "Boss rule research: his physics' source at 0x" << std::hex << t.source_at << std::dec
-                              << " no longer holds his place and turn; let go\n" << std::flush;
-                    t.source_at = 0;
+                              << (t.source_body != t.body_at ? " was for his physics before (his objects were made again)" : " no longer holds his place and turn")
+                              << "; let go\n" << std::flush;
+                    // (looked for again: near his new physics, and by the watch)
+                    t.source_searched = t.source_searched && t.source_body == t.body_at, t.source_watched = false;
+                    t.source_at = 0, t.source_record = 0, t.source_body = 0;
                 }
             }
             if (!t.source_at && !t.source_searched)
@@ -8745,6 +8774,7 @@ namespace ingame
                 t.source_searched = true;
                 unsigned matches = 0;
                 t.source_at = papu_source_search(t.body_at, matches);
+                t.source_body = t.source_at ? t.body_at : 0;
                 std::cout << "Boss rule research: his physics' source (what the game copies his place and turn from each frame): "
                           << (t.source_at ? "found" : matches ? "several copies (" + std::to_string(matches) + "), none used" : std::string("none"))
                           << (t.source_at ? std::string(" at 0x") + [&] { std::ostringstream o; o << std::hex << t.source_at << " (" << std::dec
@@ -8899,8 +8929,16 @@ namespace ingame
                     if (spun)
                         t.spin_from = t.aim_lock, t.spin_trace = std::to_string(jump), t.spin_frames = 5;
                     // (V1.3.41: a jump once what turns with him has been looked for in two spins: the watch, see papu_who)
-                    if (spun && std::abs(jump) > 25 && t.turn_spins >= 2 && !t.watch_step)
+                    if (spun && std::abs(jump) > 25 && t.turn_spins >= 2 && !t.watch_step && !t.watches)
                         t.watch_due = true;
+                    // (V1.3.50: his physics' source not found near his physics: the watch at his next stand finds it, from
+                    // the physics step it catches; every stand after that sets it. V1.3.49 waited for two spins first)
+                    if (!t.source_at && t.body_sign && !t.watch_step && !t.watches)
+                        t.watch_due = true;
+                    // (V1.3.50: his physics' source set, the game put that back too, and his spin still jumped: a watch on it
+                    // at his next stand, to see what writes it)
+                    if (spun && std::abs(jump) > 25 && t.source_at && t.source_reset && !t.watch_step)
+                        t.watch_due = true, t.watch_source = true;
                     if (t.aim_lines < 14)
                     {
                         ++t.aim_lines;
@@ -9731,6 +9769,9 @@ namespace ingame
                         t.hit_count_at = field_offset(meta, "InternalStore__internalCounter_id_e24taaam", 4);
                         if (t.state_at)
                             t.papu = owner, t.papu_ai = c, t.state = -1;
+                        // (V1.3.50: his objects made again, the watches start over: his physics and its source are new)
+                        if (t.state_at && t.watch_step != 1)
+                            t.watch_step = 0, t.watches = 0, t.watch_due = false, t.watch_source = false;
                         // V1.3.34: his AI's timers, its waits (see papu_speed_timers)
                         t.ai_timers.clear();
                         const unsigned count = value<unsigned>(meta + 24);
@@ -11767,24 +11808,44 @@ namespace ingame
             t.watch_step = 2;
             std::cout << "Boss rule research: the watch on his facing's place is off, " << why << " (" << who_hits.load() << " writes seen, " << who_count.load() << " caught)\n"
                       << std::flush;
+            // (V1.3.50: once it found his physics' source, one more watch this visit can go on that, if the game puts it back
+            // too and his spin still jumps, see papu_aim)
+            if (t.source_at && t.source_watched && t.watches < 2)
+                t.watch_step = 0, t.watch_due = false;
         }
-        // (V1.3.49) the watch caught the game's physics step writing his physics: the record it copied from (the step's rbx
-        // leads to it, see +0xf8fa16: rax = [rbx], its data at rax plus its 16-bit +0x14)
-        Address papu_source_from_watch(Address body_at)
+        // (V1.3.49) the watch caught the game's physics step writing his physics: the record it copied from. V1.3.50: that's
+        // the step's rdi (and rsi), loaded from its list entry at the top of each turn of its loop (+0xf8f9b0: rdi = [rbx]);
+        // V1.3.49 read [rbx] again later, by when the list had moved on (Eric's log: rdi was the same in every write, rbx not).
+        // Its data: the record plus its 16-bit +0x14, as the step has it (+0xf8fa16), 16-byte aligned (the step copies it
+        // with movaps), a turn about his up axis. Only from a write into his physics (the step's rbp is his physics: its
+        // record leads to it, +0xf8fa21)
+        Address papu_source_from_watch(Address body_at, Address &record_at)
         {
             const auto copy_from = base() + 0xf8f980, copy_to = base() + 0xf8fb19;
             for (unsigned i = 0; i < who_count.load() && i < std::size(who_captures); ++i)
             {
                 const auto &f = who_captures[i].frames[0];
-                if (!who_captures[i].count || f.rip < copy_from || f.rip >= copy_to || !readable(static_cast<Address>(f.rbx), 8))
+                if (!who_captures[i].count || f.rip < copy_from || f.rip >= copy_to)
                     continue;
-                const auto record = value<Address>(static_cast<Address>(f.rbx));
-                if (record < 0x10000 || (record & 7) || !readable(record + 0x14, 2))
+                const auto body = static_cast<Address>(f.rbp);
+                const auto holder = body >= 0x10000 && !(body & 7) && readable(body + 0x30, 8) ? value<Address>(body + 0x30) : 0;
+                const auto body_record = holder >= 0x10000 && !(holder & 7) && readable(holder, 8) ? value<Address>(holder) : 0;
+                if (body_record < 0x10000 || !readable(body_record + 0x14, 2) || body_record + value<std::int16_t>(body_record + 0x14) != body_at)
                     continue;
-                const auto offset = value<std::int16_t>(record + 0x14);
-                const auto data = record + offset;
-                if (offset > 0 && offset < 0x400 && !(data & 15) && data != body_at && readable(data, 48))
-                    return data;
+                for (const auto candidate : {f.rdi, f.rsi})
+                {
+                    const auto record = static_cast<Address>(candidate);
+                    if (record < 0x10000 || (record & 7) || !readable(record + 0x14, 2))
+                        continue;
+                    const auto offset = value<std::int16_t>(record + 0x14);
+                    const auto data = record + offset;
+                    std::array<float, 8> held{};
+                    if (offset && !(data & 15) && data != body_at && readable(data, 48) && read(data, held) && papu_up_turn(held))
+                    {
+                        record_at = record;
+                        return data;
+                    }
+                }
             }
             return 0;
         }
@@ -11795,13 +11856,14 @@ namespace ingame
             {
                 who_report();
                 // (V1.3.49) his physics' source, from the physics step the watch caught, when the search didn't find it
-                if (!t.source_at && !t.source_watched)
-                    if (const auto source = papu_source_from_watch(t.body_at))
+                Address record = 0;
+                if (!t.source_at && !t.source_watched && t.body_at)
+                    if (const auto source = papu_source_from_watch(t.body_at, record))
                     {
-                        t.source_at = source, t.source_watched = true;
-                        std::cout << "Boss rule research: his physics' source, from the physics step the watch caught: 0x" << std::hex << source << std::dec
-                                  << " (" << static_cast<long long>(source - t.body_at) << " bytes from his physics); set with the aim from his next stand\n"
-                                  << std::flush;
+                        t.source_at = source, t.source_record = record, t.source_body = t.body_at, t.source_watched = true;
+                        std::cout << "Boss rule research: his physics' source, from the physics step the watch caught: 0x" << std::hex << source << " (in its record at 0x"
+                                  << record << ", " << std::dec << static_cast<long long>(source - t.body_at)
+                                  << " bytes from his physics); set with the aim from his next stand\n" << std::flush;
                     }
                 if (who_count.load() >= 3)
                     papu_who_off(t, "3 writes caught");
@@ -11815,7 +11877,8 @@ namespace ingame
             // else the place V1.3.41 watched. V1.3.49: his physics' source once it's set and the game puts that back too)
             Address target = 0;
             const char *what = "Papu Papu's facing place (his CBehaviorComponent +0xd8)";
-            if (t.source_at && t.source_reset)
+            // (V1.3.50: from when it was due, at his last stand's end: V1.3.49 looked at what this stand counted so far, none)
+            if (t.source_at && t.watch_source)
                 target = t.source_at + 0x18, what = "Papu Papu's physics source turn (its quaternion's z and w)";
             else if (const auto body = papu_body_record(t.papu))
                 target = body + 0x18, what = "Papu Papu's physics turn (its quaternion's z and w)";
@@ -11838,9 +11901,14 @@ namespace ingame
             who_target = target;
             who_armed = true;
             const auto threads = who_debug_registers(target);
-            t.watch_step = 1, t.watch_at = now;
-            std::cout << "Boss rule research: his spin jumped from his aim: a watch on " << what << " (0x" << std::hex << target << std::dec << ") in " << threads
-                      << " threads, to see what writes it\n" << std::flush;
+            t.watch_step = 1, t.watch_at = now, ++t.watches;
+            std::cout << "Boss rule research: "
+                      << (!t.source_at && t.body_sign ? "his physics' source not found near his physics"
+                          : t.source_at && t.watch_source ? "his physics' source was put back by the game, and his spin jumped from his aim"
+                                                          : "his spin jumped from his aim")
+                      << ": a watch on " << what << " (0x"
+                      << std::hex << target << std::dec << ") in " << threads << " threads, to see what writes it (watch " << t.watches << " this visit; nothing of ours is set this stand)\n"
+                      << std::flush;
         }
         //  contact (research): the floor change is noticed in the game's code at +0x510b70, called every frame from
         //  Crash's update (+0x4bcc70) with Crash and his ground contact object (type +0x1509a38). This dumps that code
