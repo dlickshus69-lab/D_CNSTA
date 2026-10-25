@@ -5564,6 +5564,62 @@ namespace ingame
             float aim_from = 0, aim_prev = 0; // (and what was set the frame before last: the game may take a frame to follow)
             int aim_mode = 0;
             unsigned aim_mode_frames = 0, aim_mode_kept = 0, aim_modes = 0, facing_told = 0;
+            // V1.3.41 (see papu_turn_research and papu_turn_set): what turns with him as he spins: where, how it holds his turn (1:
+            // an angle, in radians, degrees or turns (unit), either way (sign); 2: a direction, two numbers; 3: a quaternion's
+            // last two numbers, a turn about his up axis), what it is (its object, the object's type and the place in it), whether
+            // it's set by the aim (not his transform's own), in how many research spins it turned with him and how many it
+            // didn't; for this stand: what it held as he stood, what was set last frame, and how often it was set, held it or was
+            // put back by the game
+            struct TurnPlace
+            {
+                Address at = 0, object = 0, type = 0;
+                unsigned offset = 0;
+                int kind = 0;
+                float unit = 1, sign = 1;
+                std::string where;
+                bool writable = true;
+                unsigned spins = 0, missed = 0;
+                std::array<float, 2> from{}, wrote{};
+                bool started = false, written = false;
+                unsigned set = 0, held = 0, reset = 0;
+                // (V1.3.41, after the code review: its own angle less his facing (radians), as it was read in the research; and
+                // whether it's out of step with his facing as he stands now, so left alone in this stand)
+                float phase = 0;
+                bool out_of_step = false;
+            };
+            std::vector<TurnPlace> turn_places;
+            // (the research: the places read, each with where its numbers start in a reading; the three readings, his turning
+            // (unwrapped) at each, when they're due, his turning so far and his facing last frame; whether a spin is being
+            // read, how many spins were, and lines written)
+            struct TurnRegion
+            {
+                Address at = 0, type = 0;
+                unsigned bytes = 0;
+                std::string where;
+                bool writable = true;
+                std::size_t first = 0;
+            };
+            std::vector<TurnRegion> turn_regions;
+            std::vector<std::vector<float>> turn_snaps;
+            std::vector<double> turn_marks;
+            std::vector<float> turn_yaws; // (his facing at each reading)
+            Address turn_transform = 0;   // (his transform as the places were read: nothing in it is set, see papu_turn_regions)
+            std::array<std::uint64_t, 3> turn_due{};
+            double turn_total = 0;
+            float turn_yaw = 0;
+            bool turn_tracking = false;
+            unsigned turn_spins = 0, turn_lines = 0;
+            // V1.3.41: the first aimed stands of a visit frame by frame (his facing as the game had it each frame, and what was
+            // set, from his facing as he stood), and his spin's first frames after an aimed stand (his facing from where it was
+            // held)
+            std::string aim_trace, spin_trace;
+            unsigned aim_traces = 0, spin_frames = 0, spin_lines = 0;
+            float spin_from = 0;
+            // V1.3.41 (see papu_who): the watch on his facing's place: 0 not yet, 1 on, 2 done for this visit; when it went on,
+            // and whether it's wanted (his spin jumped from his aim even with what turns with him set)
+            int watch_step = 0;
+            std::uint64_t watch_at = 0;
+            bool watch_due = false;
             // V1.3.36 (see papu_slam_rate): his slam's time from when he stands, as the game plays it (the shortest seen while
             // nothing of ours is set), and the stand a try was set in
             std::uint64_t slam_normal = 0, try_stand = 0;
@@ -6200,7 +6256,13 @@ namespace ingame
             const bool eligible = value<Address>(data + name_at) && boss != "B204" && boss != "B304" && boss != "B205" &&
                                   (boss != "B105" || name.find("Hulk") != std::string::npos);
             // (V1.3.33, Eric: "we'll just make it 9 the most for now": the bar draws 9 notches at most, so a 10th hit can't show)
-            const int hits = eligible ? std::max(original, std::min(9, static_cast<int>(std::lround(original * percent / 100.0)))) : original;
+            // V1.3.41 (Eric: "200 is for 10 hits, but as of right now, that doesn't make sense for 200... just make it to 25%"):
+            // 200% is the most hits (twice the game's, 9 at most), and the steps up to it are even, one more hit each time
+            // the next step is reached: Papu Papu's 5 hits are 6 at 125%, 7 at 150%, 8 at 175% and 9 at 200% (V1.3.33 to
+            // V1.3.40 rounded the game's hits times the percent, so 9 came at 170% already)
+            const int top = std::max(original, std::min(9, original * 2));
+            const int extra = std::max(0, static_cast<int>(percent) - 100) * (top - original) / 100;
+            const int hits = eligible ? std::clamp(original + extra, original, top) : original;
             const int notches = grow ? hits : original;
             const int max_health = value<int>(c + max_at);
             if (const int was = value<int>(data + hit_at); was != notches)
@@ -7979,10 +8041,48 @@ namespace ingame
                     p.wrote = std::abs(turn) < 0.0005f ? v : to, p.written = true, p.set += std::abs(turn) >= 0.0005f;
             }
         }
+        // (V1.3.41) the engine's own entry for a type of the game's, by its function table: the engine's list of its types
+        // (each entry has its name at +16, its fields at +40, +24 of them (each with its size at +22, its place at +24 and its
+        // name at +48), its size at +90 and its function table at +56) is gone through once, and kept (V1.3.40 went through it
+        // again for each name: after the code review, once)
+        Address engine_meta(Address vt)
+        {
+            static std::unordered_map<Address, Address> metas;
+            static bool built = false;
+            if (!built)
+            {
+                const auto context = value<Address>(base() + 0x1acbe40);
+                const auto registry = context ? value<Address>(context + 32) : 0;
+                const auto count = registry ? value<unsigned>(registry) : 0;
+                const auto data = registry ? value<Address>(registry + 16) : 0;
+                std::vector<Address> list(count && count <= 65535 && data ? count : 0);
+                if (!list.empty() && read(data, list))
+                {
+                    built = true;
+                    for (const auto meta : list)
+                        if (const auto v = meta ? value<Address>(meta + 56) : 0; v >= base() && v < module_end())
+                            metas.emplace(v, meta);
+                }
+            }
+            const auto it = metas.find(vt);
+            return it == metas.end() ? 0 : it->second;
+        }
+        // (V1.3.41) an object's size, from its type's entry (a script's from its own): 0 if not known
+        unsigned object_size(Address object, Address type)
+        {
+            Address meta = 0;
+            if (type == 0x13bbbd0)
+            {
+                meta = value<Address>(object + 56);
+                if (string(value<Address>(meta + 16), 120).rfind("Scripts.Graph.", 0) != 0)
+                    return 0;
+            }
+            else
+                meta = engine_meta(base() + type);
+            return meta ? value<std::uint16_t>(meta + 90) : 0;
+        }
         // V1.3.39 research: what a type of the game's is, by its function table: its C++ name (from the table's type
-        // information) and the engine's own name for it with the field at an offset (from the engine's list of its types: a
-        // type's entry has its name at +16, its fields at +40 (+24 of them: each with its size at +22, its place at +24 and its
-        // name at +48), and its function table at +56)
+        // information) and the engine's own name for it with the field at an offset (see engine_meta)
         std::string engine_type_text(Address type, unsigned offset)
         {
             static std::map<std::pair<Address, unsigned>, std::string> known;
@@ -7995,39 +8095,380 @@ namespace ingame
             if (locator && read(locator, col) && col[0] == 1 && base() + col[5] == locator)
                 if (const auto name = string(base() + col[3] + 16, 120); !name.empty())
                     out << name;
-            const auto context = value<Address>(base() + 0x1acbe40);
-            const auto registry = context ? value<Address>(context + 32) : 0;
-            const auto count = registry ? value<unsigned>(registry) : 0;
-            const auto data = registry ? value<Address>(registry + 16) : 0;
-            std::vector<Address> metas(count && count <= 65535 && data ? count : 0);
-            if (!metas.empty() && read(data, metas))
-                for (const auto meta : metas)
+            if (const auto meta = engine_meta(vt))
+            {
+                out << (out.tellp() > 0 ? ", " : "") << "the engine's " << string(value<Address>(meta + 16), 96) << " (" << value<std::uint16_t>(meta + 90) << " bytes";
+                const auto n = value<unsigned>(meta + 24);
+                const auto fields = value<Address>(meta + 40);
+                std::string at, below, above;
+                unsigned below_at = 0, above_at = ~0u;
+                for (unsigned i = 0; fields && n <= 1024 && i < n; ++i)
                 {
-                    if (!meta || value<Address>(meta + 56) != vt)
-                        continue;
-                    out << (out.tellp() > 0 ? ", " : "") << "the engine's " << string(value<Address>(meta + 16), 96);
-                    const auto n = value<unsigned>(meta + 24);
-                    const auto fields = value<Address>(meta + 40);
-                    std::string at, below, above;
-                    unsigned below_at = 0, above_at = ~0u;
-                    for (unsigned i = 0; fields && n <= 1024 && i < n; ++i)
+                    const auto f = value<Address>(fields + i * 8);
+                    const unsigned off = value<std::uint16_t>(f + 24), size = value<std::uint16_t>(f + 22);
+                    const auto name = string(value<Address>(f + 48), 64);
+                    if (offset >= off && offset < off + std::max(size, 1u))
+                        at = name + (off == offset ? std::string() : " +" + std::to_string(offset - off)) + " (" + std::to_string(size) + " bytes)";
+                    else if (off < offset && off >= below_at)
+                        below_at = off, below = name + " " + hex(off);
+                    else if (off > offset && off < above_at)
+                        above_at = off, above = name + " " + hex(off);
+                }
+                out << ", " << n << " fields): " << (at.empty() ? "no field of its own at " + hex(offset) + " (before it " + (below.empty() ? "none" : below) +
+                                                                     ", after it " + (above.empty() ? "none" : above) + ")"
+                                                               : "its " + at);
+            }
+            return known[{type, offset}] = out.tellp() > 0 ? out.str() : std::string("no name found");
+        }
+        // (V1.3.41) the name of what's at a place in one of his objects: for a script, its setting there (from the script's own
+        // list of them); for anything else, the engine's name for its type and the field there (see engine_type_text)
+        std::string turn_place_name(const BossTuning::TurnPlace &p)
+        {
+            if (p.type == 0x13bbbd0)
+            {
+                const auto meta = value<Address>(p.object + 56);
+                const auto script = string(value<Address>(meta + 16), 96);
+                const auto count = value<unsigned>(meta + 24);
+                const auto fields = value<Address>(meta + 40);
+                for (unsigned i = 0; fields && count <= 1024 && i < count; ++i)
+                {
+                    const auto f = value<Address>(fields + i * 8);
+                    const unsigned off = value<std::uint16_t>(f + 24), size = value<std::uint16_t>(f + 22);
+                    if (p.offset >= off && p.offset < off + std::max(size, 1u))
+                        return script + "'s " + string(value<Address>(f + 48), 64) + (off == p.offset ? std::string() : " +" + std::to_string(p.offset - off));
+                }
+                return script + " (no setting there)";
+            }
+            return engine_type_text(p.type, p.offset);
+        }
+        // V1.3.41 research (Eric: "the spin doesn't start exactly where he slammed at. It just kind of glitches to, jumps to a
+        // different location, and then he starts spinning"): V1.3.40's log, the one place of his facing that was set (in his
+        // CBehaviorComponent, +0xd8: the same place as his CBehaviorPhysicsGenericShapeComponent's _gimbalAngles' last
+        // number) was put back by the game every frame, and his spin started from where the game had him. So the game keeps
+        // his facing somewhere else too, in a form the facing search doesn't see: an angle that keeps counting as he spins,
+        // a direction, or a quaternion. What turns with him is found by how it changes as he spins: a little into each of his
+        // first spins of a visit, everything around him (his actor, all his parts, scripts too, and what they point to) is
+        // read three times, 0.13 s apart, while his turning is followed frame by frame; what changed by as much as he turned
+        // in both steps turns with him (as an angle in radians, degrees or turns, either way; a direction; or a quaternion's
+        // turn about his up axis). Those are set with his facing as he's aimed (see papu_turn_set)
+        void papu_turn_regions(BossTuning &t)
+        {
+            t.turn_regions.clear();
+            ReadableRegions ok;
+            std::set<Address> seen;
+            std::size_t total = 0;
+            const auto full = [&] { return t.turn_regions.size() >= 1500 || total > 0x800000; };
+            const auto add = [&](Address at, unsigned bytes, const std::string &where, bool writable) {
+                if (full() || at < 0x10000 || (at & 3) || !seen.insert(at).second)
+                    return false;
+                while (bytes >= 0x100 && !ok(at, bytes))
+                    bytes /= 2;
+                if (bytes < 0x100)
+                    return false;
+                BossTuning::TurnRegion r;
+                r.at = at, r.type = value<Address>(at), r.bytes = bytes, r.where = where, r.writable = writable;
+                t.turn_regions.push_back(r);
+                total += bytes;
+                return true;
+            };
+            const auto object_type = [&](Address p) -> Address {
+                if (p < 0x10000 || (p & 7) || !ok(p, 16))
+                    return 0;
+                const auto vt = value<Address>(p);
+                return vt >= base() && vt < module_end() ? vt - base() : 0;
+            };
+            const auto pointers = [&](Address p, unsigned bytes) {
+                std::vector<Address> out(bytes / 8);
+                if (!read(p, out))
+                    out.clear();
+                return out;
+            };
+            add(t.papu, 0x1000, "his actor", true);
+            // (his transform's own turn is left to the aim, see papu_turn_matrix: V1.3.38's log, setting its angle and quaternion
+            // had the game put him back every frame)
+            t.turn_transform = value<Address>(t.papu + 48);
+            if (t.turn_transform)
+                add(t.turn_transform, 0x100, "his transform", false);
+            // (level by level, so every part is read before what they point to, and that before what it points to: the reading
+            // has a size limit)
+            std::vector<std::pair<Address, std::string>> level, next;
+            for (const auto part : list(value<Address>(t.papu + 24), 128))
+                if (const auto type = object_type(part); type && !full())
+                {
+                    const auto name = "his part " + hex(static_cast<unsigned>(type));
+                    if (add(part, 0x1000, name, true))
+                        level.emplace_back(part, name);
+                }
+            for (const unsigned bytes : {0x800u, 0x400u})
+            {
+                next.clear();
+                for (const auto &[object, name] : level)
+                {
+                    if (full())
+                        break;
+                    const auto inner = pointers(object, bytes == 0x800 ? 0x400 : 0x200);
+                    for (std::size_t i = 1; i < inner.size() && !full(); ++i)
                     {
-                        const auto f = value<Address>(fields + i * 8);
-                        const unsigned off = value<std::uint16_t>(f + 24), size = value<std::uint16_t>(f + 22);
-                        const auto name = string(value<Address>(f + 48), 64);
-                        if (offset >= off && offset < off + std::max(size, 1u))
-                            at = name + (off == offset ? std::string() : " +" + std::to_string(offset - off)) + " (" + std::to_string(size) + " bytes)";
-                        else if (off < offset && off >= below_at)
-                            below_at = off, below = name + " " + hex(off);
-                        else if (off > offset && off < above_at)
-                            above_at = off, above = name + " " + hex(off);
+                        const auto p = inner[i];
+                        const auto ptype = object_type(p);
+                        if (!ptype || p == t.papu || seen.count(p))
+                            continue;
+                        const auto where = name + " " + hex(static_cast<unsigned>(i * 8)) + " -> " + hex(static_cast<unsigned>(ptype));
+                        if (add(p, bytes, where, true))
+                            next.emplace_back(p, where);
                     }
-                    out << " (" << n << " fields): " << (at.empty() ? "no field of its own at " + hex(offset) + " (before it " + (below.empty() ? "none" : below) +
-                                                                          ", after it " + (above.empty() ? "none" : above) + ")"
-                                                                    : "its " + at);
+                }
+                level.swap(next);
+            }
+            // (after the code review: no window reaches into the next object read, so each number is in the one object it's
+            // really in; the actor's 4 KB could otherwise take in his transform)
+            std::sort(t.turn_regions.begin(), t.turn_regions.end(), [](const BossTuning::TurnRegion &a, const BossTuning::TurnRegion &b) { return a.at < b.at; });
+            for (std::size_t i = 0; i + 1 < t.turn_regions.size(); ++i)
+                if (auto &r = t.turn_regions[i]; r.at + r.bytes > t.turn_regions[i + 1].at)
+                    r.bytes = static_cast<unsigned>((t.turn_regions[i + 1].at - r.at) & ~Address(3));
+            t.turn_regions.erase(std::remove_if(t.turn_regions.begin(), t.turn_regions.end(), [](const BossTuning::TurnRegion &r) { return r.bytes < 8; }), t.turn_regions.end());
+            std::size_t first = 0;
+            for (auto &r : t.turn_regions)
+                r.first = first, first += r.bytes / 4;
+        }
+        void papu_turn_snap(const BossTuning &t, std::vector<float> &out)
+        {
+            std::size_t total = 0;
+            for (const auto &r : t.turn_regions)
+                total += r.bytes / 4;
+            out.assign(total, std::nanf(""));
+            for (const auto &r : t.turn_regions)
+            {
+                SIZE_T got = 0;
+                if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(r.at), out.data() + r.first, r.bytes, &got) || got != r.bytes)
+                    std::fill(out.begin() + static_cast<std::ptrdiff_t>(r.first), out.begin() + static_cast<std::ptrdiff_t>(r.first + r.bytes / 4), std::nanf(""));
+            }
+        }
+        // (the three readings compared: what turned with him in both steps)
+        void papu_turn_find(BossTuning &t)
+        {
+            const auto &a = t.turn_snaps[0], &b = t.turn_snaps[1], &c = t.turn_snaps[2];
+            const double d1 = t.turn_marks[1] - t.turn_marks[0], d2 = t.turn_marks[2] - t.turn_marks[1];
+            std::ostringstream head;
+            head << "Boss rule research: what turns with him as he spins (spin " << t.turn_spins << ", " << t.turn_regions.size() << " places around him read; he turned "
+                 << static_cast<int>(d1 * 57.29578) << " and " << static_cast<int>(d2 * 57.29578) << " degrees in the two steps)";
+            if (std::abs(d1) < 0.35 || std::abs(d2) < 0.35 || std::abs(d1) > 3 || std::abs(d2) > 3 || a.size() != b.size() || b.size() != c.size())
+            {
+                if (t.turn_lines < 12)
+                    ++t.turn_lines, std::cout << head.str() << ": not read (he turned too little or too much to tell)\n" << std::flush;
+                return;
+            }
+            struct Found
+            {
+                Address at;
+                int kind;
+                float unit, sign;
+                std::size_t region;
+                unsigned offset;
+            };
+            std::vector<Found> found;
+            std::set<std::pair<Address, int>> have;
+            const auto keep = [&](const Found &f) {
+                if (found.size() < 400 && have.insert({f.at, f.kind}).second)
+                    found.push_back(f);
+            };
+            const auto turned_by = [](double from, double to, double want) {
+                return std::abs(std::remainder(to - from - want, 6.283185307179586)) <= 0.04 * std::abs(want) + 0.01;
+            };
+            const auto unit_long = [](float x, float y) { return std::abs(x * x + y * y - 1) < 0.03f; };
+            const float units[3] = {1.0f, 57.29578f, 0.15915494f};
+            for (std::size_t r = 0; r < t.turn_regions.size(); ++r)
+            {
+                const auto &reg = t.turn_regions[r];
+                const std::size_t n = reg.bytes / 4;
+                for (std::size_t i = 0; i < n; ++i)
+                {
+                    const std::size_t k = reg.first + i;
+                    const float x0 = a[k], x1 = b[k], x2 = c[k];
+                    if (!std::isfinite(x0) || !std::isfinite(x1) || !std::isfinite(x2) || std::abs(x0) > 1e6f || std::abs(x1) > 1e6f || std::abs(x2) > 1e6f)
+                        continue;
+                    // an angle (one that may keep counting past a turn, or start over after one)
+                    if (x0 != x1 && x1 != x2)
+                        for (const float u : units)
+                            for (const float sgn : {1.0f, -1.0f})
+                            {
+                                const auto fits = [&](double change, double turned) {
+                                    const double want = sgn * u * turned, period = 6.283185307179586 * u, slack = 0.04 * std::abs(want) + 1e-4;
+                                    return std::abs(change - want) <= slack || std::abs(change - want - period) <= slack || std::abs(change - want + period) <= slack;
+                                };
+                                if (fits(static_cast<double>(x1) - x0, d1) && fits(static_cast<double>(x2) - x1, d2))
+                                    keep({reg.at + i * 4, 1, u, sgn, r, static_cast<unsigned>(i * 4)});
+                            }
+                    if (i + 1 >= n)
+                        continue;
+                    const float y0 = a[k + 1], y1 = b[k + 1], y2 = c[k + 1];
+                    if (!std::isfinite(y0) || !std::isfinite(y1) || !std::isfinite(y2) || !unit_long(x0, y0) || !unit_long(x1, y1) || !unit_long(x2, y2))
+                        continue;
+                    // a direction (x, y)
+                    const double p0 = std::atan2(y0, x0), p1 = std::atan2(y1, x1), p2 = std::atan2(y2, x2);
+                    for (const float sgn : {1.0f, -1.0f})
+                        if (turned_by(p0, p1, sgn * d1) && turned_by(p1, p2, sgn * d2))
+                            keep({reg.at + i * 4, 2, 1, sgn, r, static_cast<unsigned>(i * 4)});
+                    // a quaternion's turn about his up axis (its last two numbers, after two that stay about 0)
+                    if (i >= 2)
+                    {
+                        bool flat = true;
+                        for (const auto *snap : {&a, &b, &c})
+                            flat = flat && std::abs((*snap)[k - 2]) < 0.03f && std::abs((*snap)[k - 1]) < 0.03f;
+                        const double q0 = 2 * std::atan2(x0, y0), q1 = 2 * std::atan2(x1, y1), q2 = 2 * std::atan2(x2, y2);
+                        for (const float sgn : {1.0f, -1.0f})
+                            if (flat && turned_by(q0, q1, sgn * d1) && turned_by(q1, q2, sgn * d2))
+                                keep({reg.at + i * 4, 3, 1, sgn, r, static_cast<unsigned>(i * 4)});
+                    }
+                }
+            }
+            // (after the code review: each one's own angle less his facing at each reading, which has to stay the same as he
+            // turns (0.25 radians either way); it's kept, to check it against him as he stands before anything is set there)
+            const auto phase_at = [&](const Found &f, const std::vector<float> &snap, float yaw) {
+                const auto k = t.turn_regions[f.region].first + f.offset / 4;
+                const double own = f.kind == 1 ? snap[k] / f.unit : f.kind == 2 ? std::atan2(snap[k + 1], snap[k]) : 2 * std::atan2(snap[k], snap[k + 1]);
+                return static_cast<float>(std::remainder(own - f.sign * yaw, 6.283185307179586));
+            };
+            // (into what's known: one found again stays, a new one joins, one not found twice in a row is dropped)
+            for (auto &p : t.turn_places)
+                p.missed += 1;
+            unsigned out_of_step = 0;
+            for (const auto &f : found)
+            {
+                const auto &reg = t.turn_regions[f.region];
+                const float ph0 = phase_at(f, a, t.turn_yaws[0]), ph1 = phase_at(f, b, t.turn_yaws[1]), ph2 = phase_at(f, c, t.turn_yaws[2]);
+                if (std::abs(wrap_angle(ph1 - ph0)) > 0.25f || std::abs(wrap_angle(ph2 - ph1)) > 0.25f)
+                {
+                    ++out_of_step;
+                    continue;
+                }
+                auto it = std::find_if(t.turn_places.begin(), t.turn_places.end(), [&](const BossTuning::TurnPlace &p) { return p.at == f.at && p.kind == f.kind; });
+                if (it == t.turn_places.end())
+                {
+                    BossTuning::TurnPlace p;
+                    p.at = f.at, p.object = reg.at, p.type = reg.type >= base() && reg.type < module_end() ? reg.type - base() : 0, p.offset = f.offset, p.kind = f.kind;
+                    p.unit = f.unit, p.sign = f.sign, p.where = reg.where + " " + hex(f.offset);
+                    // (set only inside its object as the game says it's sized (the first 256 bytes when that's not known), and
+                    // nothing in his transform)
+                    const unsigned size = p.type ? object_size(p.object, p.type) : 0, width = p.kind == 1 ? 4 : 8;
+                    p.writable = reg.writable && f.offset + width <= (size ? size : 0x100u) &&
+                                 !(t.turn_transform && p.at + width > t.turn_transform && p.at < t.turn_transform + 0x100);
+                    t.turn_places.push_back(p);
+                    it = t.turn_places.end() - 1;
+                }
+                ++it->spins, it->missed = 0, it->unit = f.unit, it->sign = f.sign, it->phase = ph2;
+            }
+            const auto before = t.turn_places.size();
+            t.turn_places.erase(std::remove_if(t.turn_places.begin(), t.turn_places.end(), [](const BossTuning::TurnPlace &p) { return p.missed >= 2; }), t.turn_places.end());
+            if (t.turn_lines >= 12)
+                return;
+            ++t.turn_lines;
+            std::ostringstream out;
+            out << head.str() << ": " << found.size() << " turned with him" << (out_of_step ? " (" + std::to_string(out_of_step) + " of them not in step with him, left out)" : std::string())
+                << (before != t.turn_places.size() ? ", " + std::to_string(before - t.turn_places.size()) + " found before didn't (dropped)" : std::string());
+            unsigned shown = 0;
+            for (const auto &f : found)
+            {
+                if (shown++ >= 24)
+                {
+                    out << "\n  ... and " << found.size() - 24 << " more";
                     break;
                 }
-            return known[{type, offset}] = out.tellp() > 0 ? out.str() : std::string("no name found");
+                const auto it = std::find_if(t.turn_places.begin(), t.turn_places.end(), [&](const BossTuning::TurnPlace &p) { return p.at == f.at && p.kind == f.kind; });
+                if (it == t.turn_places.end())
+                    continue;
+                out << "\n  " << it->where << ": " << (f.kind == 1 ? std::string("an angle in ") + (f.unit == 1 ? "radians" : f.unit > 2 ? "degrees" : "turns") : f.kind == 2 ? std::string("a direction") : std::string("a quaternion's turn"))
+                    << (f.sign > 0 ? "" : ", the other way") << ", " << static_cast<int>(std::lround(it->phase * 57.29578f)) << " degrees from his facing"
+                    << (it->writable ? "" : " (not set: " + std::string(t.turn_transform && it->at >= t.turn_transform && it->at < t.turn_transform + 0x100 ? "his transform's own, left to the aim" : "past its object's size") + ")")
+                    << " (" << turn_place_name(*it) << ")" << (it->spins > 1 ? ", " + std::to_string(it->spins) + " spins" : std::string());
+            }
+            std::cout << out.str() << "\n" << std::flush;
+        }
+        // (each frame: a research spin started (his first three spins of a visit), followed, read three times, and compared)
+        void papu_turn_research(BossTuning &t, int s, std::uint64_t now, bool rules)
+        {
+            // (only with the boss rules on: it's what the aim needs, and it takes a few milliseconds)
+            if (!rules && !t.turn_tracking)
+                return;
+            Matrix m{};
+            float fx = 0, fy = 0;
+            const auto transform = value<Address>(t.papu + 48);
+            const bool facing = transform && read(transform + 32, m) && std::all_of(m.begin(), m.end(), [](float f) { return std::isfinite(f); }) &&
+                                matrix_facing(m, t.face_axis, fx, fy);
+            const float yaw = facing ? std::atan2(fy, fx) : 0.0f;
+            if (s == 2 && t.state == 1 && !t.turn_tracking && t.turn_spins < 3 && facing)
+            {
+                // (V1.3.41: called as his spin starts, before his state is noted)
+                t.turn_tracking = true, t.turn_total = 0, t.turn_yaw = yaw, t.turn_snaps.clear(), t.turn_marks.clear(), t.turn_yaws.clear();
+                t.turn_due = {now + 150, now + 280, now + 410};
+                return;
+            }
+            if (!t.turn_tracking)
+                return;
+            if (s != 2 || !facing)
+            {
+                t.turn_tracking = false; // (his spin ended or was cut short: the next one is read instead)
+                return;
+            }
+            t.turn_total += wrap_angle(yaw - t.turn_yaw), t.turn_yaw = yaw;
+            const auto k = t.turn_snaps.size();
+            if (k >= 3 || now < t.turn_due[k])
+                return;
+            if (k == 0)
+                papu_turn_regions(t);
+            t.turn_snaps.emplace_back();
+            papu_turn_snap(t, t.turn_snaps.back());
+            t.turn_marks.push_back(t.turn_total), t.turn_yaws.push_back(yaw);
+            if (t.turn_snaps.size() == 3)
+            {
+                t.turn_tracking = false, ++t.turn_spins;
+                papu_turn_find(t);
+                t.turn_snaps.clear(), t.turn_regions.clear();
+            }
+        }
+        // (V1.3.41) what turns with him set to his aim: each from what it held as he stood, turned by as much as his aim turned
+        // him (d) in its own way. Only what turned with him in two of his spins, in an object that's still of the same type.
+        // The log says how often the game left it, or put it back
+        bool papu_turn_usable(const BossTuning::TurnPlace &p)
+        {
+            // (an angle in turns isn't set: one that counts a turn as 1 could be an animation's time, if one plays once a lap)
+            return p.writable && p.spins >= 2 && p.type && !(p.kind == 1 && p.unit < 0.5f) && value<Address>(p.object) == base() + p.type;
+        }
+        void papu_turn_set(BossTuning &t, float d)
+        {
+            unsigned used = 0;
+            for (auto &p : t.turn_places)
+            {
+                if (used >= 32 || !papu_turn_usable(p))
+                    continue;
+                ++used;
+                std::array<float, 2> now{};
+                if (!read(p.at, now[0]) || (p.kind != 1 && !read(p.at + 4, now[1])) || !std::isfinite(now[0]) || !std::isfinite(now[1]))
+                    continue;
+                if (!p.started)
+                {
+                    p.from = now, p.started = true, p.written = false;
+                    // (after the code review: it has to hold his facing as he stands, in its own way, as it did as he spun;
+                    // anything else there is left alone this stand)
+                    const double own = p.kind == 1 ? now[0] / p.unit : p.kind == 2 ? std::atan2(now[1], now[0]) : 2 * std::atan2(now[0], now[1]);
+                    p.out_of_step = std::abs(std::remainder(own - p.sign * t.aim_from - p.phase, 6.283185307179586)) > 0.05;
+                }
+                if (p.out_of_step)
+                    continue;
+                if (p.written)
+                    ++(std::abs(now[0] - p.wrote[0]) <= 1e-4f * std::max(1.0f, std::abs(p.wrote[0])) && std::abs(now[1] - p.wrote[1]) <= 1e-4f ? p.held : p.reset);
+                std::array<float, 2> to = p.from;
+                const float turn = p.sign * d;
+                if (p.kind == 1)
+                    to[0] = p.from[0] + p.unit * turn;
+                else if (p.kind == 2)
+                    to = {p.from[0] * std::cos(turn) - p.from[1] * std::sin(turn), p.from[0] * std::sin(turn) + p.from[1] * std::cos(turn)};
+                else
+                    to = {p.from[0] * std::cos(turn / 2) + p.from[1] * std::sin(turn / 2), p.from[1] * std::cos(turn / 2) - p.from[0] * std::sin(turn / 2)};
+                const bool same = to == now;
+                if (same || (p.kind == 1 ? write(p.at, to[0]) : write(p.at, to)))
+                    p.wrote = to, p.written = true, p.set += !same;
+            }
         }
         // V1.3.37 research, in case the game still turns him back: the places on him holding his facing (as an angle, in radians
         // or degrees) as he stands, and those of the last stand holding the new one too (they follow his facing)
@@ -8086,38 +8527,85 @@ namespace ingame
         // papu_facing_set), so the game itself has him facing Crash. If the game still puts him back to his own facing every
         // frame for 10 frames, only his matrix is set (what stayed after a hit in V1.3.36), and if it still does, he's let be
         // for that slam (no flicker between the two facings)
+        // (V1.3.41) his facing now, as his matrix has it (false if it can't be read)
+        bool papu_yaw_now(const BossTuning &t, float &yaw)
+        {
+            Matrix m{};
+            float fx = 0, fy = 0;
+            const auto transform = value<Address>(t.papu + 48);
+            if (!transform || !read(transform + 32, m) || !std::all_of(m.begin(), m.end(), [](float f) { return std::isfinite(f); }) ||
+                !matrix_facing(m, t.face_axis, fx, fy))
+                return false;
+            yaw = std::atan2(fy, fx);
+            return true;
+        }
         void papu_aim(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
+            // (V1.3.41: his spin's first frames after an aimed stand, from where his aim was held: does it start there?)
+            if (t.spin_frames)
+            {
+                float yaw = 0;
+                if (s != 2 || !papu_yaw_now(t, yaw))
+                    t.spin_frames = 0;
+                else
+                    t.spin_trace += (t.spin_trace.empty() ? "" : ", ") + std::to_string(static_cast<int>(std::lround(wrap_angle(yaw - t.spin_from) * 57.29578f))), --t.spin_frames;
+                if (!t.spin_frames && !t.spin_trace.empty() && t.spin_lines < 12)
+                    ++t.spin_lines, std::cout << "Boss rule: his spin's first frames, his facing from where his aim was held (degrees): " << t.spin_trace << "\n" << std::flush;
+            }
             // (half the time to his slam: the game's own, or shorter once his slam plays faster, see papu_slam_rate)
             const double factor = t.rate_found ? std::clamp(state.boss_speed, 100u, 200u) / 100.0 : 1.0;
             const auto window = static_cast<std::uint64_t>(static_cast<double>(t.slam_normal ? t.slam_normal : 900) / factor / 2);
             const bool stand = state.boss_rules && t.papu && s == 1 && t.stand_seen && !t.aim_skip;
             const auto since = now - t.stand_seen;
             const bool slammed = t.slam_seen_at && t.slam_seen_at >= t.stand_seen;
-            const bool aiming = stand && since <= window, holding = stand && !aiming && !slammed && since < 3000;
+            // (V1.3.41: held until he stops standing, his spin's start too, not only until his slam: what's set has to be there
+            // as his spin starts)
+            const bool aiming = stand && since <= window, holding = stand && !aiming && since < 3000;
             if (!aiming && !holding)
             {
                 if (t.aim_wrote)
                 {
                     t.aim_wrote = false;
-                    if (t.aim_lines < 12)
+                    // (his spin started: where from, against where his aim was held)
+                    float yaw = 0;
+                    const bool spun = s == 2 && papu_yaw_now(t, yaw);
+                    const int jump = spun ? static_cast<int>(std::lround(wrap_angle(yaw - t.aim_lock) * 57.29578f)) : 0;
+                    if (spun)
+                        t.spin_from = t.aim_lock, t.spin_trace = std::to_string(jump), t.spin_frames = 5;
+                    // (V1.3.41: a jump once what turns with him has been looked for in two spins: the watch, see papu_who)
+                    if (spun && std::abs(jump) > 25 && t.turn_spins >= 2 && !t.watch_step)
+                        t.watch_due = true;
+                    if (t.aim_lines < 14)
                     {
                         ++t.aim_lines;
                         std::ostringstream places;
                         for (const auto &p : t.facing_places)
                             places << "; " << p.name << " (" << (t.facing_unit[p.at] == 1 ? "radians" : t.facing_unit[p.at] == 2 ? "degrees" : "not his facing") << ") set "
                                    << p.set << " times, it held " << p.held << ", the game put it back " << p.reset;
+                        unsigned turned = 0, held = 0, reset = 0, apart = 0;
+                        std::ostringstream each;
+                        for (const auto &p : t.turn_places)
+                            if (p.started && papu_turn_usable(p) && (apart += p.out_of_step, !p.out_of_step))
+                            {
+                                held += p.held, reset += p.reset;
+                                if (turned++ < 8)
+                                    each << "\n  " << p.where << ": set " << p.set << ", held " << p.held << ", put back " << p.reset;
+                            }
                         std::cout << "Boss rule: he aimed his slam at Crash: turned " << static_cast<int>(wrap_angle(t.aim_lock - t.aim_from) * 57.29578f)
-                                  << " degrees from his own facing and held it " << (slammed ? "until his slam" : "until he stopped standing") << " (" << t.aim_kept
-                                  << " frames it stayed, " << t.aim_overridden << " the game moved him; "
+                                  << " degrees from his own facing and held it " << (spun ? "until his spin started" : slammed ? "after his slam until he stopped standing" : "until he stopped standing")
+                                  << " (" << t.aim_kept << " frames it stayed, " << t.aim_overridden << " the game moved him; "
                                   << (t.aim_modes & 4 ? "the game kept putting him back: let be after " + std::to_string(t.aim_kept + t.aim_overridden) + " frames"
-                                      : t.aim_modes & 2 ? std::string("his facing's places didn't hold him: then only his matrix")
-                                                        : std::string("his facing's places and his matrix"))
-                                  << ")" << (t.facing_places.empty() ? std::string("; none of his facing's places found on him") : places.str()) << "\n" << std::flush;
+                                      : t.aim_modes & 2 ? std::string("what was set didn't hold him: then only his matrix")
+                                                        : std::string("what turns with him and his matrix"))
+                                  << ")" << (spun ? "; his spin started " + std::to_string(std::abs(jump)) + " degrees from his aim" + (std::abs(jump) <= 25 ? " (where he slammed)" : " (a jump)") : std::string())
+                                  << (turned ? "; " + std::to_string(turned) + " places that turn with him set (held " + std::to_string(held) + " frames, put back " + std::to_string(reset) + ")" : std::string("; nothing found yet that turns with him"))
+                                  << (apart ? "; " + std::to_string(apart) + " out of step with his facing as he stood, left alone" : std::string())
+                                  << places.str() << each.str() << (t.aim_trace.empty() ? std::string() : "\n  frame by frame, his facing as the game had it / what was set (degrees from his own): " + t.aim_trace)
+                                  << "\n" << std::flush;
                     }
-                    t.aim_kept = t.aim_overridden = 0, t.aim_where = 0;
+                    t.aim_kept = t.aim_overridden = 0, t.aim_where = 0, t.aim_trace.clear();
                 }
-                if (state.boss_rules && s == 1 && t.aim_skip && t.aim_skip_told != t.stand_seen && t.aim_lines < 12)
+                if (state.boss_rules && s == 1 && t.aim_skip && t.aim_skip_told != t.stand_seen && t.aim_lines < 14)
                     t.aim_skip_told = t.stand_seen, ++t.aim_lines, std::cout << "Boss rule: his first slam after coming into the arena isn't aimed (left as the game has it)\n" << std::flush;
                 return;
             }
@@ -8131,6 +8619,7 @@ namespace ingame
             if (!matrix_facing(m, t.face_axis, fx, fy))
                 return;
             const float yaw = std::atan2(fy, fx);
+            bool tracing = false;
             if (!t.aim_wrote)
             {
                 papu_yaw_research(t, yaw);
@@ -8138,6 +8627,22 @@ namespace ingame
                 // (nothing set yet: the first frame's look compares only with what this one sets)
                 t.aim_lock = t.aim_from = yaw, t.aim_yaw = std::nanf(""), t.aim_mode = 0, t.aim_mode_frames = t.aim_mode_kept = 0, t.aim_modes = 1;
                 t.facing_places = papu_facing_places(t.papu);
+                // (V1.3.41: what turns with him, from its own reading as he stands; his facing's places it has already left out)
+                for (auto &p : t.turn_places)
+                    p.started = p.written = false, p.set = p.held = p.reset = 0;
+                t.facing_places.erase(std::remove_if(t.facing_places.begin(), t.facing_places.end(),
+                                                     [&](const BossTuning::FacingPlace &f) {
+                                                         return std::any_of(t.turn_places.begin(), t.turn_places.end(), [&](const BossTuning::TurnPlace &p) { return p.at == f.at && papu_turn_usable(p); });
+                                                     }),
+                                      t.facing_places.end());
+                {
+                    // (one of each place: V1.3.40's log, his CBehaviorComponent's +0xd8 and his physics shape's +0x88 are one place)
+                    std::set<Address> once;
+                    t.facing_places.erase(std::remove_if(t.facing_places.begin(), t.facing_places.end(), [&](const BossTuning::FacingPlace &f) { return !once.insert(f.at).second; }),
+                                          t.facing_places.end());
+                }
+                t.aim_trace.clear(), tracing = t.aim_traces < 2;
+                t.aim_traces += tracing;
                 // (the first stands of a visit: what each of them holds, and what they are, from the game's own names)
                 if (t.facing_told < 2)
                 {
@@ -8145,9 +8650,10 @@ namespace ingame
                     std::ostringstream out;
                     out << "Boss rule research: his facing as he stands is " << yaw * 57.29578f << " degrees (" << yaw << " radians); his facing's places:";
                     for (const auto &p : t.facing_places)
-                        out << "\n  " << p.name << " holds " << value<float>(p.at) << (t.facing_told == 1 ? " (" + engine_type_text(p.type, p.offset) + ")" : std::string());
+                        out << "\n  " << p.name << " (at 0x" << std::hex << p.at << std::dec << ") holds " << value<float>(p.at)
+                            << (t.facing_told == 1 ? " (" + engine_type_text(p.type, p.offset) + ")" : std::string());
                     if (t.facing_places.empty())
-                        out << " none found on him";
+                        out << " none (besides what turns with him)";
                     std::cout << out.str() << "\n" << std::flush;
                 }
             }
@@ -8161,15 +8667,18 @@ namespace ingame
                 // (the next way, see above: after 10 frames where none stayed and the game had him back at his own facing, or
                 // 30 where none stayed, while he's still turned away from his aim. V1.3.40: a game that follows a frame late, or
                 // turns him toward what's set a little at a time, isn't given up on)
+                // (V1.3.41: not after his slam: what's set is kept as it is until his spin starts)
                 const bool undone = std::abs(wrap_angle(yaw - t.aim_from)) < 0.05f;
-                if (t.aim_mode_frames >= 10 && !t.aim_mode_kept && std::abs(wrap_angle(yaw - t.aim_lock)) > 0.17f && (undone || t.aim_mode_frames >= 30))
+                if (!slammed && t.aim_mode_frames >= 10 && !t.aim_mode_kept && std::abs(wrap_angle(yaw - t.aim_lock)) > 0.17f && (undone || t.aim_mode_frames >= 30))
                 {
-                    // (his facing's places back as the game had them, so they can't be what puts him back now)
+                    // (his facing's places and what turns with him back as the game had them, so they can't be what puts him
+                    // back now)
                     if (t.aim_mode == 0)
-                        papu_facing_set(t, yaw, t.aim_from);
+                        papu_facing_set(t, yaw, t.aim_from), papu_turn_set(t, 0);
                     ++t.aim_mode, t.aim_mode_frames = t.aim_mode_kept = 0, t.aim_modes |= 1u << t.aim_mode;
                 }
             }
+            tracing = tracing || !t.aim_trace.empty();
             const float dt = t.aim_wrote && t.aim_last ? std::clamp(static_cast<float>(now - t.aim_last) / 1000.0f, 0.005f, 0.05f) : 0.016f;
             t.aim_prev = t.aim_yaw, t.aim_last = now, t.aim_wrote = true, t.aim_yaw = yaw;
             if (aiming)
@@ -8180,10 +8689,14 @@ namespace ingame
                     t.aim_lock = wrap_angle(t.aim_lock + std::clamp(wrap_angle(std::atan2(dy, dx) - t.aim_lock), -most, most));
             }
             const float target = t.aim_lock;
+            if (tracing && t.aim_trace.size() < 1400)
+                t.aim_trace += (t.aim_trace.empty() ? "" : " ") + std::to_string(static_cast<int>(std::lround(wrap_angle(yaw - t.aim_from) * 57.29578f))) + "/" +
+                               std::to_string(static_cast<int>(std::lround(wrap_angle(target - t.aim_from) * 57.29578f)));
             if (t.aim_mode >= 2)
                 return;
-            if (t.aim_mode == 0)
-                papu_facing_set(t, yaw, target);
+            // (nothing set in his places while the watch is on, see papu_who: only the game's own writes are caught)
+            if (t.aim_mode == 0 && t.watch_step != 1)
+                papu_facing_set(t, yaw, target), papu_turn_set(t, wrap_angle(target - t.aim_from));
             if (std::abs(wrap_angle(target - yaw)) >= 0.0005f && papu_turn_matrix(transform, m, yaw, target))
                 t.aim_yaw = target;
         }
@@ -8333,6 +8846,8 @@ namespace ingame
                 papu_cut(t, now);
             t.start_timer = false;
         }
+        void papu_who(BossTuning &t, int s, std::uint64_t now); // (V1.3.41, below the write watch it uses)
+        void papu_who_off(BossTuning &t, const char *why);
         void papu_rule(BossTuning &t, const Shared &state, std::uint64_t now)
         {
             if (!t.papu || !t.papu_ai || !event_owner(t.papu))
@@ -8393,6 +8908,13 @@ namespace ingame
             const float spin = t.spin_at ? value<float>(t.papu_ai + t.spin_at) : 0.0f;
             // V1.3.34: his AI's waits, shorter with /boss_speed (see papu_speed_timers)
             papu_speed_timers(t, percent, s);
+            // V1.3.41: what turns with him, looked for in his first spins of a visit (see papu_turn_research; before his state
+            // is noted, so his spin's start is seen)
+            papu_turn_research(t, s, now, state.boss_rules != 0);
+            // (after the code review: when the fight starts over from his throne his parts may be new, so what was found is
+            // looked for again)
+            if (s == 6 && (t.turn_spins || !t.turn_places.empty() || t.turn_tracking))
+                t.turn_places.clear(), t.turn_spins = 0, t.turn_tracking = false, t.turn_snaps.clear();
             if (s != t.state)
             {
                 if (t.state >= 0)
@@ -8524,6 +9046,7 @@ namespace ingame
             papu_clocks(t, s, now);
             papu_slam_rate(t, s, percent, now);
             papu_aim(t, state, s, now);
+            papu_who(t, s, now);
             if (t.spin_search_due && now >= t.spin_search_due)
             {
                 t.spin_search_due = 0;
@@ -8785,6 +9308,7 @@ namespace ingame
                 bar_parts_back(t);
                 // (V1.3.34) his health script's list as the game had it, if it's still there
                 id_list_restore("the fight was left");
+                papu_who_off(t, "the fight was left"); // (V1.3.41: never left on past his objects)
                 t = {};
                 t.level = boss, t.entered = now;
                 // (V1.3.28) Papu Papu's stomps from here on only
@@ -8810,6 +9334,9 @@ namespace ingame
             }
             if (boss.empty())
                 return;
+            // (V1.3.41, after the code review: the watch on his facing's place never outlives him, see papu_who)
+            if (t.watch_step == 1 && (boss != "B101" || !t.papu || !event_owner(t.papu) || now - t.watch_at > 1500))
+                papu_who_off(t, "he's gone, or 1.5 s went by");
             if (boss == "B101")
                 papu_rule(t, state, now);
             stretch_bar_fill(t, state, now);
@@ -10583,6 +11110,10 @@ namespace ingame
         std::atomic_bool who_armed{false};
         PVOID who_handler_cookie = nullptr;
         constexpr DWORD who_arm_code = 0xE0C0FFEE; // raised by us: sets this thread's debug registers
+        // (V1.3.41: what's watched, for the log, and whether every write is caught, not only one that changes it: Papu Papu's
+        // facing place is written every frame with the same number while he stands)
+        const char *who_what = "the floor setting";
+        std::atomic_bool who_every{false};
         void who_capture(const CONTEXT &context)
         {
             const auto target = who_target.load();
@@ -10590,7 +11121,7 @@ namespace ingame
                 return;
             ++who_hits;
             const auto v = *reinterpret_cast<volatile std::uint64_t *>(target);
-            if (v == who_last.load())
+            if (v == who_last.load() && !who_every.load())
                 return;
             who_last = v;
             const auto i = who_count.load();
@@ -10747,8 +11278,10 @@ namespace ingame
             {
                 const auto &cap = who_captures[w.reported];
                 std::ostringstream out;
-                out << "Who: write " << (w.reported + 1) << " (thread " << cap.thread << "): the floor setting became 0x" << std::hex
-                    << cap.value << std::dec;
+                float low = 0, high = 0;
+                std::memcpy(&low, &cap.value, 4), std::memcpy(&high, reinterpret_cast<const char *>(&cap.value) + 4, 4);
+                out << "Who: write " << (w.reported + 1) << " (thread " << cap.thread << "): " << who_what << " became 0x" << std::hex
+                    << cap.value << std::dec << " (as two numbers " << low << ", " << high << ")";
                 if (typed(static_cast<Address>(cap.value), 0x13ea4d8))
                     out << " (" << string(value<Address>(value<Address>(static_cast<Address>(cap.value) + 0x18) + 8), 48) << ")";
                 out << "\n";
@@ -10797,6 +11330,10 @@ namespace ingame
         }
         void update_ice_who(unsigned mode, Address actor)
         {
+            // (V1.3.41, after the code review: not while Papu Papu's facing place is watched, see papu_who; the ice test asking
+            // for nothing used to turn that watch off in the frame it went on)
+            if (who_every.load())
+                return;
             auto &w = who_state;
             const auto now = GetTickCount64();
             if (w.mode && mode != w.mode)
@@ -10867,6 +11404,61 @@ namespace ingame
                 ice_note(caught ? "who: caught " + std::to_string(caught) + ". Type /ice_test off and send me the log."
                                 : "who: nothing caught in 30 seconds. Type /ice_test off and send me the log.");
             }
+        }
+        // V1.3.41 research (Eric: his spin "jumps to a different location" after an aimed slam): if his spin still jumps from
+        // his aim once what turns with him is set (or nothing was found that does), what writes his facing's place in his
+        // CBehaviorComponent (+0xd8, which the game put back every frame in V1.3.40) is caught by the write watch above, once a
+        // visit, at his next aimed stand (nothing of ours is set there while it's on): the game's code that writes it, with
+        // the calls that led there, their registers and their code, shows where the game keeps his facing
+        // (the watch off: every thread's debug registers cleared before his objects can go)
+        void papu_who_off(BossTuning &t, const char *why)
+        {
+            if (t.watch_step != 1)
+                return;
+            who_armed = false;
+            who_debug_registers(0);
+            who_target = 0, who_every = false, who_what = "the floor setting";
+            who_state.mode = 0;
+            t.watch_step = 2;
+            std::cout << "Boss rule research: the watch on his facing's place is off, " << why << " (" << who_hits.load() << " writes seen, " << who_count.load() << " caught)\n"
+                      << std::flush;
+        }
+        void papu_who(BossTuning &t, int s, std::uint64_t now)
+        {
+            auto &w = who_state;
+            if (t.watch_step == 1)
+            {
+                who_report();
+                if (who_count.load() >= 3)
+                    papu_who_off(t, "3 writes caught");
+                else if (now - t.watch_at > 1500 || s != 1)
+                    papu_who_off(t, s != 1 ? "his stand is over" : "1.5 s went by");
+                return;
+            }
+            if (t.watch_step || !t.watch_due || s != 1 || !t.aim_wrote || w.mode || IsDebuggerPresent())
+                return;
+            Address target = 0;
+            for (const auto part : list(value<Address>(t.papu + 24), 128))
+                if (typed(part, 0x150c710))
+                    target = part + 0xd8;
+            if (!target || (target & 7))
+            {
+                t.watch_step = 2;
+                return;
+            }
+            for (auto &cap : who_captures)
+                cap = {};
+            who_count = 0, who_hits = 0;
+            w = {};
+            w.started = now; // (its mode stays 0: it's not the ice test's, see update_ice_who)
+            who_last = value<std::uint64_t>(target);
+            who_what = "Papu Papu's facing place (his CBehaviorComponent +0xd8)", who_every = true;
+            who_target = target;
+            who_armed = true;
+            const auto threads = who_debug_registers(target);
+            t.watch_step = 1, t.watch_at = now;
+            std::cout << "Boss rule research: his spin jumped from his aim: a watch on his facing's place (0x" << std::hex << target << std::dec << ") in " << threads
+                      << " threads, to see what writes it\n" << std::flush;
         }
         //  contact (research): the floor change is noticed in the game's code at +0x510b70, called every frame from
         //  Crash's update (+0x4bcc70) with Crash and his ground contact object (type +0x1509a38). This dumps that code
@@ -12151,6 +12743,7 @@ namespace ingame
         // Papu Papu's red glow and message keeping (Harder bosses test), and his health script's list (V1.3.34)
         boss_block_actor = 0, boss_block_red = false;
         id_list_restore("the client stopped");
+        papu_who_off(boss_tuning, "the client stopped");
         if (game_thread)
             boss_tint_off(boss_tuning, true);
         else if (boss_tuning.tint_bundle)

@@ -4,13 +4,14 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Every slam aimed at Crash, for real this time** (all but his first one as he comes into the arena). V1.3.38's log showed the game putting Papu Papu back to his own facing every single frame, so each frame's turn was a new little one (15 degrees at most) and he never got all the way around to Crash. Now his turn carries over from frame to frame, and it's also set in the two places the game keeps his facing (V1.3.38's search found them), so the game itself has him facing Crash, and his spin should start from where he slammed.
-- If the game still puts him back to his own facing, the client tries the way that held after a hit in V1.3.36 (only his picture turned), and if that doesn't hold either, it leaves that one slam as the game has it instead of flickering between two facings.
-- New in V1.3.40 (V1.3.39 had everything else here first): it gives the game a frame to catch up and lets it turn him a little at a time before falling back, so a slam isn't given up on too early, and on a fallback it puts the game's own facing back where it was first, so the fallback works the way V1.3.36's did after a hit.
-- **No more dying after the last hit.** In V1.3.38's log the last hit landed just as his spin started, and 1.3 seconds after he was beaten his spinning staff still hit Crash. Once he's beaten, his attack can't hurt Crash.
-- The log now says for each slam which way held him, and names the two places that keep his facing (from the game's own names for them).
+- **Health goes up one hit every 25%** (Eric's call): 100% is the game's 5 hits, 125% is 6, 150% is 7, 175% is 8 and 200% is 9, so 200% is the top of the scale. (Until now it was one hit every 20%, so 9 came already at 170%.) The bar's notches follow.
+- **Working on the jump as his spin starts.** V1.3.40's log and clip: every slam is aimed at Crash now, but when his spin starts he snaps back to the facing the game still has for him. The game keeps that facing somewhere the client hadn't found yet, so this build looks for it as he spins: in his first spins of each visit, it reads everything around him three times and keeps whatever turns along with him. From his third spin on, those are turned to the aim too, so his spin should start where he slammed.
+- His aim is now held until his spin actually starts, not only until the slam lands.
+- If his spin still jumps after that, the client watches the one place the game kept putting back last build, once per visit, and writes to the log which part of the game's code sets it. That shows where the game keeps his facing, for the next build.
+- The log says for each aimed slam how far his spin started from the aim, and follows his first few aimed slams frame by frame.
+- From V1.3.39–40: every slam aimed at Crash (except his first as he comes into the arena), and no dying after his last hit.
 - From V1.3.38: the freeze fix (the game froze as he stood up after his first spin in V1.3.37).
-- From V1.3.36: his last speed-ups gentler at 200% (2, 2.16, 2.3, 2.35, 2.39), and the search for his slam's own speed.
+- From V1.3.36: his last speed-ups gentler at 200% (2, 2.16, 2.3, 2.35, 2.39), and the search for his slam's own speed (still not found: his slam comes 0.9 s after he stands, as in the game).
 - From V1.3.35: a faster spin (his settings' list of spin speeds), his moves timed in the log.
 - From V1.3.34: shorter waits before his spin and as he comes into the arena, and red at the start the first time in a visit is the game's bounce, with no flinch.
 - From V1.3.33: 9 hits at most, no Aku Aku masks in harder boss fights, red from the very start as he comes into the arena.
