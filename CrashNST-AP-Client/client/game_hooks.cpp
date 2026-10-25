@@ -199,6 +199,10 @@ void CrateEvents::detach()
     restore_boss_route(process_, before_.route, remote_ + 256, before_.original);
     installed_ = false;
 }
+bool CrateEvents::hooked()
+{
+    return installed_ && read<std::uintptr_t>(process_, before_.route) == remote_ + 256;
+}
 std::vector<CrateBreak> CrateEvents::drain()
 {
     if (!installed_)
