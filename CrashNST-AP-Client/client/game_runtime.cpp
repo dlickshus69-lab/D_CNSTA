@@ -11733,8 +11733,10 @@ namespace ingame
             std::set<Address> nitro_moved;
             int nitro_making = -1;
             std::uint64_t nitro_making_since = 0;
-            bool nitro_layer_told = false;
+            bool nitro_layer_told = false, spawners_told = false;
             unsigned nitro_lines = 0;
+            std::uint64_t beach_next = 0;
+            std::set<Address> beach_moved;
             std::vector<std::pair<std::string, Address>> watch_ints, watch_bytes;
             std::map<Address, int> watch_last;
         } roo_research;
@@ -12511,10 +12513,58 @@ namespace ingame
                         {
                             if (r.nitro_whys.insert(why).second && r.nitro_whys.size() <= 12)
                                 std::cout << "Roo Nitro: can't make one yet: " << why << "\n" << std::flush;
+                            // (V1.4.12, V1.4.11's log: "no spawner here that counts nothing to borrow" with 51 of the beach's
+                            // crates in his arena: why their spawners aren't taken, the first few, once)
+                            if (why.find("no spawner") != std::string::npos && !r.spawners_told)
+                            {
+                                r.spawners_told = true;
+                                unsigned told = 0;
+                                for (const auto owner : event_owners())
+                                {
+                                    const auto name = string(value<Address>(owner + 128));
+                                    if (name.rfind("Crate_", 0) != 0 || name.find("Spawned") != std::string::npos || told >= 6)
+                                        continue;
+                                    for (const auto c : list(value<Address>(owner + 24), 64))
+                                    {
+                                        if (!typed(c, 0x13bbbd0) || string(value<Address>(value<Address>(c + 56) + 16)) != "Scripts.Graph.common_Spawner_Template")
+                                            continue;
+                                        const char *reason = "ready";
+                                        const bool ready = spawner_method(c, owner, true, &reason) != 0;
+                                        ++told;
+                                        std::cout << "Roo Nitro: " << name << "'s spawner: " << (ready ? "ready" : reason) << " (its state " << value<unsigned>(c + 32) << ", "
+                                                  << static_cast<unsigned>(value<unsigned char>(c + 40)) << "; owner's " << std::hex << value<unsigned>(owner + 56) << std::dec
+                                                  << (event_owner(owner) ? ", an event owner" : ", not an event owner") << "; spawning on " << static_cast<unsigned>(value<unsigned char>(c + 69))
+                                                  << ", used " << static_cast<unsigned>(value<unsigned char>(c + 67)) << ", pending " << static_cast<unsigned>(value<unsigned char>(c + 66))
+                                                  << "; scripts: " << owner_scripts(owner) << ")\n";
+                                    }
+                                }
+                                std::cout << std::flush;
+                            }
                             r.nitro_next = now + 1000;
                         }
                         break;
                     }
+                // (V1.4.12, Eric's V1.4.11 run: "they just spawned regular boxes, but it's in the water, not on the platform":
+                // the beach's crates come where they are on the beach, a few of them in his arena's water (its first ones, at
+                // y -142 to 122): any of them in his arena is moved far below it, out of sight and reach)
+                if (now >= r.beach_next)
+                {
+                    r.beach_next = now + 250;
+                    for (const auto owner : event_owners())
+                    {
+                        const auto name = string(value<Address>(owner + 128));
+                        if (name.rfind("Crate_", 0) != 0 || name.find("_Spawned_gen_Spawned_Entity") == std::string::npos ||
+                            name.find("AwarenessHelper") != std::string::npos || name.find("Nitro") != std::string::npos ||
+                            std::find(r.nitro_crates.begin(), r.nitro_crates.end(), owner) != r.nitro_crates.end() || owner == trap_nitro.entity)
+                            continue;
+                        std::array<float, 3> at{};
+                        if (!read(owner + 32, at) || std::abs(at[0]) > 1500 || at[1] < -1200 || at[1] > 1800 || at[2] < -2000 || at[2] > 900)
+                            continue;
+                        if (r.beach_moved.insert(owner).second && r.nitro_lines < 60)
+                            ++r.nitro_lines, std::cout << "Roo Nitro: the beach's " << name.substr(0, name.find("_Spawned")) << " at " << roo_xyz(at) << " is in his arena: moved below it\n" << std::flush;
+                        set_entity_position(owner, {at[0], at[1], -6000.0f});
+                    }
+                }
             }
             // his pace at a boss speed: hops and the wait after each landing shorter
             const unsigned speed = std::clamp(state.boss_speed, 100u, 200u);
@@ -12645,6 +12695,9 @@ namespace ingame
                 for (const auto owner : event_owners())
                 {
                     const auto name = string(value<Address>(owner + 128));
+                    // (not the beach's crates: V1.4.11's 40 lines were all theirs)
+                    if (name.rfind("Crate_", 0) == 0)
+                        continue;
                     for (const auto &[c, script] : entity_scripts(owner))
                     {
                         look(c, value<Address>(c + 56), name + " " + script);
