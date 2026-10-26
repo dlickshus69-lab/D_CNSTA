@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **First:** if V1.4.9's Nitro left Roo's fight on a black screen, type `/roo_nitro off` in the hub and restart once. That puts his own files back.
-- **Three tests to find what stopped his fight loading.** Run one, wait for "Roo Nitro: test N on", restart, then try his fight (`/boss ripper1`). Turn it off the same way before the next test.
-- `/roo_nitro test1`: his archive with N. Sanity Beach's files added, nothing else changed (checks the copy itself). `test2`: their crate layer loaded as a plain file. `test3`: as a real layer, with the beach's camera file.
-- Tell me which ones load and which go black, and send the logs. The log also lists the templates his fight makes things from, to try making the Nitro from his own TNT drop.
+- **Found why Roo's fight went black with the Nitro tests:** my copy left out half of what N. Sanity Beach's crate files need, the Nitro's own model and explosion among them, so the game waited for them forever. Fixed: the copy now includes all of it.
+- **Please run test 2 and test 3 again.** Each one is `/roo_nitro test2` (or `test3`), wait for "Roo Nitro: test N on", restart, then `/boss ripper1`. Use `/roo_nitro off` and a restart between them. Test 1 already loads, so it doesn't need another try.
+- **Test 3 is the one that can place real Nitros on two of his platforms** (with harder bosses on). Test 2 only loads the Nitro without placing any, to see if that much works. The beach's camera is never loaded as part of his arena.
+- **If either goes black,** use `/roo_nitro off` and a restart. Send the logs either way.
 - Same as V1.4.8 otherwise: patterns that grow with each hit, a shorter wait at high Boss Speed, a hop onto you 1 landing in 5.

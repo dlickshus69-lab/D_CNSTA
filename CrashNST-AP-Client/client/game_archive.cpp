@@ -1090,9 +1090,12 @@ namespace ingame
                     break;
                 if (std::memcmp(b.data() + p, "TDEP", 4) == 0)
                 {
+                    // (its count is of pairs: V1.4.9 and V1.4.10 read that many strings, half the list, so the beach's crate
+                    // layer came without the Nitro's model, its explosion, the crates' scripts and more, and Roo's fight
+                    // waited for them on a black screen)
                     std::vector<std::string> strings;
                     std::size_t i = p + header;
-                    while (strings.size() < count && i < p + size)
+                    while (strings.size() < count * 2ull && i < p + size)
                     {
                         const auto end = std::find(b.begin() + static_cast<std::ptrdiff_t>(i), b.begin() + p + size, 0);
                         strings.emplace_back(b.begin() + static_cast<std::ptrdiff_t>(i), end);
@@ -1385,17 +1388,13 @@ namespace ingame
             beach_kind.emplace(lower(beach_list.strings[file]), beach_list.strings[kind]);
         // the crate layer and everything it needs that Roo's archive lacks. (V1.4.10, Eric's V1.4.9 run: "boss doesnt load.
         // it just stays as a black screen after loading": test modes. 1: added to the archive only, his package list as it
-        // was (the copy itself); 2: the crate layer a plain file, with its language files (the beach lists them: the game
-        // may look for them with the layer); 3: a map layer, with its language files and the beach's camera layer (its
-        // checkpoints point to a camera in it) as a plain file)
+        // was (the copy itself; V1.4.10: "only test 1" loaded); 2: the crate layer a plain file; 3: a map layer, so its
+        // spawners are made. Both with its language files)
         require(mode >= 1 && mode <= 3);
-        const std::string camera = "maps/crash1/l101_nsanitybeach/l101_nsanitybeach_camera.igz";
         std::vector<std::string> add, queue{crates};
         if (mode >= 2)
             for (const char *language : {"de", "en", "es", "fr", "it", "ja"})
                 queue.push_back("maps/crash1/l101_nsanitybeach/l101_nsanitybeach_crates_" + std::string(language) + ".lng");
-        if (mode == 3)
-            queue.push_back(camera);
         std::set<std::string> seen(queue.begin(), queue.end());
         unsigned missing = 0;
         std::string missing_names;
@@ -1418,18 +1417,22 @@ namespace ingame
                         queue.push_back(dep);
         }
         // the package list: the crate layer (3: as the beach lists it, a map layer, so its things are made, its spawners too:
-        // Roo's arena has none to make a Nitro with; 2: a plain file), the camera layer a plain file, the others as the
+        // Roo's arena has none to make a Nitro with; 2: a plain file), the others as the
         // beach lists them, when it does; 1: as it was
         const auto crates_kind = beach_kind.count(crates) ? beach_kind[crates] : std::string("igx_entities");
         std::vector<std::pair<std::string, std::string>> more{{mode == 3 ? crates_kind : std::string("igx_file"), crates}};
+        // (V1.4.11: the beach's other map layers its crate layer needs, its camera layer, are in the archive for the crate
+        // layer to load from but never in his package list, so nothing of them is made in his arena)
+        unsigned layers_left_out = 0;
         for (const auto &name : add)
             if (name != crates && !roo_files.count(name))
-            {
-                if (name == camera)
-                    more.emplace_back("igx_file", name);
-                else if (const auto it = beach_kind.find(name); it != beach_kind.end())
-                    more.emplace_back(it->second, name);
-            }
+                if (const auto it = beach_kind.find(name); it != beach_kind.end())
+                {
+                    if (it->second == "igx_entities")
+                        ++layers_left_out;
+                    else
+                        more.emplace_back(it->second, name);
+                }
         auto pkg = mode == 1 ? roo.member(in_roo[roo_pkg]) : package_add(roo_list, more);
         if (mode == 1)
             more.clear();
@@ -1497,7 +1500,8 @@ namespace ingame
         std::ostringstream line;
         line << "Roo Nitro: made " << target.string() << ": Roo's " << roo.count << " files as they were (" << compared << " read back the same) and " << add.size()
              << " from N. Sanity Beach (" << added_bytes / 1024 << " KB: its crate layer" << (mode == 1 ? std::string() : ", as a " + more.front().first)
-             << (mode == 3 ? ", its camera layer" : "") << " and what they need), " << more.size() << " added to his package list (test " << mode << ")" << (missing ? "; " + std::to_string(missing) + " needed files found nowhere: " + missing_names : std::string());
+             << " and what it needs), " << more.size() << " added to his package list (test " << mode << ")"
+             << (layers_left_out ? ", " + std::to_string(layers_left_out) + " other map layer of the beach's only in the archive" : std::string()) << (missing ? "; " + std::to_string(missing) + " needed files found nowhere: " + missing_names : std::string());
         lines.push_back(line.str());
         std::string listed;
         for (std::size_t k = 0; k < add.size() && k < 80; ++k)

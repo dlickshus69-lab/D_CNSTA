@@ -736,7 +736,7 @@ void ClientRuntime::handle_commands()
                     const auto status = ingame::level_patch_status();
                     print_console((status.empty() ? std::string("Roo Nitro: not on this session.") : status) +
                                   " Tests, each for the next game start: /roo_nitro test1 (his archive with the beach's files, nothing else changed), test2 (their crate "
-                                  "layer loaded as a plain file), test3 (as a map layer, with their camera file); /roo_nitro off puts his own back.");
+                                  "layer loaded as a plain file), test3 (as a map layer, so its spawners are made); /roo_nitro off puts his own back.");
                 }
                 else if (research_running.exchange(true))
                     print_console("Roo Nitro: still busy with the last one.");
