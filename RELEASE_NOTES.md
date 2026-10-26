@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **The wall is up before the fight starts:** finding Crash's physics runs at full speed again while the intro plays (V1.3.72's slowdown made it take 5 s, long enough to get onto the throne first), and the wall's line is known from the intro.
-- **Papu's facing stays on his aim:** when the wall's smoothing tried a new spot, it could knock out his aim for a slam (his spin started up to 73° off). That's fixed, and his aim sets itself up again at his next slam if it ever drops.
-- **Smoothing settles in one try:** it tries the spot that worked in your last two runs first.
-- **No freeze after a respawn:** finding Crash's physics runs at the lowest priority and looks where it was first, and a full search during the fight takes breaks as it goes.
+- **No falling animation at the wall:** as Crash comes up to Papu's wall, the stick's push into it fades out, so he stops at it or runs along it with the game's own moves. Before, he was pulled back every frame, which flipped him between running and falling.
+- **The pull-back is still there** for what the stick can't stop: a jump's speed, the d-pad and the keyboard.
+- **No stutter after a respawn:** if the wall's smoothing loses track of Crash after a respawn, it finds him again within a second, and it re-arms itself if the game starts new threads.
+- The wall is up before the fight starts, and Papu's facing stays on his aim.
 - His hit window is 2.2 s at 200% (4.4 s at 100%).

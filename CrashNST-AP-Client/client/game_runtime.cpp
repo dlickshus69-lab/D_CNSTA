@@ -5648,6 +5648,13 @@ namespace ingame
             // V1.3.73: a read of all of the game's memory found him this visit (later ones while he fights rest as they go,
             // see crash_scan_read)
             bool cplace_full_done = false;
+            // V1.3.74 (see papu_wall_stick): the stick checked against how Crash moves (does it move him the camera's way?),
+            // and whether it's trusted for the wall in the stick; the watch kept again in every thread (when, how often);
+            // a death seen, and when he came back (the watched place checked a second on)
+            unsigned stick_samples = 0, stick_agree = 0, wall_rearms = 0;
+            float stick_trust = 0;
+            bool stick_trusted = false, stick_told = false, stick_doubt_told = false, stick_carried = false, wall_was_dead = false, wall_refresh = false;
+            std::uint64_t wall_rearm_at = 0, wall_respawn_at = 0;
             Address ms_wait_seen = 0;
             float ms_wait_last = 0;
             unsigned slams_seen = 0;
@@ -9496,6 +9503,27 @@ namespace ingame
         // behind that: V1.3.64's run), at any height. It meets the benches at a wide angle (150 degrees, open toward the
         // arena), so there's no corner to be caught in; a point past it goes straight back, half a unit in front of it
         constexpr float wall_front_share = 1.075f;
+        // V1.3.74 (Eric's V1.3.73 run: "when I'm running towards the wall, it seems like Crash is doing his falling
+        // animation, like he's falling down"; his clip: at the wall he flips between his run and his fall every few frames;
+        // the log: with the watched place set back as it's stored, the behaviour's own places (Havok's character controller
+        // driver and docking driver) were still a frame's run past the wall each frame, about 12, and set back after it,
+        // 80 times 10 or more in his first fight): the wall in the stick too. As Crash comes within wall_stick_zone of the
+        // wall, the part of the left stick's push that goes into it is taken out (all of it 2 in front of it), so the game
+        // moves him along it or stops him there with its own movement and animations, and his physics is set back only
+        // when something else (a jump's speed, the d-pad or keys) still takes him past it. The stick is the camera's way:
+        // its x along the camera's right, its y along where it looks, both flat (from its view and projection), checked
+        // against how he moves before it's trusted (papu_wall_stick)
+        constexpr float wall_stick_zone = 48.0f;
+        std::atomic_bool wall_stick_on{false};
+        std::atomic<float> wall_stick_f{0}, wall_stick_front{0}, wall_stick_ux{1}, wall_stick_uy{0};
+        std::atomic<float> wall_stick_rx{1}, wall_stick_ry{0}, wall_stick_fx{0}, wall_stick_fy{1};
+        std::atomic<float> wall_stick_in_x{0}, wall_stick_in_y{0}; // (the stick the game was about to get, -1 to 1)
+        std::atomic_uint wall_stick_cut{0};                         // (polls with some of the push into the wall taken out)
+        bool wall_stick_known = false; // (trusted earlier this session: the next visits start trusted, still checked)
+        // (after the code review: when the game's thread last set it, so nothing is taken out if that stops, and which pad
+        // the stick recorded for the check was from: the one being pushed, not an idle second pad)
+        std::atomic<std::uint64_t> wall_stick_at{0};
+        std::atomic_int wall_stick_pad{-1};
         // how far a point (f toward the chair from the arena's middle, l to the side) is past the wall (0: not), and where it
         // goes back to (tf, tl)
         float wall_push(float f, float l, float front, float &tf, float &tl)
@@ -9589,7 +9617,13 @@ namespace ingame
                                 << p.theirs;
                     if (listed)
                         out << ")";
+                    if (t.wall_rearms)
+                        out << "; the watch went into every thread again " << t.wall_rearms << " times";
                 }
+                // (V1.3.74: the wall in the stick, see papu_wall_stick)
+                if (const auto cut = wall_stick_cut.load())
+                    out << "; the stick's push into the wall taken out in " << cut << " polls (it moved him the camera's way in " << t.stick_agree << " of " << t.stick_samples
+                        << " checks)";
                 std::cout << out.str() << "\n" << std::flush;
             };
             // (as the fight goes back to his throne or he comes into the arena again: the research and the wall so far.
@@ -9676,8 +9710,19 @@ namespace ingame
         // he was never drawn in the wall, while his physics went on): a frame counts as in the wall when most of the other
         // places that follow him are more than 4 past it, not where he's drawn: with the place the physics goes on from
         // watched, its copies are at the wall too; with a copy watched, the others aren't
+        // (the wall's watch on a place: on the 8 bytes with his y, a double's second 8, or a float's y and height when x isn't
+        // at the start of 8; returns how many threads took it. V1.3.74, after the code review: also for the kept place's
+        // arming again, with the place set again too: the rules turned off and on in between clear both)
+        unsigned papu_wall_arm(const BossTuning::CrashPlace &p)
+        {
+            const Address watched = p.kind == 1 ? p.at + 8 : (p.at & 7) ? p.at + 4 : p.at;
+            wall_place = 0;
+            wall_kind = p.kind, wall_far = 0, wall_last_known = false, wall_last_set = false;
+            wall_place = p.at;
+            return wall_debug_register(watched);
+        }
         template <class Told, class Where>
-        void papu_wall_watch(BossTuning &t, bool past, unsigned others, unsigned others_in, const Told &told, const Where &where)
+        void papu_wall_watch(BossTuning &t, bool past, unsigned others, unsigned others_in, std::uint64_t now, const Told &told, const Where &where)
         {
             const unsigned stops = wall_stops.load(), fresh = stops - t.wall_stops_seen;
             t.wall_stops_seen = stops;
@@ -9699,12 +9744,7 @@ namespace ingame
                 }
                 auto &p = *next;
                 p.tried = true, t.wall_try = static_cast<std::size_t>(next - t.cplaces.begin());
-                // (on the 8 bytes with his y: a double's second 8, or a float's y and height when x isn't at the start of 8)
-                const Address watched = p.kind == 1 ? p.at + 8 : (p.at & 7) ? p.at + 4 : p.at;
-                wall_place = 0;
-                wall_kind = p.kind, wall_far = 0, wall_last_known = false, wall_last_set = false;
-                wall_place = p.at;
-                const auto threads = wall_debug_register(watched);
+                const auto threads = papu_wall_arm(p);
                 wall_live = true;
                 t.wall_watch = 1, t.wall_pressed = t.wall_rough = t.wall_quiet = 0, t.wall_rearmed = false;
                 told("the watch tries " + where(p.at) + " (place " + std::to_string(t.wall_try + 1) + " of " + std::to_string(t.cplaces.size()) + ", " + place_owner(p.at) +
@@ -9731,7 +9771,7 @@ namespace ingame
                 }
                 else if (t.wall_pressed >= 40 && t.wall_rough * 10 <= t.wall_pressed)
                 {
-                    t.wall_watch = 2, t.wall_good = place_owner(p.at), t.wall_pressed = t.wall_rough = 0;
+                    t.wall_watch = 2, t.wall_good = place_owner(p.at), t.wall_pressed = t.wall_rough = 0, t.wall_quiet = 0;
                     told("the watch keeps " + where(p.at) + " (" + t.wall_good + "): the other places in the wall in " + counts + " (unwatched: " + std::to_string(t.base_rough) +
                          " of " + std::to_string(t.base_pressed) + ")");
                     return;
@@ -9741,6 +9781,19 @@ namespace ingame
                 if (!why.empty())
                     told(where(p.at) + " isn't it: " + why), t.wall_watch = 0, wall_place = 0;
                 return;
+            }
+            // V1.3.74 (Eric's V1.3.73 run: the watch went on in 100 threads at the start and 102 later, and after his second
+            // respawn the kept place stopped keeping him out of the wall): kept, but no store of the game's seen while he's in
+            // the wall for 20 frames: the watch goes into every thread again (threads made since may be the ones storing it),
+            // once a second at most
+            t.wall_quiet = fresh ? 0 : past ? t.wall_quiet + 1 : t.wall_quiet;
+            if (t.wall_quiet >= 20 && now - t.wall_rearm_at >= 1000)
+            {
+                const auto threads = papu_wall_arm(p);
+                t.wall_quiet = 0, t.wall_rearm_at = now, ++t.wall_rearms;
+                if (t.wall_rearms <= 3)
+                    told("no store of the kept place seen while Crash was in the wall for 20 frames: the watch goes into every thread again (" + std::to_string(threads) +
+                         ")");
             }
             // (kept: still keeping him out of it?)
             if (t.wall_pressed >= 120)
@@ -9754,6 +9807,57 @@ namespace ingame
                 }
                 t.wall_pressed = t.wall_rough = 0;
             }
+        }
+        // V1.3.74 (see wall_stick_zone): the wall in the stick, each frame: the camera's right and where it looks, flat on
+        // the ground (from its view and projection: clip x and w), where Crash is against the wall, and whether the stick is
+        // trusted: while he runs freely, away from the wall, with the stick pushed well over, does he go where the stick
+        // points the camera's way (within 30 degrees)? Trusted from 30 such checks on with 3 in 4 of them right, as they
+        // go (a moving average); not trusted (the wall is in his physics only) while that's under 3 in 5
+        template <class Told>
+        void papu_wall_stick(BossTuning &t, bool on, bool paused, const std::array<float, 3> &at, const Told &told)
+        {
+            const auto view = scene();
+            const auto &vp = view.view_projection;
+            float rx = vp[0], ry = vp[4], fx = vp[3], fy = vp[7];
+            const float rl = std::hypot(rx, ry), fl = std::hypot(fx, fy);
+            const bool camera = view.camera_active && std::isfinite(rl) && std::isfinite(fl) && rl > 1e-6f && fl > 1e-6f;
+            // (after the code review: not in the pause menu either)
+            if (!on || paused || !camera || !t.wall_known)
+            {
+                wall_stick_on = false;
+                return;
+            }
+            rx /= rl, ry /= rl, fx /= fl, fy /= fl;
+            if (wall_stick_known && !t.stick_samples && !t.stick_trusted)
+                t.stick_trusted = t.stick_told = t.stick_carried = true, t.stick_trust = 1.0f; // (as earlier this session)
+            const float ux = t.wall_dir[0], uy = t.wall_dir[1], front = wall_front_share * t.wall_span;
+            const float f = (at[0] - t.wall_mid[0]) * ux + (at[1] - t.wall_mid[1]) * uy;
+            wall_stick_rx = rx, wall_stick_ry = ry, wall_stick_fx = fx, wall_stick_fy = fy;
+            wall_stick_ux = ux, wall_stick_uy = uy, wall_stick_front = front, wall_stick_f = f, wall_stick_at = GetTickCount64();
+            // (the check, while he runs freely away from the wall)
+            const float sx = wall_stick_in_x.load(), sy = wall_stick_in_y.load(), vx = t.crash_v[0], vy = t.crash_v[1], v = std::hypot(vx, vy);
+            if (std::hypot(sx, sy) > 0.6f && v > 150 && f < front - 2 * wall_stick_zone)
+            {
+                const float wx = rx * sx + fx * sy, wy = ry * sx + fy * sy, w = std::hypot(wx, wy);
+                const bool agrees = w > 1e-3f && (wx * vx + wy * vy) / (w * v) > 0.866f;
+                ++t.stick_samples, t.stick_agree += agrees ? 1 : 0;
+                // (after the code review: from the first check only when it isn't carried over from earlier this session)
+                t.stick_trust = t.stick_samples == 1 && !t.stick_carried ? (agrees ? 1.0f : 0.0f) : t.stick_trust * 0.95f + (agrees ? 0.05f : 0.0f);
+                if (t.stick_samples >= 30)
+                {
+                    const bool was = t.stick_trusted;
+                    t.stick_trusted = t.stick_trust >= (was ? 0.6f : 0.75f);
+                    wall_stick_known = t.stick_trusted;
+                    if (t.stick_trusted && !t.stick_told)
+                        t.stick_told = true, told("the wall is in the stick too: within " + std::to_string(static_cast<int>(wall_stick_zone)) +
+                                                  " of it, the stick's push into it is taken out (it moves him the camera's way: " + std::to_string(t.stick_agree) + " of " +
+                                                  std::to_string(t.stick_samples) + " checks)");
+                    if (!t.stick_trusted && !t.stick_doubt_told && t.stick_samples >= 120)
+                        t.stick_doubt_told = true, told("the stick doesn't move Crash the camera's way here (" + std::to_string(t.stick_agree) + " of " +
+                                                        std::to_string(t.stick_samples) + " checks): the wall stays in his physics only");
+                }
+            }
+            wall_stick_on = t.stick_trusted;
         }
         // V1.3.68 (Eric: "put the invisible wall basically in front of the chair, not so ... we're trying to reposition crash.
         // It's just an invisible wall where it still makes a circle shape around the arena"): with the harder rules on, an
@@ -9774,8 +9878,15 @@ namespace ingame
             wall_live = on && (t.wall_watch == 1 || t.wall_watch == 2);
             if (!state.boss_rules || !here)
             {
+                wall_stick_on = false; // (V1.3.74)
                 if (!state.boss_rules && (wall_arm_address.load() || wall_place.load()))
+                {
                     papu_wall_off();
+                    // (V1.3.74, after the code review: with the rules back on, the places are tried again from the first)
+                    t.wall_watch = 0;
+                    for (auto &c : t.cplaces)
+                        c.tried = false;
+                }
                 return;
             }
             const auto told = [&](const std::string &line) {
@@ -9787,6 +9898,8 @@ namespace ingame
                 out << "0x" << std::hex << a;
                 return out.str();
             };
+            // (V1.3.74: the wall in the stick, see papu_wall_stick: it needs none of his physics' places)
+            papu_wall_stick(t, on, state.menu_paused != 0, at, told);
             // (V1.3.71: the watch tried again after a new read, the kind of place kept before first; V1.3.72: the parts of the
             // game's memory the places were in, read first)
             const auto start_over = [&] {
@@ -9938,6 +10051,36 @@ namespace ingame
                     start_over();
                 }
             }
+            // V1.3.74 (Eric's V1.3.73 run: after his second respawn the kept place stopped keeping him out of the wall, and
+            // the others were tried until he died again): a second after each respawn, the watched place has to follow him
+            // still; if it doesn't, the places are looked for again, where they were first
+            if (here && !alive)
+                t.wall_was_dead = true;
+            else if (alive && t.wall_was_dead)
+                t.wall_was_dead = false, t.wall_respawn_at = now;
+            if (t.wall_respawn_at && now - t.wall_respawn_at >= 1000 && alive)
+            {
+                t.wall_respawn_at = 0;
+                if (t.cplace_step == 3 && !t.cplaces.empty() && (t.wall_watch == 1 || t.wall_watch == 2))
+                {
+                    auto &p = t.cplaces[std::min(t.wall_try, t.cplaces.size() - 1)];
+                    std::array<double, 3> v{};
+                    if (!cplace_read(p, v) || !cplace_tracks(p, v, at, 0.25 + speed * m * 0.1))
+                    {
+                        // (after the code review: the others that follow him still hold the wall meanwhile; the places
+                        // are looked for again only as he stands still, so the read is quick and done before he runs on)
+                        told("a second after his respawn the watched place doesn't follow Crash: the next is tried, and the places are looked for again as he stands still");
+                        p.tried = true, t.wall_watch = 0, t.wall_refresh = true;
+                        papu_wall_off();
+                    }
+                }
+            }
+            if (t.wall_refresh && t.cplace_step == 3 && alive && speed < 5 && crash_scan.state.load() == 0)
+            {
+                t.wall_refresh = false;
+                t.cplace_scan_at = now;
+                start_over();
+            }
             if (!on || t.cplace_step < 2)
             {
                 t.wall_run = 0, t.wall_run_max = 0;
@@ -10021,7 +10164,7 @@ namespace ingame
                     papu_wall_off();
                 }
             }
-            papu_wall_watch(t, past, others, others_in, told, where);
+            papu_wall_watch(t, past, others, others_in, now, told, where);
         }
         void papu_aim(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
@@ -10563,8 +10706,9 @@ namespace ingame
         {
             if (!t.papu || !t.papu_ai || !event_owner(t.papu))
             {
-                // (V1.3.68: no wall without him, see papu_wall; V1.3.69, after the code review: nor its watch)
-                wall_live = false;
+                // (V1.3.68: no wall without him, see papu_wall; V1.3.69, after the code review: nor its watch; V1.3.74: nor in
+                // the stick)
+                wall_live = false, wall_stick_on = false;
                 if (wall_arm_address.load() || wall_place.load())
                     papu_wall_off();
                 return;
@@ -11088,6 +11232,7 @@ namespace ingame
                 papu_who_off(t, "the fight was left"); // (V1.3.41: never left on past his objects)
                 papu_steer_off(), papu_slam_off();     // (V1.3.52, V1.3.53: the same)
                 papu_wall_off();                       // (V1.3.68: the wall's watch on Crash's physics, see papu_wall)
+                wall_stick_on = false, wall_stick_cut = 0; // (V1.3.74: and in the stick, see papu_wall_stick)
                 t = {};
                 t.level = boss, t.entered = now;
                 // (V1.3.28) Papu Papu's stomps from here on only
@@ -15195,7 +15340,7 @@ namespace ingame
         boss_block_actor = 0, boss_block_red = false;
         id_list_restore("the client stopped");
         papu_who_off(boss_tuning, "the client stopped");
-        wall_live = false, wall_place = 0; // (V1.3.68: the wall's watch sets nothing more, see wall_apply)
+        wall_live = false, wall_place = 0, wall_stick_on = false; // (V1.3.68: the wall's watch sets nothing more, see wall_apply; V1.3.74: nor the stick)
         if (game_thread)
             boss_tint_off(boss_tuning, true);
         else if (boss_tuning.tint_bundle)
@@ -15227,6 +15372,44 @@ namespace ingame
     {
         const auto actor = player();
         return actor && read(actor + 32, at);
+    }
+    // V1.3.74 (see wall_stick_zone): the left stick as the game is about to get it (after the traps), with the push into
+    // Papu Papu's wall taken out as Crash comes up to it: what's left of it into the wall goes from all of it wall_stick_zone
+    // in front of the wall to none 2 in front of it; along it, untouched
+    bool wall_stick(unsigned pad, short &x, short &y)
+    {
+        const float sx = x / 32767.0f, sy = y / 32767.0f;
+        // (after the code review: the stick for the check from the pad being pushed, not an idle second one)
+        if (std::hypot(sx, sy) >= 0.2f || wall_stick_pad.load(std::memory_order_relaxed) == static_cast<int>(pad))
+        {
+            wall_stick_in_x.store(sx, std::memory_order_relaxed), wall_stick_in_y.store(sy, std::memory_order_relaxed);
+            wall_stick_pad.store(static_cast<int>(pad), std::memory_order_relaxed);
+        }
+        // (after the code review: only while the game's thread keeps it up to date)
+        if (!wall_stick_on.load(std::memory_order_relaxed) || std::hypot(sx, sy) < 0.2f ||
+            GetTickCount64() - wall_stick_at.load(std::memory_order_relaxed) > 150)
+            return false;
+        const float rx = wall_stick_rx.load(std::memory_order_relaxed), ry = wall_stick_ry.load(std::memory_order_relaxed);
+        const float fx = wall_stick_fx.load(std::memory_order_relaxed), fy = wall_stick_fy.load(std::memory_order_relaxed);
+        const float ux = wall_stick_ux.load(std::memory_order_relaxed), uy = wall_stick_uy.load(std::memory_order_relaxed);
+        const float f = wall_stick_f.load(std::memory_order_relaxed), front = wall_stick_front.load(std::memory_order_relaxed);
+        // (where the stick sends him, flat; how much of it goes into the wall; how much of that is left this close)
+        float wx = rx * sx + fx * sy, wy = ry * sx + fy * sy;
+        const float into = wx * ux + wy * uy, keep = std::clamp((front - 2 - f) / wall_stick_zone, 0.0f, 1.0f);
+        const float det = rx * fy - fx * ry;
+        if (!(into > 0) || keep >= 1 || !std::isfinite(keep) || !(std::abs(det) > 0.3f))
+            return false;
+        wx -= (1 - keep) * into * ux, wy -= (1 - keep) * into * uy;
+        // (back to the stick: x along the camera's right, y along where it looks; after the code review, both scaled
+        // down together past the stick's edge, so its way stays along the wall)
+        float nx = (fy * wx - fx * wy) / det, ny = (rx * wy - ry * wx) / det;
+        if (!std::isfinite(nx) || !std::isfinite(ny))
+            return false;
+        if (const float most = std::max(std::abs(nx), std::abs(ny)); most > 1)
+            nx /= most, ny /= most;
+        x = static_cast<short>(std::lround(nx * 32767.0f)), y = static_cast<short>(std::lround(ny * 32767.0f));
+        wall_stick_cut.fetch_add(1, std::memory_order_relaxed);
+        return true;
     }
     bool gimmick_stage()
     {

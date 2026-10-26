@@ -297,6 +297,8 @@ namespace
     }
     // last controller poll with no movement input, and the latest pad values for the Slow log
     std::atomic<std::uint64_t> neutral_at{0};
+    // (V1.3.74) last poll whose stick Papu Papu's wall changed (see ingame::wall_stick)
+    std::atomic<std::uint64_t> wall_cut_at{0};
     std::atomic<int> pad_in_x{0}, pad_in_y{0}, pad_in_buttons{0}, pad_out_x{0}, pad_out_y{0};
     void apply_pad_traps(DWORD index, XINPUT_STATE *state)
     {
@@ -329,6 +331,10 @@ namespace
             walk_stick(pad.sThumbLX, pad.sThumbLY, buttons, walk_tilt);
             pad.wButtons = buttons;
         }
+        // (V1.3.74: and Papu Papu's wall, last, on the stick the game gets; after the code review, like the traps, not in
+        // the pause menu; a poll it changed tells the Slow trap's tuner Crash wasn't standing still for lack of tilt)
+        if (active && !menu_open && ingame::wall_stick(index, pad.sThumbLX, pad.sThumbLY))
+            wall_cut_at = now;
         pad_out_x = pad.sThumbLX, pad_out_y = pad.sThumbLY;
     }
     template <DWORD(WINAPI *Self)(DWORD, XINPUT_STATE *)>
@@ -2241,7 +2247,10 @@ namespace
             const bool pushing = neutral_at.load() < walk_window.at;
             const bool all_slow = walk_window.all_slow && slow_now, any_slow = walk_window.any_slow || slow_now;
             const float before = walk_tuner.tilt;
-            const int change = all_slow == any_slow ? walk_tuner.window(ground, climb, pushing, all_slow, walk_window.turned) : 0;
+            // (V1.3.74, after the code review: a window in which Papu Papu's wall took the push out of the stick is like a
+            // turn: it can't raise the tilt)
+            const bool walled = wall_cut_at.load() >= walk_window.at;
+            const int change = all_slow == any_slow ? walk_tuner.window(ground, climb, pushing, all_slow, walk_window.turned || walled) : 0;
             if (walk_tuner.run_speed > logged_run_speed * 1.2f)
             {
                 logged_run_speed = walk_tuner.run_speed;
