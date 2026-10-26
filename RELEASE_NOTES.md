@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **An invisible wall in front of his chair** (harder rules on): Crash stops at it at any height, and the arena stays round. This one works in the game's physics, where it really keeps Crash (the last try only moved copies, which stuttered).
-- **His hit window is 2 s at 200%** (4 s at 100%), over once his next spin starts.
-- **His slam aims 55% of the way** to where you'll be (your pick).
-- The log says how the wall did: it looks for where the physics keeps Crash the first time he stands still in a fight.
+- **The wall in front of his chair now follows the arena's round edge** across the throne, with straight sides where the benches end. Crash stops where he touches it, from the front or the side, and can walk along it; no more being pushed toward the middle.
+- **No stutter from the side:** the old wall bent sharply there, so each step sideways shoved Crash inward.
+- **The wall stays on:** those shoves made its own check think it had failed, which is how Crash could still get onto the chair.
+- His hit window (2 s at 200%) and slam aim (55%) are done.
 - From V1.3.64: 2 to 5 slams after a hit.

@@ -5640,6 +5640,10 @@ namespace ingame
             unsigned wall_try_stores = 0, wall_try_stops = 0, wall_others_run = 0;
             float wall_try_over = 0;
             std::string wall_good;
+            // V1.3.69: how often setting his physics each frame didn't hold him in this fight (after two, the watch is tried
+            // first after a new read), and when none of the places held him (tried again 20 s later)
+            unsigned wall_fails = 0;
+            std::uint64_t wall_none_at = 0;
             Address ms_wait_seen = 0;
             float ms_wait_last = 0;
             unsigned slams_seen = 0;
@@ -9320,14 +9324,11 @@ namespace ingame
                 *dz = static_cast<float>(v[2] - z);
             return true;
         }
-        void crash_scan_run()
+        void crash_scan_read(std::vector<CrashScan::Found> &found, std::size_t &bytes)
         {
-            const auto started = precise_seconds();
-            std::vector<CrashScan::Found> found;
             std::vector<unsigned char> buffer(1 << 20);
             const Address own_lo = reinterpret_cast<Address>(buffer.data()), own_hi = own_lo + buffer.size();
             std::set<Address> stacks; // (allocations with a guard page: thread stacks)
-            std::size_t bytes = 0;
             MEMORY_BASIC_INFORMATION info{};
             for (Address a = 0x10000; a < 0x7fffffff0000ULL && VirtualQuery(reinterpret_cast<void *>(a), &info, sizeof info) == sizeof info;)
             {
@@ -9348,9 +9349,10 @@ namespace ingame
                         !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(chunk), buffer.data(), n, &got) || got < 12)
                         continue;
                     bytes += got;
-                    // (against where he is now: within 3 cm, and as far as he goes in 40 ms more)
+                    // (against where he is now: within 3 cm, and as far as he goes in 40 ms more, 15 cm at most: V1.3.69, after
+                    // the code review, so a run doesn't fill the read with numbers that only happen to be near)
                     const std::array<float, 3> at{crash_scan.now_x.load(), crash_scan.now_y.load(), crash_scan.now_z.load()};
-                    const float mx = at[0] * body_meters, tolerance = 0.03f + crash_scan.now_speed.load() * body_meters * 0.04f;
+                    const float mx = at[0] * body_meters, tolerance = std::min(0.15f, 0.03f + crash_scan.now_speed.load() * body_meters * 0.04f);
                     for (std::size_t i = 0; i + 12 <= got; i += 4)
                     {
                         float x = 0, dz = 0;
@@ -9370,6 +9372,21 @@ namespace ingame
                 if (found.size() >= 20000)
                     break;
             }
+        }
+        // (V1.3.69, after the code review: nothing thrown on its thread ends the game; it just finds nothing)
+        void crash_scan_run()
+        {
+            const auto started = precise_seconds();
+            std::vector<CrashScan::Found> found;
+            std::size_t bytes = 0;
+            try
+            {
+                crash_scan_read(found, bytes);
+            }
+            catch (...)
+            {
+                found.clear();
+            }
             std::lock_guard lock(crash_scan.mutex);
             crash_scan.found = std::move(found), crash_scan.bytes = bytes, crash_scan.seconds = precise_seconds() - started;
             crash_scan.state = 2;
@@ -9380,7 +9397,14 @@ namespace ingame
             if (!crash_scan.state.compare_exchange_strong(idle, 1))
                 return;
             crash_scan.at = at, crash_scan.now_x = at[0], crash_scan.now_y = at[1], crash_scan.now_z = at[2];
-            std::thread(crash_scan_run).detach();
+            try
+            {
+                std::thread(crash_scan_run).detach();
+            }
+            catch (...)
+            {
+                crash_scan.state = 0; // (no thread: tried again later)
+            }
         }
         // (V1.3.68, for the log) what a place is in: the object around it, by the nearest function table at or before it (up
         // to 0x800 bytes back), with the field there (see engine_type_text)
@@ -9405,28 +9429,52 @@ namespace ingame
             }
             return "not readable around it";
         }
-        // V1.3.68: the wall's watch (debug register 3, see papu_wall and wall_apply): the 8 bytes it's on, the place watched
-        // (where the game's physics may keep Crash: his x and y in metres) and its kind (0 floats, 1 doubles); whether the
-        // wall is on now; the wall (the arena's middle, the chair's way, its distance from the middle at the front, the
-        // chair's distance), in the game's units; and for the tries: the game's stores there, those set back onto the wall,
-        // how far a store went from the last one set onto it (V1.3.68: small if that place is where the physics goes on from;
-        // the gap to where the physics really has him if it's only a copy), and the last store, in the game's units (one more
-        // than 300 from it is a teleport, or that memory is something else's now: left alone)
+        // V1.3.68: the wall's watch (debug register 3, see papu_wall and wall_apply): the 8 bytes it's on (V1.3.69, after the
+        // code review: those with his y, so a store of his y alone is seen too), the place watched (where the game's physics
+        // may keep Crash: his x and y in metres) and its kind (0 floats, 1 doubles); whether the wall is on now; the wall (the
+        // arena's middle, the chair's way, how far its curve is from the middle, how far its sides are from the chair's way),
+        // in the game's units; the thread setting the place right now (V1.3.69, after the code review: that setting stops the
+        // watch again, and is let through); and for the tries: the game's stores there, those set out of the wall, how far a
+        // store went from the last one set (small if that place is where the physics goes on from; the gap to where the
+        // physics really has him if it's only a copy), and the last store, in the game's units (one more than 300 from it is
+        // a teleport, or that memory is something else's now: left alone)
         constexpr DWORD wall_arm_code = 0xE0C0FFF0; // raised by us: sets this thread's debug register 3
         std::atomic<std::uint64_t> wall_arm_address{0}, wall_place{0};
         std::atomic_int wall_kind{0};
         std::atomic_bool wall_live{false}, wall_last_known{false}, wall_last_set{false};
-        std::atomic<float> wall_mx{0}, wall_my{0}, wall_ux{1}, wall_uy{0}, wall_front{0}, wall_chair{0}, wall_far{0}, wall_lx{0}, wall_ly{0};
+        std::atomic<float> wall_mx{0}, wall_my{0}, wall_ux{1}, wall_uy{0}, wall_front{0}, wall_side{0}, wall_far{0}, wall_lx{0}, wall_ly{0};
+        std::atomic<DWORD> wall_setting_thread{0};
         std::atomic_uint wall_stores{0}, wall_stops{0};
-        // (V1.3.68: 55% of the way from the arena's middle to the chair; V1.3.64's run had Crash on the chair 66 to 72 from
-        // where Papu Papu sits, the chair 242 from the middle, so this leaves room for Crash's body before its front)
-        constexpr float wall_front_share = 0.55f;
-        // the wall's distance from the arena's middle at `angle` off the chair's way: `front` within 30 degrees of it, then
-        // farther (two of the chair's distances per 20 degrees), none from 50 degrees on
-        float wall_radius(float angle, float front, float chair)
+        // V1.3.69 (Eric's V1.3.68 run: "it blocks, but ... when you try to approach it to the side of the chair, he like gets
+        // pushed back into the middle ... it shouldn't be teleporting you ... the wall should be the shape of the whole
+        // arena", and "it kind of stutters a little bit ... when I'm walking towards it from the side"; the log: the wall held
+        // him, but past 30 degrees from the chair it went out steeply (to none at 50 degrees) and he was set onto it straight
+        // toward the middle, so a step sideways moved him up to 90 toward the middle): the wall closes the gap in the arena's
+        // ring of benches where the throne is, on the arena's own circle, 7.5% farther from the middle than where Papu Papu
+        // sits (his throne's seat starts 66 to 72 behind that: V1.3.64's run), across 32 degrees on either side of the chair's
+        // way (where the benches end), with straight sides from there out (so the throne can't be reached from the benches
+        // either). A point inside it goes to the nearest point out of it, half a unit past the wall: onto its curve, or square
+        // off a side, as a wall stops him
+        constexpr float wall_front_share = 1.075f, wall_side_angle = 0.5585f; // (32 degrees)
+        // how far a point (f toward the chair from the arena's middle, l to the side) is inside the wall (0: not), and where
+        // it goes out of it (tf, tl)
+        float wall_push(float f, float l, float front, float side, float &tf, float &tl)
         {
-            const float side = std::abs(angle);
-            return side <= 0.5236f ? front : side >= 0.8727f ? 1e9f : front + (side - 0.5236f) / (0.8727f - 0.5236f) * 2.0f * chair;
+            const float r = std::hypot(f, l), a = std::atan2(l, f);
+            if (!(r > front) || !(std::abs(a) < side))
+                return 0.0f;
+            // (onto the curve, toward the middle)
+            float depth = r - front;
+            tf = f * (front - 0.5f) / r, tl = l * (front - 0.5f) / r;
+            // (or square off the side's line, where that's nearer: never before the curve's end, which the curve is nearer to)
+            const float sd = a < 0 ? -side : side, cs = std::cos(sd), sn = std::sin(sd);
+            const float along = f * cs + l * sn, d = std::abs(f * sn - l * cs);
+            if (along >= front && d < depth)
+            {
+                const float nf = a < 0 ? sn : -sn, nl = a < 0 ? -cs : cs; // (away from the chair's way)
+                depth = d, tf = along * cs + 0.5f * nf, tl = along * sn + 0.5f * nl;
+            }
+            return depth;
         }
         unsigned wall_debug_register(std::uint64_t at);
         // (V1.3.68) the wall's watch off: nothing set by it from here on, and debug register 3 cleared in every thread
@@ -9550,14 +9598,12 @@ namespace ingame
             return std::abs(v[0] - at[0] * m) <= tolerance && std::abs(v[1] - at[1] * m) <= tolerance && std::abs(v[2] - (at[2] * m + p.dz)) <= tolerance + 0.3;
         }
         // V1.3.68 (Eric: "put the invisible wall basically in front of the chair, not so ... we're trying to reposition crash.
-        // It's just an invisible wall where it still makes a circle shape around the arena"): with the harder rules on, in
-        // front of Papu Papu's chair Crash can't go farther from the arena's middle than 55% of the way to the chair (on a
-        // circle around the middle, from 30 degrees either side of the chair's way, then farther out to none at 50 degrees),
-        // at any height, through the whole fight (not once Papu Papu is beaten). The wall is in the game's physics, where it
-        // keeps Crash (in metres, see crash_scan_run): past it, his physics is set onto it each frame, so he goes no farther
-        // (as a wall stops him: he stays at it while he pushes into it, and can go along it). If that doesn't hold him, each
-        // place is watched as the game sets it instead (debug register 3, see wall_apply), and one that holds him is kept.
-        // The log says how it went
+        // It's just an invisible wall where it still makes a circle shape around the arena"): with the harder rules on, an
+        // invisible wall in front of Papu Papu's throne (V1.3.69: on the arena's circle, with straight sides, see wall_push),
+        // at any height, through the whole fight (not once he's beaten). It's in the game's physics, where it keeps Crash (in
+        // metres, see crash_scan_run): inside it, his physics is set out of it each frame (V1.3.68's run: it held him), at the
+        // nearest point, so he goes no farther and can go along it. If that doesn't hold him, each place is watched as the
+        // game sets it instead (debug register 3, see wall_apply), and one that holds him is kept. The log says how it went
         void papu_wall(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
             const auto crash = player();
@@ -9565,8 +9611,8 @@ namespace ingame
             const bool here = crash && read(crash + 32, at) && std::isfinite(at[0]) && std::isfinite(at[1]) && std::isfinite(at[2]);
             const bool alive = here && !crash_dead_now();
             const bool on = state.boss_rules && t.wall_known && alive && s >= 1 && s <= 6 && s != 4;
-            const float front = wall_front_share * t.wall_span;
-            wall_mx = t.wall_mid[0], wall_my = t.wall_mid[1], wall_ux = t.wall_dir[0], wall_uy = t.wall_dir[1], wall_front = front, wall_chair = t.wall_span;
+            const float front = wall_front_share * t.wall_span, ux = t.wall_dir[0], uy = t.wall_dir[1];
+            wall_mx = t.wall_mid[0], wall_my = t.wall_mid[1], wall_ux = ux, wall_uy = uy, wall_front = front, wall_side = wall_side_angle;
             wall_live = on && (t.wall_mode == 1 || t.wall_mode == 3);
             if (!state.boss_rules || !here)
             {
@@ -9583,11 +9629,9 @@ namespace ingame
                 out << "0x" << std::hex << a;
                 return out.str();
             };
-            // (once tried, the watch is tried first after a new read: setting his physics each frame didn't hold him)
+            // (V1.3.69: setting his physics each frame first again after a new read, unless it already didn't hold twice)
             const auto start_over = [&] {
-                t.cplace_step = 0, t.cplaces.clear(), t.wall_trying = false, t.wall_try = 0;
-                if (t.wall_mode != 0)
-                    t.wall_mode = 1;
+                t.cplace_step = 0, t.cplaces.clear(), t.wall_trying = false, t.wall_try = 0, t.wall_mode = t.wall_fails >= 2 ? 1 : 0;
                 papu_wall_off();
             };
             // (a new Crash, after a respawn: where his physics keeps him is looked for again)
@@ -9598,6 +9642,9 @@ namespace ingame
                 t.wall_actor = crash, t.cplace_scan_at = 0, t.cplace_scans = 0;
                 start_over();
             }
+            // (none held him: all tried again 20 s on)
+            if (t.wall_mode == 2 && now - t.wall_none_at >= 20000)
+                t.cplace_scan_at = now, start_over();
             const float speed = std::hypot(t.crash_v[0], t.crash_v[1]);
             const double m = body_meters;
             crash_scan.now_x = at[0], crash_scan.now_y = at[1], crash_scan.now_z = at[2], crash_scan.now_speed = speed;
@@ -9612,6 +9659,8 @@ namespace ingame
                 if (alive && speed < 5 && crash_scan.state.load() == 0 && t.cplace_scans < 8 && now >= t.cplace_scan_at)
                     crash_scan_start(at), t.cplace_step = 1, t.cplace_from = at, ++t.cplace_scans;
             }
+            else if (t.cplace_step == 1 && crash_scan.state.load() == 0)
+                t.cplace_step = 0, t.cplace_scan_at = now + 3000; // (its thread couldn't start)
             else if (t.cplace_step == 1 && crash_scan.state.load() == 2)
             {
                 std::lock_guard lock(crash_scan.mutex);
@@ -9637,32 +9686,48 @@ namespace ingame
             }
             else if (t.cplace_step == 2 && std::hypot(at[0] - t.cplace_from[0], at[1] - t.cplace_from[1]) >= 40)
             {
-                // (kept: those that followed him, within 5 cm and as far as he goes in 50 ms)
+                // (kept: those that followed him, within 5 cm and as far as he goes in 50 ms; V1.3.69: not Papu Papu's head's
+                // target, which looks at Crash)
                 std::vector<BossTuning::CrashPlace> kept;
+                std::vector<std::string> owners;
                 const double tolerance = 0.05 + speed * m * 0.05;
                 for (const auto &p : t.cplaces)
                 {
                     std::array<double, 3> v{};
-                    if (cplace_read(p, v) && cplace_tracks(p, v, at, tolerance))
-                        kept.push_back(p);
+                    if (!cplace_read(p, v) || !cplace_tracks(p, v, at, tolerance))
+                        continue;
+                    auto owner = place_owner(p.at);
+                    if (owner.find("HeadTracking") != std::string::npos)
+                        continue;
+                    kept.push_back(p), owners.push_back(std::move(owner));
                 }
-                // (the kind of place that held him before, first)
-                if (!t.wall_good.empty())
-                    std::stable_partition(kept.begin(), kept.end(), [&](const BossTuning::CrashPlace &p) { return place_owner(p.at) == t.wall_good; });
+                // (V1.3.69, for the watch's tries: the kind of place that held him before first, then the character
+                // controller's (V1.3.68's run: Havok's hkbCharacterControllerDriver followed him in every read))
+                std::vector<std::size_t> order(kept.size());
+                for (std::size_t i = 0; i < order.size(); ++i)
+                    order[i] = i;
+                const auto rank = [&](std::size_t i) { return !t.wall_good.empty() && owners[i] == t.wall_good ? 0 : owners[i].find("CharacterController") != std::string::npos ? 1 : 2; };
+                std::stable_sort(order.begin(), order.end(), [&](std::size_t x, std::size_t y) { return rank(x) < rank(y); });
+                std::vector<BossTuning::CrashPlace> sorted;
                 std::ostringstream line;
                 line << t.cplaces.size() << " places held where Crash stood, " << kept.size() << " followed him";
-                for (std::size_t i = 0; i < kept.size() && i < 8; ++i)
-                    line << "\n  " << where(kept[i].at) << " (" << (kept[i].kind ? "doubles" : "floats") << ", " << std::lround(kept[i].dz * 100) << " cm over his feet): "
-                         << place_owner(kept[i].at);
+                for (const auto i : order)
+                {
+                    if (sorted.size() < 10)
+                        line << "\n  " << where(kept[i].at) << " (" << (kept[i].kind ? "doubles" : "floats") << ", " << std::lround(kept[i].dz * 100) << " cm over his feet): "
+                             << owners[i];
+                    sorted.push_back(kept[i]);
+                }
                 told(line.str());
-                t.cplaces = std::move(kept);
+                t.cplaces = std::move(sorted);
                 for (auto &p : t.cplaces)
-                    p.ours = p.theirs = 0, p.pending = false;
+                    p.ours = p.theirs = 0, p.pending = false, p.tried = false;
                 t.cplace_step = t.cplaces.empty() ? 0 : 3, t.cplace_lost_at = 0, t.cplace_check_at = now + 500;
                 if (t.cplaces.empty())
                     t.cplace_scan_at = now + 2000;
-                if (t.wall_mode != 0)
-                    t.wall_mode = 1, t.wall_try = 0, t.wall_trying = false, wall_place = 0;
+                else
+                    t.cplace_scans = 0; // (a read that worked: the count is of those in a row that didn't)
+                t.wall_mode = t.wall_fails >= 2 ? 1 : 0, t.wall_try = 0, t.wall_trying = false, wall_place = 0;
             }
             // (none of them follows him any more, for a second: looked for again)
             if (t.cplace_step == 3 && now >= t.cplace_check_at && alive)
@@ -9689,8 +9754,13 @@ namespace ingame
                 t.wall_run = t.wall_run_set = 0, t.wall_run_max = 0, t.wall_run_min = 1e9f;
                 return;
             }
-            const float ax = at[0] - t.wall_mid[0], ay = at[1] - t.wall_mid[1], d = std::hypot(ax, ay);
-            const float r = wall_radius(std::atan2(t.wall_dir[0] * ay - t.wall_dir[1] * ax, t.wall_dir[0] * ax + t.wall_dir[1] * ay), front, t.wall_span);
+            // (where he is against the wall: f toward the chair from the arena's middle, l to the side; how far inside it, and
+            // the point out of it, see wall_push)
+            const float ax = at[0] - t.wall_mid[0], ay = at[1] - t.wall_mid[1];
+            float tf = 0, tl = 0;
+            const float over = wall_push(ax * ux + ay * uy, ay * ux - ax * uy, front, wall_side_angle, tf, tl);
+            const bool past = over > 0;
+            const float tx = t.wall_mid[0] + tf * ux - tl * uy, ty = t.wall_mid[1] + tf * uy + tl * ux;
             // (each place set at the last push: did the game go on from ours, or put its own back?)
             for (auto &p : t.cplaces)
                 if (p.pending)
@@ -9700,8 +9770,6 @@ namespace ingame
                     if (cplace_read(p, v) && std::hypot(p.wrote[0] - p.old[0], p.wrote[1] - p.old[1]) >= 0.25)
                         ++(std::hypot(v[0] - p.wrote[0], v[1] - p.wrote[1]) < std::hypot(v[0] - p.old[0], v[1] - p.old[1]) ? p.ours : p.theirs);
                 }
-            const bool past = d > r && d >= 1;
-            const float over = past ? d - r : 0.0f;
             if (past)
             {
                 ++t.wall_pushes, ++t.wall_run, t.wall_run_max = std::max(t.wall_run_max, over);
@@ -9710,37 +9778,41 @@ namespace ingame
             }
             else
                 t.wall_run = t.wall_run_set = 0, t.wall_run_max = 0, t.wall_run_min = 1e9f;
-            // (past it: onto it straight toward the middle)
-            const float k = past ? r / d : 1.0f, tx = t.wall_mid[0] + ax * k, ty = t.wall_mid[1] + ay * k;
             if (t.wall_mode == 0)
             {
                 if (!past)
                     return;
-                // (before they're checked, only those holding where he is right now, within 5 cm and as far as he goes in 50 ms)
+                // (before they're checked, only those holding where he is right now, within 5 cm and as far as he goes in 50
+                // ms, and 256 of them looked at at most)
                 const double tolerance = t.cplace_step == 3 ? 0.25 + speed * m * 0.1 : 0.05 + speed * m * 0.05;
                 const std::array<double, 2> to{tx * m, ty * m};
-                unsigned set = 0;
+                unsigned set = 0, looked = 0;
                 for (auto &p : t.cplaces)
                 {
                     std::array<double, 3> v{};
-                    if (set >= 64 || !cplace_read(p, v) || !cplace_tracks(p, v, at, tolerance))
+                    if (set >= 64 || ++looked > 256)
+                        break;
+                    if (!cplace_read(p, v) || !cplace_tracks(p, v, at, tolerance))
                         continue;
                     p.old = {v[0], v[1]}, p.wrote = to, p.pending = true;
                     set += cplace_write(p, to) ? 1 : 0;
                 }
                 t.wall_run_set += set ? 1 : 0;
                 if (t.wall_run == 1 && t.wall_lines < 16)
-                    told("Crash went past the wall in front of the chair (" + std::to_string(static_cast<int>(d)) + " from the middle, the wall " + std::to_string(static_cast<int>(r)) +
-                         ", height " + std::to_string(static_cast<int>(at[2] - t.arena_at[2])) + "): his physics set onto it at " + std::to_string(set) + " places");
-                // (how it went, in frames it set some: he goes on past it as if nothing stopped him, or stays at it)
-                if (set && ((t.wall_run_set >= 4 && over > 80) || (t.wall_run_set >= 12 && t.wall_run_min > 30)))
+                    told("Crash went into the wall in front of the chair (" + std::to_string(static_cast<int>(over)) + " into it, " +
+                         std::to_string(static_cast<int>(std::hypot(ax, ay))) + " from the middle, height " + std::to_string(static_cast<int>(at[2] - t.arena_at[2])) +
+                         "): his physics set out of it at " + std::to_string(set) + " places");
+                // (how it went, in frames it set some: he goes on into it as if nothing stopped him, or stays at it; V1.3.69:
+                // how far inside it is to the nearest point out, which a step along it can't change by much)
+                if (set && ((t.wall_run_set >= 6 && over > 60) || (t.wall_run_set >= 15 && t.wall_run_min > 30)))
                 {
-                    told("setting his physics each frame didn't hold him (" + std::to_string(static_cast<int>(over)) + " past the wall after " + std::to_string(t.wall_run_set) +
+                    ++t.wall_fails;
+                    told("setting his physics each frame didn't hold him (" + std::to_string(static_cast<int>(over)) + " into the wall after " + std::to_string(t.wall_run_set) +
                          " frames): each place is watched as the game sets it instead");
                     t.wall_mode = 1, t.wall_try = 0, t.wall_trying = false;
                 }
                 else if (!t.wall_held_told && t.wall_run >= 20 && t.wall_run_max <= 30)
-                    t.wall_held_told = true, told("the wall holds: Crash stayed at it (at most " + std::to_string(static_cast<int>(t.wall_run_max)) + " past it) for " +
+                    t.wall_held_told = true, told("the wall holds: Crash stayed at it (at most " + std::to_string(static_cast<int>(t.wall_run_max)) + " into it) for " +
                                                   std::to_string(t.wall_run) + " frames in a row");
                 return;
             }
@@ -9748,8 +9820,8 @@ namespace ingame
             {
                 if (!t.wall_trying)
                 {
-                    // (a try starts as he goes past it, once the places are checked: not with him already far past it, where a
-                    // copy of his place set onto the wall can't be told from where the physics goes on from)
+                    // (a try starts as he goes into it, once the places are checked: not with him already deep in it, where a
+                    // copy of his place set out of the wall can't be told from where the physics goes on from)
                     if (!past || over > 30 || t.cplace_step != 3)
                         return;
                     // (the one another try pointed at, or the first not tried yet)
@@ -9758,17 +9830,20 @@ namespace ingame
                                                               t.cplaces.begin());
                     if (t.wall_try >= t.cplaces.size() || IsDebuggerPresent())
                     {
-                        t.wall_mode = 2;
-                        told("none of the " + std::to_string(t.cplaces.size()) + " places that follow Crash held him when watched");
+                        t.wall_mode = 2, t.wall_none_at = now;
+                        told("none of the " + std::to_string(t.cplaces.size()) + " places that follow Crash held him when watched (all tried again in 20 s)");
                         papu_wall_off();
                         return;
                     }
                     auto &p = t.cplaces[t.wall_try];
                     p.tried = true;
+                    // (V1.3.69, after the code review: the watch on the 8 bytes with his y: a double's second 8, or a float's y
+                    // and height when x isn't at the start of 8)
+                    const Address watched = p.kind == 1 ? p.at + 8 : (p.at & 7) ? p.at + 4 : p.at;
                     wall_place = 0;
                     wall_kind = p.kind, wall_far = 0, wall_last_known = false, wall_last_set = false;
                     wall_place = p.at;
-                    const auto threads = wall_debug_register(p.at & ~Address(7));
+                    const auto threads = wall_debug_register(watched);
                     wall_live = true;
                     t.wall_trying = true, t.wall_try_at = now, t.wall_try_stores = wall_stores.load(), t.wall_try_stops = wall_stops.load(), t.wall_try_rearmed = false;
                     t.wall_run = 1, t.wall_run_max = over, t.wall_run_min = 1e9f, t.wall_try_over = 0, t.wall_others_run = 0;
@@ -9776,17 +9851,16 @@ namespace ingame
                          ") as the game sets it, in " + std::to_string(threads) + " threads");
                     return;
                 }
-                // (how the try goes, whether he's past the wall now or held at it: what's drawn is where the watched place
-                // has him once it's where the physics goes on from)
+                // (how the try goes, whether he's in the wall now or held at it: what's drawn is where the watched place has
+                // him once it's where the physics goes on from)
                 const auto &p = t.cplaces[t.wall_try];
                 const unsigned stores = wall_stores.load() - t.wall_try_stores, stops = wall_stops.load() - t.wall_try_stops;
                 const float went = wall_far.load();
-                if (now - t.wall_try_at > 200) // (after its first setting onto the wall)
+                if (now - t.wall_try_at > 200) // (after its first setting out of the wall)
                     t.wall_try_over = std::max(t.wall_try_over, over);
-                const std::string counts = " (" + std::to_string(stops) + " of " + std::to_string(stores) + " stores set onto the wall)";
-                // (V1.3.68: with the place the physics goes on from watched, its copies are at the wall too; with a copy
-                // watched, the place the physics uses (another of them) stays past it: the farthest past the wall of the
-                // others near him, and which)
+                const std::string counts = " (" + std::to_string(stops) + " of " + std::to_string(stores) + " stores set out of the wall)";
+                // (with the place the physics goes on from watched, its copies are at the wall too; with a copy watched, the
+                // place the physics uses (another of them) stays in it: the deepest in it of the others near him, and which)
                 float others = 0;
                 std::size_t other = t.cplaces.size();
                 for (std::size_t i = 0; i < t.cplaces.size() && i < 64; ++i)
@@ -9794,26 +9868,27 @@ namespace ingame
                     std::array<double, 3> v{};
                     if (i == t.wall_try || !cplace_read(t.cplaces[i], v))
                         continue;
-                    const float ox = static_cast<float>(v[0] / m) - t.wall_mid[0], oy = static_cast<float>(v[1] / m) - t.wall_mid[1], od = std::hypot(ox, oy);
+                    const float ox = static_cast<float>(v[0] / m) - t.wall_mid[0], oy = static_cast<float>(v[1] / m) - t.wall_mid[1];
                     if (std::hypot(static_cast<float>(v[0] / m) - at[0], static_cast<float>(v[1] / m) - at[1]) > 300 ||
-                        std::abs(v[2] - (at[2] * m + t.cplaces[i].dz)) > 1.5 || od < 1)
+                        std::abs(v[2] - (at[2] * m + t.cplaces[i].dz)) > 1.5)
                         continue;
-                    const float oo = od - wall_radius(std::atan2(t.wall_dir[0] * oy - t.wall_dir[1] * ox, t.wall_dir[0] * ox + t.wall_dir[1] * oy), front, t.wall_span);
+                    float of = 0, ol = 0;
+                    const float oo = wall_push(ox * ux + oy * uy, oy * ux - ox * uy, front, wall_side_angle, of, ol);
                     if (oo > others)
                         others = oo, other = i;
                 }
                 t.wall_others_run = others >= 30 ? t.wall_others_run + 1 : 0;
                 // (where the physics goes on from, each store is a step from where the wall set the last one: at most the way he
-                // goes in a step, never the gap to where he really is; and what's drawn is at the wall, not past it)
+                // goes in a step, never the gap to where he really is; and what's drawn is at the wall, not in it)
                 std::string why;
                 if (t.wall_others_run >= 20)
-                    why = where(t.cplaces[other].at) + " has him " + std::to_string(static_cast<int>(others)) + " past the wall" + counts + ": that one is tried next";
+                    why = where(t.cplaces[other].at) + " has him " + std::to_string(static_cast<int>(others)) + " into the wall" + counts + ": that one is tried next";
                 else if (went > 50)
                     why = "the game's stores went up to " + std::to_string(static_cast<int>(went)) + " from where the wall had set it" + counts + ": a copy of where the physics has him";
                 else if (t.wall_run >= 10 && over > 100)
-                    why = "Crash went " + std::to_string(static_cast<int>(over)) + " past the wall with it watched" + counts;
+                    why = "Crash went " + std::to_string(static_cast<int>(over)) + " into the wall with it watched" + counts;
                 else if (t.wall_run >= 12 && t.wall_run_min > 25)
-                    why = "Crash stayed " + std::to_string(static_cast<int>(t.wall_run_min)) + " or more past the wall with it watched" + counts;
+                    why = "Crash stayed " + std::to_string(static_cast<int>(t.wall_run_min)) + " or more into the wall with it watched" + counts;
                 else if (stops >= 120 && went > 45)
                     why = "the game's stores went up to " + std::to_string(static_cast<int>(went)) + " from where the wall had set it in " + std::to_string(stops) + " stops" + counts;
                 else if (!stores && now - t.wall_try_at > 1000 && (past || speed > 50))
@@ -9822,7 +9897,7 @@ namespace ingame
                     {
                         // (once more, into threads made since)
                         t.wall_try_rearmed = true, t.wall_try_at = now;
-                        wall_debug_register(p.at & ~Address(7));
+                        wall_debug_register(wall_arm_address.load());
                         return;
                     }
                     why = "the game didn't set it while Crash moved";
@@ -9837,14 +9912,14 @@ namespace ingame
                 {
                     t.wall_mode = 3, t.wall_good = place_owner(p.at);
                     told("the wall holds: " + where(p.at) + " watched, Crash at most " + std::to_string(static_cast<int>(t.wall_try_over)) +
-                         " past it (the game's stores at most " + std::to_string(static_cast<int>(went)) + " from where it had set it" + counts + ")");
+                         " into it (the game's stores at most " + std::to_string(static_cast<int>(went)) + " from where it had set it" + counts + ")");
                 }
                 return;
             }
             // (a watched place that held him: still holding him?)
             if (t.wall_mode == 3 && (wall_far.load() > 80 || (t.wall_run >= 10 && over > 100) || (t.wall_run >= 12 && t.wall_run_min > 25)))
             {
-                told("the watched place stopped holding Crash (" + std::to_string(static_cast<int>(over)) + " past the wall, the game's stores up to " +
+                told("the watched place stopped holding Crash (" + std::to_string(static_cast<int>(over)) + " into the wall, the game's stores up to " +
                      std::to_string(static_cast<int>(wall_far.load())) + " from where it had set it): the places are tried again");
                 t.wall_mode = 1, t.wall_try = 0, t.wall_trying = false, wall_place = 0;
                 for (auto &c : t.cplaces)
@@ -10380,7 +10455,10 @@ namespace ingame
         {
             if (!t.papu || !t.papu_ai || !event_owner(t.papu))
             {
-                wall_live = false; // (V1.3.68: no wall without him, see papu_wall)
+                // (V1.3.68: no wall without him, see papu_wall; V1.3.69, after the code review: nor its watch)
+                wall_live = false;
+                if (wall_arm_address.load() || wall_place.load())
+                    papu_wall_off();
                 return;
             }
             papu_entity = t.papu;
@@ -12852,34 +12930,37 @@ namespace ingame
             c.Rip += 6;
         }
         // (V1.3.68, see papu_wall) the wall's watch stopped just after a store into the watched place: with the wall on and
-        // the place past it, the place is set back onto it right here, in the thread that stored it, before anything reads it.
-        // (A store more than 300 from the last one is left alone: a teleport, or that memory is something else's now. Our own
-        // setting stops here again too, and finds it on the wall)
+        // the place in it, the place is set out of it right here, in the thread that stored it, before anything reads it. (A
+        // store more than 300 from the last one is left alone: a teleport, or that memory is something else's now.) V1.3.69,
+        // after the code review: our own setting stops the watch again and is let through (V1.3.68's could stop it again and
+        // again: a point set onto the wall's line could read back a hair inside it); nothing is read until the wall is on and
+        // the stop is on the place watched now, and it's read the safe way (the watch only says its own 8 bytes are there)
         void wall_apply(const CONTEXT &c)
         {
-            // (only a stop on the place watched now: one on the last place tried can still come as the next is armed. Where
-            // the stop doesn't say, the place is read the safe way first)
-            const auto at = wall_place.load(std::memory_order_acquire);
-            if (!at || (c.Dr3 && c.Dr3 != (at & ~std::uint64_t(7))))
+            if (wall_setting_thread.load(std::memory_order_relaxed) == GetCurrentThreadId())
                 return;
+            const auto at = wall_place.load(std::memory_order_acquire), watched = wall_arm_address.load(std::memory_order_relaxed);
+            if (!at || !watched || c.Dr3 != watched)
+                return;
+            if (!wall_live.load(std::memory_order_relaxed))
+            {
+                wall_last_known.store(false, std::memory_order_relaxed); // (from scratch when it's on again)
+                return;
+            }
             wall_stores.fetch_add(1, std::memory_order_relaxed);
             const int kind = wall_kind.load(std::memory_order_relaxed);
             double x = 0, y = 0;
             if (kind == 1)
             {
                 std::array<double, 2> v{};
-                if (c.Dr3)
-                    std::memcpy(v.data(), reinterpret_cast<const void *>(at), sizeof v);
-                else if (!read(static_cast<Address>(at), v))
+                if (!read(static_cast<Address>(at), v))
                     return;
                 x = v[0], y = v[1];
             }
             else
             {
                 std::array<float, 2> v{};
-                if (c.Dr3)
-                    std::memcpy(v.data(), reinterpret_cast<const void *>(at), sizeof v);
-                else if (!read(static_cast<Address>(at), v))
+                if (!read(static_cast<Address>(at), v))
                     return;
                 x = v[0], y = v[1];
             }
@@ -12892,20 +12973,24 @@ namespace ingame
                 wall_lx.store(lx, std::memory_order_relaxed), wall_ly.store(ly, std::memory_order_relaxed);
                 wall_last_known.store(true, std::memory_order_relaxed), wall_last_set.store(set, std::memory_order_relaxed);
             };
-            if (!known || !(step <= 300) || !wall_live.load(std::memory_order_relaxed))
+            if (!known || !(step <= 300))
                 return keep(px, py, false);
             const float mx = wall_mx.load(std::memory_order_relaxed), my = wall_my.load(std::memory_order_relaxed);
             const float ux = wall_ux.load(std::memory_order_relaxed), uy = wall_uy.load(std::memory_order_relaxed);
-            const float ax = px - mx, ay = py - my, d = std::hypot(ax, ay);
-            const float r = wall_radius(std::atan2(ux * ay - uy * ax, ux * ax + uy * ay), wall_front.load(std::memory_order_relaxed), wall_chair.load(std::memory_order_relaxed));
-            if (d < 1 || d > 1500 || d <= r)
+            const float ax = px - mx, ay = py - my;
+            float tf = 0, tl = 0;
+            const float depth = std::hypot(ax, ay) > 1500 ? 0.0f
+                                                           : wall_push(ax * ux + ay * uy, ay * ux - ax * uy, wall_front.load(std::memory_order_relaxed),
+                                                                       wall_side.load(std::memory_order_relaxed), tf, tl);
+            if (!(depth > 0))
                 return keep(px, py, false);
-            // (how far this store went from the last one set onto the wall: small if the physics goes on from this place)
+            // (how far this store went from the last one set out of the wall: small if the physics goes on from this place)
             if (was_set)
                 for (float went = wall_far.load(std::memory_order_relaxed); step > went && !wall_far.compare_exchange_weak(went, step, std::memory_order_relaxed);)
                 {
                 }
-            const float k = r / d, tx = mx + ax * k, ty = my + ay * k;
+            const float tx = mx + tf * ux - tl * uy, ty = my + tf * uy + tl * ux;
+            wall_setting_thread.store(GetCurrentThreadId(), std::memory_order_relaxed);
             if (kind == 1)
             {
                 const double v[2]{tx * static_cast<double>(body_meters), ty * static_cast<double>(body_meters)};
@@ -12916,9 +13001,21 @@ namespace ingame
                 const float v[2]{tx * body_meters, ty * body_meters};
                 std::memcpy(reinterpret_cast<void *>(at), v, sizeof v);
             }
+            wall_setting_thread.store(0, std::memory_order_relaxed);
             keep(tx, ty, true);
             wall_stops.fetch_add(1, std::memory_order_relaxed);
         }
+        // (V1.3.69, after the code review) debug register 3 as the wall's watch has it now, in a thread the handler goes back
+        // to: Windows puts back the registers the stop saved, so a thread that was in the handler while the watch moved (the
+        // slam's stops are many) would keep the old one
+        void wall_keep_register(CONTEXT &c)
+        {
+            const auto at = wall_arm_address.load(std::memory_order_relaxed);
+            const DWORD64 dr7 = (c.Dr7 & ~0xF00000C0ULL) | (at ? (1ULL << 6) | (1ULL << 28) | (2ULL << 30) : 0);
+            if (c.Dr3 != at || c.Dr7 != dr7)
+                c.Dr3 = at, c.Dr7 = dr7, c.ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+        }
+        LONG who_single_step(CONTEXT *context, std::uint64_t page);
         LONG CALLBACK who_handler(EXCEPTION_POINTERS *e)
         {
             auto *record = e->ExceptionRecord;
@@ -12958,9 +13055,17 @@ namespace ingame
             }
             if (record->ExceptionCode != EXCEPTION_SINGLE_STEP)
                 return EXCEPTION_CONTINUE_SEARCH;
+            // (V1.3.69: and the wall's watch kept as it is now in every thread going on from here, see wall_keep_register)
+            const LONG result = who_single_step(context, page);
+            if (result == EXCEPTION_CONTINUE_EXECUTION)
+                wall_keep_register(*context);
+            return result;
+        }
+        LONG who_single_step(CONTEXT *context, std::uint64_t page)
+        {
             // (V1.3.68) the wall's watch, see wall_apply (and on to the others if one of theirs is in the same stop; ours either
-            // way, never passed on)
-            const bool wall_stop = context->Dr6 & 8;
+            // way, never passed on; V1.3.69, after the code review: only with debug register 3 on, not a status bit left over)
+            const bool wall_stop = (context->Dr6 & 8) && (context->Dr7 & 0x40);
             if (wall_stop)
             {
                 context->Dr6 &= ~8ULL;
