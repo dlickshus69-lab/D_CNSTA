@@ -4,7 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Ripper Roo's patterns change (harder bosses on):** each time a stage starts (the fight's start, a death, a hit), he gets two new patterns, picked at random from 64 loops over his platforms (never the game's own V). Each time round he does one or the other.
-- **He sometimes hops onto Crash:** now and then (8 s apart at least) his next hop is to the platform Crash is on, then he goes back to his pattern.
-- **No more hopping backwards without turning:** his pattern is only changed while he's standing, not as a hop starts.
-- **`/roo_files` (for the real Nitro):** type it in the console (F1); it writes `CrashNSTAP\research\roo_nitro_files.zip` in the game's folder. Send the zip with your log.
+- **Ripper Roo faces the way he hops again:** he decides how to turn for a hop as the hop before it starts, so his patterns are now changed only at moments he hasn't read them yet (between stages, and round again in two steps).
+- **His hop onto Crash is decided two hops ahead** for the same reason, so he faces you as he comes. Still now and then only.
+- Same as V1.4.5 otherwise: new random patterns every stage (never the game's V), one of two each time round.
+- Thanks for `/roo_files`: the Nitro work goes on from it (more in the chat).

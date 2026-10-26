@@ -11707,7 +11707,10 @@ namespace ingame
             std::map<Address, int> platform_of;
             std::vector<std::array<float, 3>> platforms;
             std::vector<std::array<int, 4>> library;
-            std::array<std::array<int, 4>, 2> chosen{};
+            std::array<std::array<std::array<int, 4>, 2>, 4> chosen_for{};
+            std::array<int, 4> pending_pattern{};
+            unsigned pending_rot = 0;
+            bool pending = false, prepared = false;
             bool pool_ready = false, pool_told = false, pool_changed = false, landed_event = false;
             int active = -1, crash_slot = -1, crash_other = -1;
             std::uint64_t crash_hop_at = 0;
@@ -12175,123 +12178,192 @@ namespace ingame
                 line << "), " << r.library.size() << " loops to pick from";
                 std::cout << line.str() << "\n";
             }
-            const auto active_slot = [&](unsigned k) { return static_cast<std::size_t>(r.active) * 4 + k; };
-            const auto undo_crash = [&]() {
-                if (r.crash_slot >= 0)
-                    swap_slots(static_cast<std::size_t>(r.crash_slot), static_cast<std::size_t>(r.crash_other));
-                r.crash_slot = r.crash_other = -1;
-            };
             // (with the rules off: every entry back where the game had it)
             if (r.pool_ready && !rules && r.pool_changed)
             {
-                undo_crash();
                 for (std::size_t k = 0; k < r.slots.size(); ++k)
                     write(r.slots[k], r.pool_original[k]);
-                r.pool_changed = false;
+                r.pool_changed = false, r.crash_slot = r.crash_other = -1, r.pending = false;
             }
-            // (a pattern into the active stage's list, starting next to `from`: entries only swapped)
-            const auto set_pattern = [&](const std::array<int, 4> &p, int from) -> bool {
-                std::vector<unsigned> starts;
-                for (unsigned rot = 0; rot < 4; ++rot)
-                    if (from < 0 || neighbors(from, p[rot]))
-                        starts.push_back(rot);
-                if (starts.empty())
-                    return false;
-                const unsigned rot = starts[rng() % starts.size()];
-                for (unsigned k = 0; k < 4; ++k)
+            // (V1.4.6, Eric's V1.4.5 run: "he's also not facing, sometimes he's not facing the direction that he's going ...
+            // I can't really tell if he's jumping, if he's aiming for me or not"; the log: 13 of 77 hops 28 to 137 degrees
+            // off the way he hopped, every one the first hop after V1.4.5 changed his list while he stood (a stage starting,
+            // or round again on its last platform), every other hop 0: the way he turns for a hop is worked out as the hop
+            // before it starts. So an entry is read twice, as the next one when his hop to the one before it starts, then as
+            // his target, and may only change outside those two reads: a stage's whole list while no stage is on (after a
+            // hit, before the next stage starts; while the fight is off, before it starts again), round again in two steps
+            // (standing on the third platform, the first two; on the last, the last two), and a hop onto Crash two hops
+            // ahead (standing on the first or second platform, the one after next))
+            const auto stage_slot = [&](int stage, unsigned k) { return static_cast<std::size_t>(stage) * 4 + k; };
+            const auto handle_platform = [&](Address h) {
+                const auto it = r.platform_of.find(h);
+                return it == r.platform_of.end() ? -1 : it->second;
+            };
+            // (pattern p from rotation rot into stage's entries ks, each taken from a slot not in keep, on a copy of the pool)
+            const auto place = [&](std::vector<Address> &values, int stage, const std::array<int, 4> &p, unsigned rot, std::initializer_list<unsigned> ks,
+                                   std::set<std::size_t> keep) -> bool {
+                for (const unsigned k : ks)
                 {
+                    const auto at = stage_slot(stage, k);
                     const int want = p[(rot + k) % 4];
-                    if (slot_platform(active_slot(k)) == want)
-                        continue;
-                    for (std::size_t j = 0; j < r.slots.size(); ++j)
-                        if ((r.slot_stage[j] != r.active || j > active_slot(k)) && slot_platform(j) == want)
-                        {
-                            swap_slots(active_slot(k), j);
-                            break;
-                        }
+                    if (handle_platform(values[at]) != want)
+                    {
+                        bool done = false;
+                        for (std::size_t j = 0; j < values.size() && !done; ++j)
+                            if (j != at && !keep.count(j) && handle_platform(values[j]) == want)
+                                std::swap(values[at], values[j]), done = true;
+                        if (!done)
+                            return false;
+                    }
+                    keep.insert(at);
                 }
-                r.pool_changed = true;
                 return true;
             };
-            const auto pattern_text = [&]() {
+            const auto pool_values = [&]() {
+                std::vector<Address> values(r.slots.size());
+                for (std::size_t k = 0; k < r.slots.size(); ++k)
+                    values[k] = value<Address>(r.slots[k]);
+                return values;
+            };
+            const auto commit = [&](const std::vector<Address> &values) {
+                for (std::size_t k = 0; k < r.slots.size(); ++k)
+                    if (value<Address>(r.slots[k]) != values[k])
+                        write(r.slots[k], values[k]);
+                r.pool_changed = true;
+            };
+            const auto pattern_text = [&](int stage) {
                 std::string text;
                 for (unsigned k = 0; k < 4; ++k)
-                    text += (k ? ", " : "") + platform_name(slot_platform(active_slot(k)));
+                    text += (k ? ", " : "") + platform_name(slot_platform(stage_slot(stage, k)));
                 return text;
             };
             std::array<float, 3> roo_at{};
             const int roo_on = r.pool_ready && roo_where(r.roo, roo_at) ? platform_near(roo_at) : -1;
             const bool landed = r.landed_event;
             r.landed_event = false;
+            int on_stage = -1;
             for (std::size_t i = 0; i < r.stages.size(); ++i)
+                if (r.stages[i].on_at && value<unsigned char>(r.stages[i].c + r.stages[i].on_at))
+                    on_stage = static_cast<int>(i);
+            if (on_stage != r.active)
+                r.crash_slot = r.crash_other = -1, r.pending = false, r.stage_hops = 0;
+            if (on_stage >= 0 && on_stage != r.active)
+                r.prepared = false;
+            r.active = on_stage;
+            if (r.pool_ready && rules && r.slots.size() == r.stages.size() * 4)
             {
-                auto &st = r.stages[i];
-                const bool on = st.on_at && value<unsigned char>(st.c + st.on_at);
-                const bool started = on && !st.was_on;
-                st.was_on = on;
-                if (!on)
+                // no stage on: the next one's whole list, starting next to where he'll be
+                if (on_stage < 0 && !r.prepared && (!fight || react))
                 {
-                    if (r.active == static_cast<int>(i))
-                        undo_crash(), r.active = -1;
-                    continue;
-                }
-                if (!r.pool_ready || !rules)
-                    continue;
-                const int index = st.index_at ? value<int>(st.c + st.index_at) : 0;
-                if (started)
-                {
-                    // a stage starts: its two patterns, and one of them to start with
-                    undo_crash();
-                    r.active = static_cast<int>(i), r.stage_hops = 0;
+                    const int counter = value<int>(r.ai + r.counter_at);
+                    const int n = static_cast<int>(r.stages.size());
+                    const int next = fight ? ((counter % n) + n) % n : 0;
+                    const int from = fight ? roo_on : platform_near({377, 313, 76}); // (after a death he starts on the middle right)
+                    auto &two = r.chosen_for[static_cast<std::size_t>(next) % r.chosen_for.size()];
                     const auto a = rng() % r.library.size();
                     auto b = rng() % r.library.size();
                     for (unsigned tries = 0; b == a && tries < 8; ++tries)
                         b = rng() % r.library.size();
-                    r.chosen = {r.library[a], r.library[b]};
+                    two = {r.library[a], r.library[b]};
+                    bool set = false;
                     const unsigned pick = rng() % 2;
-                    const bool set = set_pattern(r.chosen[pick], roo_on) || set_pattern(r.chosen[1 - pick], roo_on);
-                    if (r.control_lines < 80)
-                        ++r.control_lines, std::cout << "Roo control: " << st.name << " starts" << (set ? "" : " (as the game has it: no pattern starts next to him)") << ": " << pattern_text()
-                                                     << " (from " << platform_name(roo_on) << ")\n";
-                    continue;
-                }
-                if (r.active != static_cast<int>(i) || !landed)
-                    continue;
-                ++r.stage_hops;
-                // back to his pattern after a hop onto Crash
-                if (r.crash_slot >= 0)
-                {
-                    undo_crash();
-                    continue;
-                }
-                if (index == static_cast<int>(st.count) - 1)
-                {
-                    // round again: one of the two, starting next to where he stands
-                    const unsigned pick = rng() % 2;
-                    const bool set = set_pattern(r.chosen[pick], roo_on) || set_pattern(r.chosen[1 - pick], roo_on);
-                    if (r.control_lines < 80)
-                        ++r.control_lines, std::cout << "Roo control: " << st.name << " round again" << (set ? "" : " (the same: no pattern starts next to him)") << ": " << pattern_text() << "\n";
-                    continue;
-                }
-                // now and then, onto Crash
-                std::array<float, 3> crash{};
-                const auto now_ms = now;
-                if (r.stage_hops >= 2 && now_ms - r.crash_hop_at >= 8000 && rng() % 8 == 0 && player() && roo_where(player(), crash))
-                {
-                    const int on_crash = platform_near(crash);
-                    const unsigned next = static_cast<unsigned>(index + 1) % st.count, after = (next + 1) % st.count;
-                    const int after_platform = slot_platform(active_slot(after));
-                    if (on_crash >= 0 && neighbors(roo_on, on_crash) && neighbors(on_crash, after_platform) && slot_platform(active_slot(next)) != on_crash)
-                        for (std::size_t j = 0; j < r.slots.size(); ++j)
-                            if (r.slot_stage[j] != r.active && slot_platform(j) == on_crash)
+                    for (unsigned w = 0; w < 2 && !set; ++w)
+                    {
+                        const auto &pat = two[(pick + w) % 2];
+                        std::vector<unsigned> rots;
+                        for (unsigned rot = 0; rot < 4; ++rot)
+                            if (from < 0 || neighbors(from, pat[rot]))
+                                rots.push_back(rot);
+                        std::shuffle(rots.begin(), rots.end(), rng);
+                        for (const unsigned rot : rots)
+                        {
+                            auto values = pool_values();
+                            if (place(values, next, pat, rot, {0, 1, 2, 3}, {}))
                             {
-                                swap_slots(active_slot(next), j);
-                                r.crash_slot = static_cast<int>(active_slot(next)), r.crash_other = static_cast<int>(j), r.crash_hop_at = now_ms, ++r.crash_hops, r.pool_changed = true;
-                                if (r.control_lines < 80)
-                                    ++r.control_lines, std::cout << "Roo control: his next hop is onto Crash, on " << platform_name(on_crash) << " (then " << platform_name(after_platform)
-                                                                 << " as his pattern goes)\n";
+                                commit(values), set = true;
                                 break;
                             }
+                        }
+                    }
+                    r.prepared = true;
+                    if (r.control_lines < 80)
+                        ++r.control_lines, std::cout << "Roo control: " << r.stages[static_cast<std::size_t>(next)].name << " made ready" << (set ? "" : " (as it was: no pattern fits)") << ": "
+                                                     << pattern_text(next) << " (from " << platform_name(from) << ")\n";
+                }
+                if (on_stage >= 0 && landed)
+                {
+                    auto &st = r.stages[static_cast<std::size_t>(on_stage)];
+                    const int index = st.index_at ? value<int>(st.c + st.index_at) : -1;
+                    ++r.stage_hops;
+                    // back from a hop onto Crash, once he's on it
+                    if (r.crash_slot >= 0 && r.crash_slot == static_cast<int>(stage_slot(on_stage, static_cast<unsigned>(std::max(index, 0)))))
+                    {
+                        swap_slots(static_cast<std::size_t>(r.crash_slot), static_cast<std::size_t>(r.crash_other));
+                        r.crash_slot = r.crash_other = -1;
+                    }
+                    auto &two = r.chosen_for[static_cast<std::size_t>(on_stage) % r.chosen_for.size()];
+                    if (index == 2 && !r.pending)
+                    {
+                        // round again, first step: its first two, starting next to its last (where he'll stand)
+                        const int last = slot_platform(stage_slot(on_stage, 3));
+                        const unsigned pick = rng() % 2;
+                        for (unsigned w = 0; w < 2 && !r.pending; ++w)
+                        {
+                            const auto &pat = two[(pick + w) % 2];
+                            std::vector<unsigned> rots;
+                            for (unsigned rot = 0; rot < 4; ++rot)
+                                if (neighbors(last, pat[rot]))
+                                    rots.push_back(rot);
+                            std::shuffle(rots.begin(), rots.end(), rng);
+                            for (const unsigned rot : rots)
+                            {
+                                auto values = pool_values();
+                                if (!place(values, on_stage, pat, rot, {0, 1}, {stage_slot(on_stage, 3)}))
+                                    continue;
+                                // (and the second step's on the same copy, so it can be done)
+                                auto later = values;
+                                if (!place(later, on_stage, pat, rot, {2, 3}, {stage_slot(on_stage, 0), stage_slot(on_stage, 1)}))
+                                    continue;
+                                commit(values);
+                                r.pending = true, r.pending_pattern = pat, r.pending_rot = rot;
+                                break;
+                            }
+                        }
+                    }
+                    else if (index == 3 && r.pending)
+                    {
+                        // second step: its last two
+                        auto values = pool_values();
+                        const bool done = place(values, on_stage, r.pending_pattern, r.pending_rot, {2, 3}, {stage_slot(on_stage, 0), stage_slot(on_stage, 1)});
+                        if (done)
+                            commit(values);
+                        r.pending = false;
+                        if (r.control_lines < 80)
+                            ++r.control_lines, std::cout << "Roo control: " << st.name << " round again" << (done ? "" : " (half done)") << ": " << pattern_text(on_stage) << "\n";
+                    }
+                    else if ((index == 0 || index == 1) && r.crash_slot < 0 && r.stage_hops >= 2 && now - r.crash_hop_at >= 8000 && rng() % 6 == 0)
+                    {
+                        // now and then, onto Crash two hops ahead: the platform he's on, next to the one before and after it
+                        std::array<float, 3> crash{};
+                        if (player() && roo_where(player(), crash))
+                        {
+                            const int on_crash = platform_near(crash);
+                            const unsigned target = static_cast<unsigned>(index) + 2;
+                            const int before = slot_platform(stage_slot(on_stage, target - 1)), after = slot_platform(stage_slot(on_stage, (target + 1) % 4));
+                            const bool fits = on_crash >= 0 && on_crash != slot_platform(stage_slot(on_stage, target)) && neighbors(before, on_crash) &&
+                                              (target == 3 || neighbors(on_crash, after));
+                            for (std::size_t j = 0; fits && j < r.slots.size(); ++j)
+                                if (r.slot_stage[j] != on_stage && slot_platform(j) == on_crash)
+                                {
+                                    swap_slots(stage_slot(on_stage, target), j);
+                                    r.crash_slot = static_cast<int>(stage_slot(on_stage, target)), r.crash_other = static_cast<int>(j), r.crash_hop_at = now, ++r.crash_hops,
+                                    r.pool_changed = true;
+                                    if (r.control_lines < 80)
+                                        ++r.control_lines, std::cout << "Roo control: his hop after next is onto Crash, on " << platform_name(on_crash) << "\n";
+                                    break;
+                                }
+                        }
+                    }
                 }
             }
             // his pace at a boss speed: hops and the wait after each landing shorter
