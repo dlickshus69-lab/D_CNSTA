@@ -5725,6 +5725,12 @@ namespace ingame
             std::uint64_t wall_rearm_at = 0, wall_respawn_at = 0;
             // V1.3.76 (see cplace_read): the places dropped, and the settings left out as the place changed while it was set
             unsigned wall_dropped = 0, wall_raced = 0;
+            // V1.3.79 (research, see papu_wall_research): Crash pushed by the stick but hardly moving by the wall (since
+            // when, when last told, how many told); the farthest toward the throne he got by side (20 a side's step, from
+            // -260 to 260), on the floor and above it (and how high then)
+            std::uint64_t stuck_since = 0, stuck_told_at = 0;
+            unsigned stuck_lines = 0;
+            std::array<float, 26> side_floor{}, side_above{}, side_above_z{};
             Address ms_wait_seen = 0;
             float ms_wait_last = 0;
             unsigned slams_seen = 0;
@@ -9561,6 +9567,9 @@ namespace ingame
         std::atomic<float> wall_mx{0}, wall_my{0}, wall_ux{1}, wall_uy{0}, wall_front{0}, wall_far{0}, wall_lx{0}, wall_ly{0};
         // V1.3.76 (see wall_apply): where Crash is drawn, each frame the wall is on
         std::atomic<float> wall_cx{0}, wall_cy{0};
+        // V1.3.79 (see wall_outline): the wall drawn in the game while it's up, at the arena's floor's height
+        std::atomic_bool wall_shown{false};
+        std::atomic<float> wall_floor{0};
         std::atomic<DWORD> wall_setting_thread{0};
         std::atomic_uint wall_stores{0}, wall_stops{0};
         // V1.3.69 (Eric's V1.3.68 run: "it blocks, but ... when you try to approach it to the side of the chair, he like gets
@@ -9743,6 +9752,16 @@ namespace ingame
                 if (const auto cut = wall_stick_cut.load())
                     out << "; the stick's push into the wall taken out in " << cut << " polls (it moved him the camera's way in " << t.stick_agree << " of " << t.stick_samples
                         << " checks)";
+                // (V1.3.79, see papu_wall_research: by side, 20 a step, the farthest toward the throne on the floor / above it)
+                {
+                    std::ostringstream sides;
+                    for (std::size_t b = 0; b < t.side_floor.size(); ++b)
+                        if (t.side_floor[b] > 0 || t.side_above[b] > 0)
+                            sides << " " << static_cast<int>(b * 20) - 250 << ": " << static_cast<int>(t.side_floor[b]) << "/" << static_cast<int>(t.side_above[b]) << "@"
+                                  << static_cast<int>(t.side_above_z[b]);
+                    if (!sides.str().empty())
+                        out << "; the farthest toward the throne by side (on the floor / above it, at height):" << sides.str();
+                }
                 std::cout << out.str() << "\n" << std::flush;
             };
             // (as the fight goes back to his throne or he comes into the arena again: the research and the wall so far.
@@ -10047,6 +10066,77 @@ namespace ingame
             }
             wall_stick_on = t.stick_trusted;
         }
+        // V1.3.79 (research: Eric's V1.3.78 run, "still happening"; his clip: by the bench beside the throne, right of it,
+        // Crash ran on the spot for a second, the stick pushed toward the wall, and Papu Papu's spin got him; nothing of
+        // his went past the wall that visit, so the stick's steering or the room itself held him there, and where the
+        // wall is against the throne and the benches can't be seen): the farthest toward the throne he gets by side, on the
+        // floor and above it (for the summary, see papu_chair), and each time the stick pushes him (over half way) but he
+        // hardly moves (under 80 a second) for 0.4 s within 120 of the wall: where he is against the wall (straight and
+        // rounded), where the stick sends him and how much of that its steering took out, and how he moves (12 at most a
+        // visit, 1.5 s apart; the first with the camera's view and projection too)
+        template <class Told>
+        void papu_wall_research(BossTuning &t, bool on, bool paused, const std::array<float, 3> &at, std::uint64_t now, const Told &told)
+        {
+            if (!on || paused || !t.wall_known)
+            {
+                t.stuck_since = 0;
+                return;
+            }
+            const float ux = t.wall_dir[0], uy = t.wall_dir[1], front = wall_front_share * t.wall_span;
+            const float ax = at[0] - t.wall_mid[0], ay = at[1] - t.wall_mid[1], f = ax * ux + ay * uy, l = ay * ux - ax * uy;
+            const float h = at[2] - (t.arena_known ? t.arena_at[2] : wall_floor.load());
+            if (f > 100)
+            {
+                const auto b = static_cast<std::size_t>(std::clamp((l + 260) / 20, 0.0f, 25.0f));
+                if (h < 15)
+                    t.side_floor[b] = std::max(t.side_floor[b], f);
+                else if (h < 150 && f > t.side_above[b])
+                    t.side_above[b] = f, t.side_above_z[b] = h;
+            }
+            float tf = 0, tl = 0, nf = 1, nl = 0;
+            const float rounded = wall_shape(f, l, front, tf, tl, nf, nl);
+            const float sx = wall_stick_in_x.load(), sy = wall_stick_in_y.load(), stick = std::hypot(sx, sy);
+            const float vx = t.crash_v[0], vy = t.crash_v[1], v = std::hypot(vx, vy);
+            if (!(stick > 0.5f && v < 80 && (front - f < 120 || rounded > -120)))
+            {
+                t.stuck_since = 0;
+                return;
+            }
+            if (!t.stuck_since)
+                t.stuck_since = now;
+            if (now - t.stuck_since < 400 || now - t.stuck_told_at < 1500 || t.stuck_lines >= 12)
+                return;
+            t.stuck_told_at = now, ++t.stuck_lines;
+            // (the stick the camera's way, flat; in the wall's terms: toward the throne, and to the side, where + is the
+            // side with l above 0)
+            const float rx = wall_stick_rx.load(), ry = wall_stick_ry.load(), fx = wall_stick_fx.load(), fy = wall_stick_fy.load();
+            const float wx = rx * sx + fx * sy, wy = ry * sx + fy * sy, w = std::hypot(wx, wy);
+            const auto way = [&](float x, float y) {
+                const float along = x * ux + y * uy, side = y * ux - x * uy;
+                return std::to_string(static_cast<int>(std::lround(std::atan2(side, along) * 57.2958f)));
+            };
+            const float nx = nf * ux - nl * uy, ny = nf * uy + nl * ux, into = w > 1e-3f ? (wx * nx + wy * ny) : 0;
+            const float keep = std::clamp((-rounded - 2) / wall_stick_zone, 0.0f, 1.0f);
+            const float taken = into > 0 && wall_stick_on.load() ? (1 - keep) * into / std::max(w, 1e-3f) : 0.0f;
+            std::ostringstream line;
+            line << std::fixed << std::setprecision(0) << "Crash pushed by the stick but hardly moving, " << seconds(now - t.entered) << " into the level, at " << f
+                 << " toward the throne and " << l << " to the side (height " << h << "; the straight wall " << front - f << " ahead, the rounded one ";
+            if (rounded < -1e8f)
+                line << "not there";
+            else
+                line << -rounded << " ahead, its way out at " << std::lround(std::atan2(nl, nf) * 57.2958f) << " degrees";
+            line << "): the stick " << std::setprecision(2) << stick << std::setprecision(0) << " toward " << way(wx, wy)
+                 << " degrees (0: toward the throne, 90: to the side above 0), its steering " << (wall_stick_on.load() ? "took out " : "off, took out ")
+                 << std::lround(taken * 100) << "% of it; he moves " << v << " a second toward " << way(vx, vy) << " degrees; at (" << at[0] << ", " << at[1] << ")";
+            if (t.stuck_lines == 1)
+            {
+                const auto view = scene();
+                line << std::setprecision(4) << "; the camera's view and projection:";
+                for (const float c : view.view_projection)
+                    line << " " << c;
+            }
+            told(line.str());
+        }
         // V1.3.68 (Eric: "put the invisible wall basically in front of the chair, not so ... we're trying to reposition crash.
         // It's just an invisible wall where it still makes a circle shape around the arena"): with the harder rules on, an
         // invisible wall in front of Papu Papu's throne (V1.3.70: one straight line across the hut, see wall_push), at any
@@ -10066,6 +10156,10 @@ namespace ingame
             if (here)
                 wall_cx = at[0], wall_cy = at[1]; // (V1.3.76, see wall_apply)
             wall_live = on && (t.wall_watch == 1 || t.wall_watch == 2);
+            // (V1.3.79: drawn in the game while it's up, see wall_outline)
+            wall_shown = state.boss_rules && t.wall_known && here;
+            if (t.arena_known)
+                wall_floor = t.arena_at[2];
             if (!state.boss_rules || !here)
             {
                 wall_stick_on = false; // (V1.3.74)
@@ -10103,6 +10197,7 @@ namespace ingame
             };
             // (V1.3.74: the wall in the stick, see papu_wall_stick: it needs none of his physics' places)
             papu_wall_stick(t, on, state.menu_paused != 0, at, told);
+            papu_wall_research(t, on, state.menu_paused != 0, at, now, told); // (V1.3.79)
             // (V1.3.71: the watch tried again after a new read, the kind of place kept before first; V1.3.72: the parts of the
             // game's memory the places were in, read first)
             const auto start_over = [&] {
@@ -10958,7 +11053,7 @@ namespace ingame
             {
                 // (V1.3.68: no wall without him, see papu_wall; V1.3.69, after the code review: nor its watch; V1.3.74: nor in
                 // the stick)
-                wall_live = false, wall_stick_on = false;
+                wall_live = false, wall_stick_on = false, wall_shown = false; // (V1.3.79: nor drawn)
                 if (wall_arm_address.load() || wall_place.load())
                     papu_wall_off();
                 return;
@@ -11483,6 +11578,7 @@ namespace ingame
                 papu_steer_off(), papu_slam_off();     // (V1.3.52, V1.3.53: the same)
                 papu_wall_off();                       // (V1.3.68: the wall's watch on Crash's physics, see papu_wall)
                 wall_stick_on = false, wall_stick_cut = 0; // (V1.3.74: and in the stick, see papu_wall_stick)
+                wall_shown = false;                         // (V1.3.79: and drawn, see wall_outline)
                 t = {};
                 t.level = boss, t.entered = now;
                 // (V1.3.28) Papu Papu's stomps from here on only
@@ -15609,6 +15705,7 @@ namespace ingame
         id_list_restore("the client stopped");
         papu_who_off(boss_tuning, "the client stopped");
         wall_live = false, wall_place = 0, wall_stick_on = false; // (V1.3.68: the wall's watch sets nothing more, see wall_apply; V1.3.74: nor the stick)
+        wall_shown = false;                                       // (V1.3.79: nor is it drawn)
         if (game_thread)
             boss_tint_off(boss_tuning, true);
         else if (boss_tuning.tint_bundle)
@@ -15679,6 +15776,39 @@ namespace ingame
         x = static_cast<short>(std::lround(nx * 32767.0f)), y = static_cast<short>(std::lround(ny * 32767.0f));
         wall_stick_cut.fetch_add(1, std::memory_order_relaxed);
         return true;
+    }
+    // V1.3.79 (see papu_wall_research): Papu Papu's wall as it's drawn in the game while it's up: the straight wall
+    // across the hut, from bench to bench, where his physics is set back past it (hard), and its two rounded ends,
+    // where only the stick is steered (see wall_shape), each along the arena's floor, 120 high
+    std::vector<WallLine> wall_outline()
+    {
+        std::vector<WallLine> lines;
+        if (!wall_shown.load())
+            return lines;
+        const float mx = wall_mx.load(), my = wall_my.load(), ux = wall_ux.load(), uy = wall_uy.load(), front = wall_front.load(), floor = wall_floor.load();
+        if (!(front > 1) || !std::isfinite(mx) || !std::isfinite(my) || !(std::abs(std::hypot(ux, uy) - 1) < 0.01f))
+            return lines;
+        const auto point = [&](float f, float l) { return std::array<float, 3>{mx + f * ux - l * uy, my + f * uy + l * ux, floor}; };
+        const float round = front * (wall_round_share / wall_front_share), bench = front * (wall_bench_share / wall_front_share);
+        const float f0 = front - round, r0 = bench - round, side = std::sqrt(std::max(0.0f, r0 * r0 - f0 * f0));
+        const float across = std::sqrt(std::max(0.0f, bench * bench - front * front)), end = std::atan2(side, f0);
+        WallLine straight;
+        straight.hard = true, straight.height = 120;
+        for (int i = 0; i <= 16; ++i)
+            straight.points.push_back(point(front, -across + 2 * across * i / 16));
+        lines.push_back(std::move(straight));
+        for (const float s : {-1.0f, 1.0f})
+        {
+            WallLine rounded;
+            rounded.height = 120;
+            for (int i = 0; i <= 16; ++i)
+            {
+                const float a = end * i / 16;
+                rounded.points.push_back(point(f0 + round * std::cos(a), s * (side + round * std::sin(a))));
+            }
+            lines.push_back(std::move(rounded));
+        }
+        return lines;
     }
     bool gimmick_stage()
     {

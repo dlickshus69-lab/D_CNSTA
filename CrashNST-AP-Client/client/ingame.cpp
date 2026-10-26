@@ -1567,6 +1567,29 @@ namespace
                                 if (!(i & bit))
                                     r.line(points[i][0], points[i][1], points[i | bit][0], points[i | bit][1], box.color ? box.color : 0xff20d8ff);
                 }
+                // V1.3.79: Papu Papu's invisible wall, drawn while it's up (Harder bosses): a see-through fence, red where
+                // Crash's physics is set back past it, yellow where only the stick is steered (its rounded ends)
+                for (const auto &wall : ingame::wall_outline())
+                {
+                    const unsigned fill = wall.hard ? 0x302828ffu : 0x3020d0ffu, edge = wall.hard ? 0xd02828ffu : 0xd020d0ffu;
+                    for (std::size_t i = 0; i + 1 < wall.points.size(); ++i)
+                    {
+                        const auto &a = wall.points[i], &b = wall.points[i + 1];
+                        const std::array<float, 3> at{a[0], a[1], a[2] + wall.height}, bt{b[0], b[1], b[2] + wall.height};
+                        float ax = 0, ay = 0, bx = 0, by = 0, atx = 0, aty = 0, btx = 0, bty = 0;
+                        if (!project(scene.view_projection, a, ax, ay, r.width, r.height) || !project(scene.view_projection, b, bx, by, r.width, r.height) ||
+                            !project(scene.view_projection, at, atx, aty, r.width, r.height) || !project(scene.view_projection, bt, btx, bty, r.width, r.height))
+                            continue;
+                        if (r.draw.size() + 6 <= Renderer::max_vertices)
+                            for (const auto &[x, y] : {std::pair{ax, ay}, std::pair{bx, by}, std::pair{btx, bty}, std::pair{ax, ay}, std::pair{btx, bty}, std::pair{atx, aty}})
+                                r.draw.push_back(r.vertex(x, y, 0.00024f, 0.00024f, fill));
+                        r.line(ax, ay, bx, by, edge), r.line(atx, aty, btx, bty, edge);
+                        if (i % 4 == 0)
+                            r.line(ax, ay, atx, aty, edge);
+                        if (i + 2 == wall.points.size())
+                            r.line(bx, by, btx, bty, edge);
+                    }
+                }
                 const auto key = ingame::level_key(scene.zone);
                 if (const auto current = level(key))
                 {
