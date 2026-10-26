@@ -11685,7 +11685,7 @@ namespace ingame
             struct Stage
             {
                 Address owner = 0, c = 0, data = 0, entries = 0;
-                unsigned on_at = 0, index_at = 0, jump_at = 0, count = 0;
+                unsigned on_at = 0, index_at = 0, jump_at = 0, count = 0, timer_at = 0;
                 int last_index = -1;
                 bool reversed = false;
                 std::string name, order;
@@ -11697,6 +11697,9 @@ namespace ingame
             std::uint64_t next_stages = 0;
             std::map<Address, float> game_floats, pace_set; // (his pace's settings as the game had them, and as set)
             std::set<Address> pace_wild;
+            Matrix air{};
+            bool air_known = false;
+            unsigned timer_lines = 0;
             std::vector<std::pair<std::string, Address>> watch_ints, watch_bytes;
             std::map<Address, int> watch_last;
         } roo_research;
@@ -11799,16 +11802,16 @@ namespace ingame
         // where a list's entry is: the thing itself or what its handle leads to, if it's on his arena's floor
         bool roo_entry_where(Address e, std::array<float, 3> &at)
         {
-            for (const auto thing : {e, resolve(e)})
+            // (V1.4.4: what its handle leads to first, and only a place from a real transform: V1.4.2 read the handle's own
+            // words as one and named every platform front-middle)
+            for (const auto thing : {resolve(e), e})
             {
                 if (thing < 0x10000 || thing > 0x7ffffffeffffULL || !readable(thing, 48))
                     continue;
                 Matrix m{};
-                std::array<float, 3> p{};
-                if (entity_matrix(thing, m))
-                    p = {m[12], m[13], m[14]};
-                else if (!read(thing + 32, p))
+                if (!entity_matrix(thing, m) || !value<Address>(thing + 48))
                     continue;
+                const std::array<float, 3> p{m[12], m[13], m[14]};
                 if (std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]) && std::abs(p[0]) < 2000 && std::abs(p[1]) < 2000 && p[2] > -100 && p[2] < 400)
                 {
                     at = p;
@@ -11884,6 +11887,7 @@ namespace ingame
                         st.owner = owner, st.c = c, st.name = name;
                         const auto meta = value<Address>(c + 56);
                         st.on_at = field_offset(meta, "Bool_id_xqbcbtlk", 1), st.index_at = field_offset(meta, "Int_id_e1snv0nq", 4);
+                        st.timer_at = field_offset(meta, "InternalStore__timer_id_s7cz8gdi", 8);
                         const auto data = value<Address>(c + 16);
                         if (data && typed(data, 0x13bbb10))
                         {
@@ -11894,6 +11898,16 @@ namespace ingame
                             std::string how;
                             if (v && roo_list_find(v, st.entries, st.count, how))
                                 st.order = roo_stage_order(st);
+                            // (V1.4.4 research: what a list entry's handle leads to)
+                            if (st.entries && r.stages.empty())
+                            {
+                                const auto e = value<Address>(st.entries), thing = resolve(e);
+                                std::ostringstream w;
+                                w << "Roo research: a platform entry 0x" << std::hex << e << " leads to 0x" << thing << " [" << object_brief(thing, 0x100, 4) << "]:";
+                                for (unsigned k = 0; thing && readable(thing, 0x100) && k < 32; ++k)
+                                    w << " " << value<Address>(thing + k * 8);
+                                std::cout << w.str() << std::dec << "\n";
+                            }
                             // (research: the list's own words, and what its handle leads to)
                             std::ostringstream raw;
                             raw << "Roo research: " << name << "'s platform list (data +" << std::hex << list_at << ") 0x" << v << ":";
@@ -12078,8 +12092,8 @@ namespace ingame
             for (const auto &st : r.stages)
                 if (st.data && st.jump_at)
                     paced(st.data + st.jump_at, (st.name + "'s hop time").c_str());
-            if (r.hop_turn && r.wait_at)
-                paced(r.hop_turn + r.wait_at, "wait after a landing");
+            // (V1.4.4: not his hop turn's 0.7 s: the game sets it again at each landing, and his wait stayed 0.7 s in Eric's
+            // V1.4.2 run; his stage's timer is looked at as he lands instead, see roo_research_update)
             std::cout << std::flush;
         }
         void roo_research_update(const Shared &state, const std::string &boss, std::uint64_t now)
@@ -12163,7 +12177,10 @@ namespace ingame
                 if (d > 0.8f)
                 {
                     if (!r.moving)
-                        r.moving = true, r.from = r.last, r.moved_at = now, r.peak = r.last[2], r.from_spot = roo_spot_near(r.last);
+                        r.moving = true, r.from = r.last, r.moved_at = now, r.peak = r.last[2], r.from_spot = roo_spot_near(r.last), r.air_known = false;
+                    // (V1.4.4: which way he faces at the top of his hop)
+                    if (at[2] >= r.peak)
+                        r.air_known = entity_matrix(r.roo, r.air);
                     r.peak = std::max(r.peak, at[2]), r.still_since = 0;
                 }
                 else if (r.moving)
@@ -12190,6 +12207,23 @@ namespace ingame
                                  << (r.moved_at - r.landed_at) / 1000.0 << " s still), at " << roo_xyz(at);
                             if (crash_known)
                                 line << "; Crash on " << roo_spot_text(roo_spot_near(crash)) << ", " << std::lround(std::hypot(crash[0] - at[0], crash[1] - at[1])) << " from him";
+                            // (V1.4.4, Eric's V1.4.2 run: "sometimes he just he has a pattern, but he like jumps backwards"):
+                            // which way his body faced at the top of the hop, from the way he hopped (his own x and y axes)
+                            if (const float hx = at[0] - r.from[0], hy = at[1] - r.from[1]; r.air_known && std::hypot(hx, hy) > 50)
+                            {
+                                const float hop = std::atan2(hy, hx) * 57.29578f;
+                                const auto off = [&](float x, float y) { return static_cast<int>(std::lround(std::remainder(std::atan2(y, x) * 57.29578f - hop, 360.0f))); };
+                                line << "; at its top his x axis " << off(r.air[0], r.air[1]) << " and his y axis " << off(r.air[4], r.air[5]) << " degrees from the way he hopped";
+                            }
+                            for (const auto &st : r.stages)
+                                if (st.on_at && value<unsigned char>(st.c + st.on_at) && st.timer_at)
+                                    if (const auto timer = value<Address>(st.c + st.timer_at); timer && readable(timer, 0x60) && r.timer_lines < 40)
+                                    {
+                                        ++r.timer_lines;
+                                        line << "; " << st.name << "'s timer:";
+                                        for (unsigned k = 0; k < 24; ++k)
+                                            line << " " << value<float>(timer + k * 4);
+                                    }
                             std::cout << line.str() << "\n";
                             if (r.hops % 12 == 0)
                             {
