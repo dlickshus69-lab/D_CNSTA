@@ -227,7 +227,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_slam, /boss_window, /boss_lead, /boss_bar, /bar_try, /roo_files, /roo_nitro on|off (tests) | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_slam, /boss_window, /boss_lead, /boss_bar, /bar_try, /roo_files, /roo_nitro test1|test2|test3|off (tests) | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -725,29 +725,31 @@ void ClientRuntime::handle_commands()
             }
             else if (command == "/roo_nitro")
             {
-                // Testing: the real Nitro in Ripper Roo's arena. On: a copy of his archive with N. Sanity Beach's crate layer
-                // (the Nitro's template, and spawners to make Nitros with) and what it needs, made in the background, and
-                // the loader's plan to swap it in at the next game start; off: his own put back at the next start
-                const bool on = argument == "on", off = argument == "off";
-                if (!on && !off)
+                // Testing: the real Nitro in Ripper Roo's arena. A copy of his archive with N. Sanity Beach's crate layer (the
+                // Nitro's template, and spawners to make Nitros with) and what it needs, made in the background, and the
+                // loader's plan to swap it in at the next game start; off: his own put back at the next start. (V1.4.10, Eric's
+                // V1.4.9 run: "boss doesnt load. it just stays as a black screen after loading": three tests to find why, see
+                // roo_nitro_archive)
+                const int mode = argument == "test1" ? 1 : argument == "test2" ? 2 : argument == "test3" || argument == "on" ? 3 : 0;
+                if (!mode && argument != "off")
                 {
                     const auto status = ingame::level_patch_status();
-                    print_console(status.empty() ? std::string("Roo Nitro: not on this session. /roo_nitro on makes his arena's patched archive (a minute or so) for the next game start; "
-                                                               "/roo_nitro off puts his own back at the next start.")
-                                                 : status + " /roo_nitro on or off, then a restart.");
+                    print_console((status.empty() ? std::string("Roo Nitro: not on this session.") : status) +
+                                  " Tests, each for the next game start: /roo_nitro test1 (his archive with the beach's files, nothing else changed), test2 (their crate "
+                                  "layer loaded as a plain file), test3 (as a map layer, with their camera file); /roo_nitro off puts his own back.");
                 }
                 else if (research_running.exchange(true))
                     print_console("Roo Nitro: still busy with the last one.");
                 else
                 {
-                    if (on)
-                        print_console("Roo Nitro: making his arena's patched archive in the background (a minute or so); the game keeps going.");
-                    std::thread([this, on]
+                    if (mode)
+                        print_console("Roo Nitro: making test " + std::to_string(mode) + "'s copy of his arena's archive in the background (a minute or so); the game keeps going.");
+                    std::thread([this, mode]
                                 {
                                     std::vector<std::string> lines;
                                     try
                                     {
-                                        lines = ingame::roo_nitro_set(on, standalone::state_directory());
+                                        lines = ingame::roo_nitro_set(mode, standalone::state_directory());
                                     }
                                     catch (const std::exception &e)
                                     {

@@ -11681,7 +11681,7 @@ namespace ingame
             std::uint64_t entered = 0, next_find = 0, next_crates = 0, still_since = 0, moved_at = 0, landed_at = 0, nitro_next = 0;
             std::array<float, 3> last{}, from{};
             float peak = 0;
-            bool known = false, moving = false, listed = false, dumped = false, nitro_done = false;
+            bool known = false, moving = false, listed = false, dumped = false, nitro_done = false, templates_told = false;
             unsigned hops = 0, lines = 0, crate_lines = 0, list_lines = 0, nitro_tries = 0, visits = 0;
             int from_spot = -1;
             std::vector<RooSpot> spots;
@@ -12615,6 +12615,44 @@ namespace ingame
                     if (shown++ < 160)
                         std::cout << "Roo research:   " << (name.empty() ? std::string("(unnamed)") : name) << " at " << rest << "\n";
                 std::cout << std::flush;
+            }
+            // (V1.4.10 research: the templates the fight's scripts make things from, his Big TNT's among them: with the Nitro's
+            // template loaded, one of his own drops could make a Nitro instead of a spawner borrowed from N. Sanity Beach)
+            if (r.listed && !r.templates_told && now - r.entered >= 4500)
+            {
+                r.templates_told = true;
+                unsigned shown = 0;
+                const auto look = [&](Address object, Address meta, const std::string &who) {
+                    const unsigned count = value<unsigned>(meta + 24);
+                    const auto fields = value<Address>(meta + 40);
+                    for (unsigned i = 0; fields && count <= 512 && i < count && shown < 40; ++i)
+                    {
+                        const auto field = value<Address>(fields + i * 8);
+                        if (value<std::uint16_t>(field + 22) != 8)
+                            continue;
+                        const auto v = value<Address>(object + value<std::uint16_t>(field + 24));
+                        for (const auto thing : {resolve(v), v})
+                            if (thing >= 0x10000 && thing < 0x7ffffffeffffULL && readable(thing, 0x90) && typed(thing, 0x141d490))
+                            {
+                                ++shown;
+                                std::cout << "Roo research: " << who << " " << string(value<Address>(field + 48), 64) << " @+" << hex(value<std::uint16_t>(field + 24))
+                                          << " -> template \"" << string(value<Address>(thing + 0x80), 80) << "\" (" << string(value<Address>(value<Address>(thing + 0x40) + 0x48), 120)
+                                          << ")" << (thing == v ? "" : ", by a handle") << "\n";
+                                break;
+                            }
+                    }
+                };
+                for (const auto owner : event_owners())
+                {
+                    const auto name = string(value<Address>(owner + 128));
+                    for (const auto &[c, script] : entity_scripts(owner))
+                    {
+                        look(c, value<Address>(c + 56), name + " " + script);
+                        if (const auto data = value<Address>(c + 16); data && typed(data, 0x13bbb10))
+                            look(data, value<Address>(data + 32), name + " " + script + " data");
+                    }
+                }
+                std::cout << "Roo research: " << shown << " template fields found in the fight's scripts\n" << std::flush;
             }
             if (r.roo && !r.dumped && now - r.entered >= 4000)
             {

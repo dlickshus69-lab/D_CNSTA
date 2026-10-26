@@ -49,10 +49,13 @@ namespace ingame
     // (Testing) a copy of Ripper Roo's archive `original` in `folder` with N. Sanity Beach's crate layer (where the Nitro's
     // template is; `as_layer`: as a map layer, so its spawners are made too) and what it needs, added to his package list;
     // his own files as they were. Console lines; `built` gets the copy's path. Throws with a reason when it can't
-    std::vector<std::string> roo_nitro_archive(const std::filesystem::path &folder, const std::filesystem::path &original, std::string &built, bool as_layer = true);
-    // (Testing) /roo_nitro on|off: the loader's plan for Ripper Roo's archive (on: the copy made now, in the background), in
+    // `mode` (tests): 1 the beach's files added to the archive only, 2 the crate layer a plain file, 3 a map layer with the
+    // beach's camera layer as a plain file (2 and 3 with the crate layer's language files)
+    std::vector<std::string> roo_nitro_archive(const std::filesystem::path &folder, const std::filesystem::path &original, std::string &built, int mode);
+    // (Testing) /roo_nitro test1|test2|test3|off (`mode` 1 to 3, 0 off): the loader's plan for Ripper Roo's archive (the copy
+    // made now, in the background), in
     // `state_folder`; it takes effect at the next game start. Console lines; throws with a reason when it can't
-    std::vector<std::string> roo_nitro_set(bool on, const std::filesystem::path &state_folder);
+    std::vector<std::string> roo_nitro_set(int mode, const std::filesystem::path &state_folder);
     // what the loader did with level patches as this game started, as a console line (empty: nothing to say)
     std::string level_patch_status();
     // whether Roo's patched archive is in place this session

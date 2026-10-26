@@ -1352,7 +1352,7 @@ namespace ingame
                             std::to_string(delta) + " bytes, " + std::to_string((names_at + names.size()) / (1024 * 1024)) + " MB");
         }
     }
-    std::vector<std::string> roo_nitro_archive(const std::filesystem::path &folder, const std::filesystem::path &original, std::string &built, bool as_layer)
+    std::vector<std::string> roo_nitro_archive(const std::filesystem::path &folder, const std::filesystem::path &original, std::string &built, int mode)
     {
         std::vector<std::string> lines;
         std::filesystem::path beach;
@@ -1383,9 +1383,20 @@ namespace ingame
         std::map<std::string, std::string> beach_kind;
         for (const auto &[kind, file] : beach_list.pairs)
             beach_kind.emplace(lower(beach_list.strings[file]), beach_list.strings[kind]);
-        // the crate layer and everything it needs that Roo's archive lacks
+        // the crate layer and everything it needs that Roo's archive lacks. (V1.4.10, Eric's V1.4.9 run: "boss doesnt load.
+        // it just stays as a black screen after loading": test modes. 1: added to the archive only, his package list as it
+        // was (the copy itself); 2: the crate layer a plain file, with its language files (the beach lists them: the game
+        // may look for them with the layer); 3: a map layer, with its language files and the beach's camera layer (its
+        // checkpoints point to a camera in it) as a plain file)
+        require(mode >= 1 && mode <= 3);
+        const std::string camera = "maps/crash1/l101_nsanitybeach/l101_nsanitybeach_camera.igz";
         std::vector<std::string> add, queue{crates};
-        std::set<std::string> seen{crates};
+        if (mode >= 2)
+            for (const char *language : {"de", "en", "es", "fr", "it", "ja"})
+                queue.push_back("maps/crash1/l101_nsanitybeach/l101_nsanitybeach_crates_" + std::string(language) + ".lng");
+        if (mode == 3)
+            queue.push_back(camera);
+        std::set<std::string> seen(queue.begin(), queue.end());
         unsigned missing = 0;
         std::string missing_names;
         while (!queue.empty())
@@ -1406,24 +1417,32 @@ namespace ingame
                     if (seen.insert(dep).second)
                         queue.push_back(dep);
         }
-        // the package list: the crate layer as a plain file; the others as the beach lists them, when it does
-        // (as_layer: as the beach lists it, a map layer, so its things are made, its spawners too: Roo's arena has none to
-        // make a Nitro with; otherwise as a plain file)
+        // the package list: the crate layer (3: as the beach lists it, a map layer, so its things are made, its spawners too:
+        // Roo's arena has none to make a Nitro with; 2: a plain file), the camera layer a plain file, the others as the
+        // beach lists them, when it does; 1: as it was
         const auto crates_kind = beach_kind.count(crates) ? beach_kind[crates] : std::string("igx_entities");
-        std::vector<std::pair<std::string, std::string>> more{{as_layer ? crates_kind : std::string("igx_file"), crates}};
+        std::vector<std::pair<std::string, std::string>> more{{mode == 3 ? crates_kind : std::string("igx_file"), crates}};
         for (const auto &name : add)
             if (name != crates && !roo_files.count(name))
-                if (const auto it = beach_kind.find(name); it != beach_kind.end())
+            {
+                if (name == camera)
+                    more.emplace_back("igx_file", name);
+                else if (const auto it = beach_kind.find(name); it != beach_kind.end())
                     more.emplace_back(it->second, name);
-        auto pkg = package_add(roo_list, more);
+            }
+        auto pkg = mode == 1 ? roo.member(in_roo[roo_pkg]) : package_add(roo_list, more);
+        if (mode == 1)
+            more.clear();
         // (read back)
         {
             const auto check = package_read(pkg);
             require(check.pairs.size() == roo_list.pairs.size() + more.size());
-            require(lower(check.strings[check.pairs.back().second]) == lower(more.back().second));
+            require(more.empty() || lower(check.strings[check.pairs.back().second]) == lower(more.back().second));
         }
         // Roo's archive with his package list replaced and the beach's files added
-        std::map<unsigned, Bytes> replaced{{in_roo[roo_pkg], pkg}};
+        std::map<unsigned, Bytes> replaced;
+        if (mode != 1)
+            replaced.emplace(in_roo[roo_pkg], pkg);
         std::vector<NewMember> members;
         std::uint64_t added_bytes = 0;
         for (const auto &name : add)
@@ -1477,8 +1496,8 @@ namespace ingame
         built = target.string();
         std::ostringstream line;
         line << "Roo Nitro: made " << target.string() << ": Roo's " << roo.count << " files as they were (" << compared << " read back the same) and " << add.size()
-             << " from N. Sanity Beach (" << added_bytes / 1024 << " KB: its crate layer, as a " << more.front().first << ", and what it needs), " << more.size()
-             << " added to his package list" << (missing ? "; " + std::to_string(missing) + " needed files found nowhere: " + missing_names : std::string());
+             << " from N. Sanity Beach (" << added_bytes / 1024 << " KB: its crate layer" << (mode == 1 ? std::string() : ", as a " + more.front().first)
+             << (mode == 3 ? ", its camera layer" : "") << " and what they need), " << more.size() << " added to his package list (test " << mode << ")" << (missing ? "; " + std::to_string(missing) + " needed files found nowhere: " + missing_names : std::string());
         lines.push_back(line.str());
         std::string listed;
         for (std::size_t k = 0; k < add.size() && k < 80; ++k)
@@ -1510,8 +1529,9 @@ namespace ingame
             return parts;
         }
     }
-    std::vector<std::string> roo_nitro_set(bool on, const std::filesystem::path &state_folder)
+    std::vector<std::string> roo_nitro_set(int mode, const std::filesystem::path &state_folder)
     {
+        const bool on = mode > 0;
         const auto root = game_archives();
         const auto patches = root.parent_path() / L"CrashNSTAP" / L"patches";
         std::filesystem::path game;
@@ -1573,12 +1593,13 @@ namespace ingame
                 }
         }
         std::string built;
-        auto lines = roo_nitro_archive(patches / relative.parent_path(), original, built, true);
+        auto lines = roo_nitro_archive(patches / relative.parent_path(), original, built, mode);
         unsigned long long patch_size = 0, patch_written = 0;
         require(file_stamp(built, patch_size, patch_written));
         write_plan(relative.string() + "|" + std::to_string(source_size) + "|" + std::to_string(source_written) + "|" + std::to_string(patch_size) + "|" +
                    std::to_string(patch_written));
-        lines.push_back("Roo Nitro: on. Restart the game: as it starts, his arena's archive is swapped for this copy (/roo_nitro off and a restart put his own back).");
+        std::ofstream(state_folder / "roo_nitro_test.txt", std::ios::trunc) << mode << '\n';
+        lines.push_back("Roo Nitro: test " + std::to_string(mode) + " on. Restart the game: as it starts, his arena's archive is swapped for this copy (/roo_nitro off and a restart put his own back).");
         return lines;
     }
     // what the loader did with level patches as the game started (CRASHNSTAP_LEVEL_PATCHES: "in place|put back|skipped|why")
@@ -1593,7 +1614,15 @@ namespace ingame
             return {};
         std::string line;
         if (std::strtoul(f[0].c_str(), nullptr, 10))
-            line = "Roo Nitro: his arena's archive has the Nitro's files this session (/roo_nitro off and a restart put his own back).";
+        {
+            // (which test: as /roo_nitro last made it)
+            int mode = 0;
+            char local[1024]{};
+            if (const auto n = GetEnvironmentVariableA("LOCALAPPDATA", local, sizeof(local)); n && n < sizeof(local))
+                std::ifstream(std::filesystem::path(local) / "CrashNSTAP" / "state" / "roo_nitro_test.txt") >> mode;
+            line = "Roo Nitro: his arena's archive has the Nitro's files this session" + (mode ? " (test " + std::to_string(mode) + ")" : std::string()) +
+                   ". If his fight doesn't load: /roo_nitro off from the hub and a restart put his own back.";
+        }
         if (std::strtoul(f[1].c_str(), nullptr, 10))
             line += std::string(line.empty() ? "" : " ") + "Roo Nitro: his own archive is back.";
         if (std::strtoul(f[2].c_str(), nullptr, 10))
