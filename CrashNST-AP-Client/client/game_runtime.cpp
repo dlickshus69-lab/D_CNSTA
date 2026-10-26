@@ -9573,7 +9573,8 @@ namespace ingame
         // stuck in): one straight wall across the whole hut, square to the chair's way, as far from the arena's middle as
         // V1.3.69's was in front of the throne (7.5% farther than where Papu Papu sits; his throne's seat starts 66 to 72
         // behind that: V1.3.64's run), at any height. It meets the benches at a wide angle (150 degrees, open toward the
-        // arena), so there's no corner to be caught in; a point past it goes straight back, half a unit in front of it
+        // arena), so there's no corner to be caught in (V1.3.77: there was, at 140 degrees; its ends are rounded now, see
+        // wall_shape); a point past it goes straight back, half a unit in front of it
         constexpr float wall_front_share = 1.075f;
         // V1.3.74 (Eric's V1.3.73 run: "when I'm running towards the wall, it seems like Crash is doing his falling
         // animation, like he's falling down"; his clip: at the wall he flips between his run and his fall every few frames;
@@ -9587,7 +9588,9 @@ namespace ingame
         // against how he moves before it's trusted (papu_wall_stick)
         constexpr float wall_stick_zone = 48.0f;
         std::atomic_bool wall_stick_on{false};
-        std::atomic<float> wall_stick_f{0}, wall_stick_front{0}, wall_stick_ux{1}, wall_stick_uy{0};
+        // (V1.3.77: how far in front of the wall he is, and its way out there, from where he's nearest it: the wall's ends are
+        // rounded, see wall_shape)
+        std::atomic<float> wall_stick_gap{1e9f}, wall_stick_nx{1}, wall_stick_ny{0};
         std::atomic<float> wall_stick_rx{1}, wall_stick_ry{0}, wall_stick_fx{0}, wall_stick_fy{1};
         std::atomic<float> wall_stick_in_x{0}, wall_stick_in_y{0}; // (the stick the game was about to get, -1 to 1)
         std::atomic_uint wall_stick_cut{0};                         // (polls with some of the push into the wall taken out)
@@ -9596,14 +9599,42 @@ namespace ingame
         // the stick recorded for the check was from: the one being pushed, not an idle second pad)
         std::atomic<std::uint64_t> wall_stick_at{0};
         std::atomic_int wall_stick_pad{-1};
-        // how far a point (f toward the chair from the arena's middle, l to the side) is past the wall (0: not), and where it
-        // goes back to (tf, tl)
+        // V1.3.77 (Eric's V1.3.76 run: "It works and is a lot better. just needs to smooth out the corner and he is done",
+        // "the invisible corner. it shows in the clip"; his clips: running along the bench toward the throne, Crash stops
+        // dead where the wall meets it, beside the throne, left and right, runs in place there, and Papu Papu's spin gets
+        // him, three of his five deaths; the wall met the benches at 140 degrees (they're 334 to 345 from the arena's middle
+        // there, in the runs' farthest reaches)): the wall's two ends rounded into the benches. Straight across the middle
+        // as before; toward each end it curves back toward the arena (wall_round_share of the chair's distance from the
+        // middle, 150) until it runs along the benches (taken as wall_bench_share, 342 from the middle), so from the wall
+        // to the bench there's no corner: what's left of it where it crosses the bench is 7 to 12 degrees (was 40)
+        constexpr float wall_bench_share = 1.415f, wall_round_share = 0.62f;
+        // how far a point (f toward the chair from the arena's middle, l to the side) is past the wall (less than 0: how
+        // far in front of it), where it goes back to (tf, tl: the nearest point of the wall, half a unit in front of it) and
+        // the wall's way out there (nf, nl, of length 1); -1e9 where the bench is nearer than the wall (past a rounded end)
+        float wall_shape(float f, float l, float front, float &tf, float &tl, float &nf, float &nl)
+        {
+            const float round = front * (wall_round_share / wall_front_share), bench = front * (wall_bench_share / wall_front_share);
+            // (the rounding's middle, at either end: round in front of the wall and round inside the bench)
+            const float f0 = front - round, r0 = bench - round, side = std::sqrt(std::max(0.0f, r0 * r0 - f0 * f0));
+            const float s = l < 0 ? -1.0f : 1.0f, a = std::abs(l);
+            if (!(a > side))
+            {
+                tf = front - 0.5f, tl = l, nf = 1, nl = 0;
+                return f - front;
+            }
+            const float df = f - f0, da = a - side, d = std::hypot(df, da);
+            if (df * side < da * f0 || !(d > 1e-3f))
+                return -1e9f; // (past the rounding, toward the arena: the bench is nearer)
+            nf = df / d, nl = s * da / d;
+            tf = f0 + (round - 0.5f) * nf, tl = s * (side + (round - 0.5f) * da / d);
+            return d - round;
+        }
+        // how far a point is past the wall (0: not), and where it goes back to (tf, tl), see wall_shape
         float wall_push(float f, float l, float front, float &tf, float &tl)
         {
-            if (!(f > front))
-                return 0.0f;
-            tf = front - 0.5f, tl = l;
-            return f - front;
+            float nf = 0, nl = 0;
+            const float past = wall_shape(f, l, front, tf, tl, nf, nl);
+            return past > 0 ? past : 0.0f;
         }
         unsigned wall_debug_register(std::uint64_t at);
         // (V1.3.68) the wall's watch off: nothing set by it from here on, and debug register 3 cleared in every thread
@@ -9972,13 +10003,17 @@ namespace ingame
             rx /= rl, ry /= rl, fx /= fl, fy /= fl;
             if (wall_stick_known && !t.stick_samples && !t.stick_trusted)
                 t.stick_trusted = t.stick_told = t.stick_carried = true, t.stick_trust = 1.0f; // (as earlier this session)
+            // (V1.3.77: how far in front of the wall he is and its way out, where he's nearest it, rounded ends and all: see
+            // wall_shape)
             const float ux = t.wall_dir[0], uy = t.wall_dir[1], front = wall_front_share * t.wall_span;
-            const float f = (at[0] - t.wall_mid[0]) * ux + (at[1] - t.wall_mid[1]) * uy;
+            const float ax = at[0] - t.wall_mid[0], ay = at[1] - t.wall_mid[1];
+            float tf = 0, tl = 0, nf = 1, nl = 0;
+            const float past = wall_shape(ax * ux + ay * uy, ay * ux - ax * uy, front, tf, tl, nf, nl);
             wall_stick_rx = rx, wall_stick_ry = ry, wall_stick_fx = fx, wall_stick_fy = fy;
-            wall_stick_ux = ux, wall_stick_uy = uy, wall_stick_front = front, wall_stick_f = f, wall_stick_at = GetTickCount64();
+            wall_stick_nx = nf * ux - nl * uy, wall_stick_ny = nf * uy + nl * ux, wall_stick_gap = -past, wall_stick_at = GetTickCount64();
             // (the check, while he runs freely away from the wall)
             const float sx = wall_stick_in_x.load(), sy = wall_stick_in_y.load(), vx = t.crash_v[0], vy = t.crash_v[1], v = std::hypot(vx, vy);
-            if (std::hypot(sx, sy) > 0.6f && v > 150 && f < front - 2 * wall_stick_zone)
+            if (std::hypot(sx, sy) > 0.6f && v > 150 && -past > 2 * wall_stick_zone)
             {
                 const float wx = rx * sx + fx * sy, wy = ry * sx + fy * sy, w = std::hypot(wx, wy);
                 const bool agrees = w > 1e-3f && (wx * vx + wy * vy) / (w * v) > 0.866f;
@@ -10291,7 +10326,9 @@ namespace ingame
                     const float px = static_cast<float>(v[0] / m), py = static_cast<float>(v[1] / m), away = std::hypot(px - at[0], py - at[1]);
                     if (away > 300 || std::abs(v[2] - (at[2] * m + p.dz)) > 2.0)
                         continue;
-                    const float in = (px - t.wall_mid[0]) * ux + (py - t.wall_mid[1]) * uy - front;
+                    // (V1.3.77: past the wall's rounded ends too, see wall_shape)
+                    float pf = 0, pl = 0, nf = 0, nl = 0;
+                    const float pa = px - t.wall_mid[0], pb = py - t.wall_mid[1], in = wall_shape(pa * ux + pb * uy, pb * ux - pa * uy, front, pf, pl, nf, nl);
                     deep = std::max(deep, in);
                     if (away > 120)
                         continue;
@@ -15613,11 +15650,12 @@ namespace ingame
             return false;
         const float rx = wall_stick_rx.load(std::memory_order_relaxed), ry = wall_stick_ry.load(std::memory_order_relaxed);
         const float fx = wall_stick_fx.load(std::memory_order_relaxed), fy = wall_stick_fy.load(std::memory_order_relaxed);
-        const float ux = wall_stick_ux.load(std::memory_order_relaxed), uy = wall_stick_uy.load(std::memory_order_relaxed);
-        const float f = wall_stick_f.load(std::memory_order_relaxed), front = wall_stick_front.load(std::memory_order_relaxed);
+        // (V1.3.77: the wall's way out where he's nearest it, and how far in front of it he is: its ends are rounded)
+        const float ux = wall_stick_nx.load(std::memory_order_relaxed), uy = wall_stick_ny.load(std::memory_order_relaxed);
+        const float gap = wall_stick_gap.load(std::memory_order_relaxed);
         // (where the stick sends him, flat; how much of it goes into the wall; how much of that is left this close)
         float wx = rx * sx + fx * sy, wy = ry * sx + fy * sy;
-        const float into = wx * ux + wy * uy, keep = std::clamp((front - 2 - f) / wall_stick_zone, 0.0f, 1.0f);
+        const float into = wx * ux + wy * uy, keep = std::clamp((gap - 2) / wall_stick_zone, 0.0f, 1.0f);
         const float det = rx * fy - fx * ry;
         if (!(into > 0) || keep >= 1 || !std::isfinite(keep) || !(std::abs(det) > 0.3f))
             return false;
