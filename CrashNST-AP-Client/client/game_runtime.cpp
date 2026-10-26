@@ -4109,7 +4109,9 @@ namespace ingame
                 // (Testing: in a boss arena nothing counts boxes, and Ripper Roo's has no spawner of its own: there, with
                 // /roo_nitro's patched archive, a plain crate's from N. Sanity Beach's crate layer may be borrowed)
 #ifndef CRASH_NST_STABLE
-                const bool arena_crate = level == "Boss" && kind_of(name) == "Crate_Basic" && scripts.find("Checkpoint") == std::string::npos;
+                // (V1.4.13, V1.4.12's log: every crate has common_Crate_Checkpoint on it, so V1.4.12 took none; a checkpoint
+                // crate is named Crate_Checkpoint, never Crate_Basic)
+                const bool arena_crate = level == "Boss" && kind_of(name) == "Crate_Basic";
 #else
                 const bool arena_crate = false;
 #endif
@@ -12666,47 +12668,9 @@ namespace ingame
                         std::cout << "Roo research:   " << (name.empty() ? std::string("(unnamed)") : name) << " at " << rest << "\n";
                 std::cout << std::flush;
             }
-            // (V1.4.10 research: the templates the fight's scripts make things from, his Big TNT's among them: with the Nitro's
-            // template loaded, one of his own drops could make a Nitro instead of a spawner borrowed from N. Sanity Beach)
-            if (r.listed && !r.templates_told && now - r.entered >= 4500)
-            {
-                r.templates_told = true;
-                unsigned shown = 0;
-                const auto look = [&](Address object, Address meta, const std::string &who) {
-                    const unsigned count = value<unsigned>(meta + 24);
-                    const auto fields = value<Address>(meta + 40);
-                    for (unsigned i = 0; fields && count <= 512 && i < count && shown < 40; ++i)
-                    {
-                        const auto field = value<Address>(fields + i * 8);
-                        if (value<std::uint16_t>(field + 22) != 8)
-                            continue;
-                        const auto v = value<Address>(object + value<std::uint16_t>(field + 24));
-                        for (const auto thing : {resolve(v), v})
-                            if (thing >= 0x10000 && thing < 0x7ffffffeffffULL && readable(thing, 0x90) && typed(thing, 0x141d490))
-                            {
-                                ++shown;
-                                std::cout << "Roo research: " << who << " " << string(value<Address>(field + 48), 64) << " @+" << hex(value<std::uint16_t>(field + 24))
-                                          << " -> template \"" << string(value<Address>(thing + 0x80), 80) << "\" (" << string(value<Address>(value<Address>(thing + 0x40) + 0x48), 120)
-                                          << ")" << (thing == v ? "" : ", by a handle") << "\n";
-                                break;
-                            }
-                    }
-                };
-                for (const auto owner : event_owners())
-                {
-                    const auto name = string(value<Address>(owner + 128));
-                    // (not the beach's crates: V1.4.11's 40 lines were all theirs)
-                    if (name.rfind("Crate_", 0) == 0)
-                        continue;
-                    for (const auto &[c, script] : entity_scripts(owner))
-                    {
-                        look(c, value<Address>(c + 56), name + " " + script);
-                        if (const auto data = value<Address>(c + 16); data && typed(data, 0x13bbb10))
-                            look(data, value<Address>(data + 32), name + " " + script + " data");
-                    }
-                }
-                std::cout << "Roo research: " << shown << " template fields found in the fight's scripts\n" << std::flush;
-            }
+            // (V1.4.10 to V1.4.12 research, the templates the fight's scripts make things from: his Big TNT's only point to
+            // themselves (its crate handler's _entity), so his drops can't make a Nitro that way; taken out, as it read every
+            // script's settings in one frame)
             if (r.roo && !r.dumped && now - r.entered >= 4000)
             {
                 r.dumped = true;
