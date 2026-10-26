@@ -1568,7 +1568,7 @@ namespace
                                     r.line(points[i][0], points[i][1], points[i | bit][0], points[i | bit][1], box.color ? box.color : 0xff20d8ff);
                 }
                 // V1.3.79: Papu Papu's invisible wall, drawn while it's up (Harder bosses): a see-through fence, red where
-                // Crash's physics is set back past it, yellow where only the stick is steered (its rounded ends)
+                // Crash's physics is set back past it, yellow where only the stick is steered (V1.3.80: none; all red)
                 for (const auto &wall : ingame::wall_outline())
                 {
                     const unsigned fill = wall.hard ? 0x302828ffu : 0x3020d0ffu, edge = wall.hard ? 0xd02828ffu : 0xd020d0ffu;
