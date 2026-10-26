@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **His slam aims 55% of the way** to where you'll be (your pick). `/boss_lead` still tries others.
-- **His hit window is 1.8 s at 200%** (3.6 s at 100%), over once his next spin starts.
-- **The stutter on his chair is gone:** the wall is off for now (it couldn't move Crash, and trying made him stutter).
-- From V1.3.66: the rare slow slam fixed.
+- **An invisible wall in front of his chair** (harder rules on): Crash stops at it at any height, and the arena stays round. This one works in the game's physics, where it really keeps Crash (the last try only moved copies, which stuttered).
+- **His hit window is 2 s at 200%** (4 s at 100%), over once his next spin starts.
+- **His slam aims 55% of the way** to where you'll be (your pick).
+- The log says how the wall did: it looks for where the physics keeps Crash the first time he stands still in a fight.
 - From V1.3.64: 2 to 5 slams after a hit.
