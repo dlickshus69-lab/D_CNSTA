@@ -4,7 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Ripper Roo faces the way he hops again:** he decides how to turn for a hop as the hop before it starts, so his patterns are now changed only at moments he hasn't read them yet (between stages, and round again in two steps).
-- **His hop onto Crash is decided two hops ahead** for the same reason, so he faces you as he comes. Still now and then only.
-- Same as V1.4.5 otherwise: new random patterns every stage (never the game's V), one of two each time round.
-- Thanks for `/roo_files`: the Nitro work goes on from it (more in the chat).
+- **Ripper Roo's patterns grow with each hit:** 3 platforms to start, a new pattern of 4 after your first hit, then 5, and so on (up to 8 for his last hit at 200% health).
+- He keeps each pattern, round and round, until you hit him. It's picked at random when the stage starts, so a death brings a new 3.
+- Every hop goes to a neighboring platform, diagonals included, and a pattern of up to 7 uses each platform once (8 repeats one or two). He never hops straight back.
+- He still hops onto your platform now and then, then picks up his pattern where he left it.
+- The real Nitro is still in the works.
