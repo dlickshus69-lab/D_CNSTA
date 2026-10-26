@@ -4,7 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **No more corners:** Papu's wall now curves into the benches beside the throne, so Crash slides along it there instead of getting stuck in the corner.
+- **Corners, second try:** landing beside the throne no longer makes Crash flail and freeze there. The wall's rounded ends now only steer the stick, so he slides around the corner; Crash only gets pushed back at the straight part of the wall, like in V1.3.76.
 - **Crash fixed** (from V1.3.76): after a respawn, the wall could write into game memory that no longer held Crash's position; it now only touches memory that still holds where Crash is.
 - **Crash reports in the log** (from V1.3.75): if the game crashes, the log says where.
 - **From V1.3.74:** as Crash comes up to the wall, the stick's push into it fades out, so he stops at it or runs along it instead of flipping into his falling animation.

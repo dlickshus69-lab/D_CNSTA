@@ -9573,8 +9573,8 @@ namespace ingame
         // stuck in): one straight wall across the whole hut, square to the chair's way, as far from the arena's middle as
         // V1.3.69's was in front of the throne (7.5% farther than where Papu Papu sits; his throne's seat starts 66 to 72
         // behind that: V1.3.64's run), at any height. It meets the benches at a wide angle (150 degrees, open toward the
-        // arena), so there's no corner to be caught in (V1.3.77: there was, at 140 degrees; its ends are rounded now, see
-        // wall_shape); a point past it goes straight back, half a unit in front of it
+        // arena), so there's no corner to be caught in (V1.3.77: there was, at 140 degrees; its ends rounded, see wall_shape,
+        // V1.3.78: in the stick only); a point past it goes straight back, half a unit in front of it
         constexpr float wall_front_share = 1.075f;
         // V1.3.74 (Eric's V1.3.73 run: "when I'm running towards the wall, it seems like Crash is doing his falling
         // animation, like he's falling down"; his clip: at the wall he flips between his run and his fall every few frames;
@@ -9606,7 +9606,15 @@ namespace ingame
         // there, in the runs' farthest reaches)): the wall's two ends rounded into the benches. Straight across the middle
         // as before; toward each end it curves back toward the arena (wall_round_share of the chair's distance from the
         // middle, 150) until it runs along the benches (taken as wall_bench_share, 342 from the middle), so from the wall
-        // to the bench there's no corner: what's left of it where it crosses the bench is 7 to 12 degrees (was 40)
+        // to the bench there's no corner: what's left of it where it crosses the bench is 7 to 12 degrees (was 40). V1.3.78
+        // (Eric's V1.3.77 run: "still needs fixinig"; his clips: at both ends, landing beside the throne after a bounce off
+        // Papu Papu, Crash was set back in his physics by the rounded ends, flailed where he stood (his teeter and his
+        // fall, a third of a second), on the floor and on the bench, and Papu Papu's spin got him; the log: each of the 10
+        // times his physics was set back, logged, was at the rounded ends (311 to 334 from the middle, at heights 0 to 181),
+        // none at the straight part): the rounded ends are in the stick only (papu_wall_stick): coming up to a corner,
+        // he's turned along them, so he slides around it instead of stopping dead in it; his physics is set back only past
+        // the straight wall, as in V1.3.76 (wall_push), so landing in a corner or on the bench beside the throne, he isn't
+        // moved there
         constexpr float wall_bench_share = 1.415f, wall_round_share = 0.62f;
         // how far a point (f toward the chair from the arena's middle, l to the side) is past the wall (less than 0: how
         // far in front of it), where it goes back to (tf, tl: the nearest point of the wall, half a unit in front of it) and
@@ -9629,12 +9637,15 @@ namespace ingame
             tf = f0 + (round - 0.5f) * nf, tl = s * (side + (round - 0.5f) * da / d);
             return d - round;
         }
-        // how far a point is past the wall (0: not), and where it goes back to (tf, tl), see wall_shape
+        // how far a point (f toward the chair from the arena's middle, l to the side) is past the wall (0: not), and where it
+        // goes back to (tf, tl): the straight wall (V1.3.78: again, for his physics; the rounded ends are in the stick only,
+        // see wall_shape)
         float wall_push(float f, float l, float front, float &tf, float &tl)
         {
-            float nf = 0, nl = 0;
-            const float past = wall_shape(f, l, front, tf, tl, nf, nl);
-            return past > 0 ? past : 0.0f;
+            if (!(f > front))
+                return 0.0f;
+            tf = front - 0.5f, tl = l;
+            return f - front;
         }
         unsigned wall_debug_register(std::uint64_t at);
         // (V1.3.68) the wall's watch off: nothing set by it from here on, and debug register 3 cleared in every thread
@@ -10326,9 +10337,7 @@ namespace ingame
                     const float px = static_cast<float>(v[0] / m), py = static_cast<float>(v[1] / m), away = std::hypot(px - at[0], py - at[1]);
                     if (away > 300 || std::abs(v[2] - (at[2] * m + p.dz)) > 2.0)
                         continue;
-                    // (V1.3.77: past the wall's rounded ends too, see wall_shape)
-                    float pf = 0, pl = 0, nf = 0, nl = 0;
-                    const float pa = px - t.wall_mid[0], pb = py - t.wall_mid[1], in = wall_shape(pa * ux + pb * uy, pb * ux - pa * uy, front, pf, pl, nf, nl);
+                    const float in = (px - t.wall_mid[0]) * ux + (py - t.wall_mid[1]) * uy - front;
                     deep = std::max(deep, in);
                     if (away > 120)
                         continue;
