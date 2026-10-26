@@ -5733,6 +5733,8 @@ namespace ingame
             bool stick_lost_told = false;
             bool stick_trusted = false, stick_told = false, stick_doubt_told = false, stick_carried = false, wall_was_dead = false, wall_refresh = false;
             std::uint64_t wall_rearm_at = 0, wall_respawn_at = 0;
+            // (V1.4) the arming asked for as the wall's watch and the steering's last went on, see arm_reached
+            std::uint64_t wall_ticket = 0, steer_ticket = 0;
             // V1.3.76 (see cplace_read): the places dropped, and the settings left out as the place changed while it was set
             unsigned wall_dropped = 0, wall_raced = 0;
             // V1.3.79 (research, see papu_wall_research): Crash pushed by the stick but hardly moving by the wall (since
@@ -8983,7 +8985,9 @@ namespace ingame
         // steps go by (the step's rcx, see +0xf7e782, and its item, kept at [rsp+0x70], see +0xf7e10b), for the search for
         // what counts up in his animation as he stands (see papu_anim_scan)
         std::array<std::atomic<std::uint64_t>, 16> slam_nodes{}, slam_items{};
-        unsigned steer_debug_register(std::uint64_t at, std::uint64_t step_at);
+        unsigned steer_debug_register(std::uint64_t at, std::uint64_t step_at, bool all = false);
+        std::uint64_t arm_ticket();
+        bool arm_reached(std::uint64_t ticket);
         // (V1.3.52) debug register 1 as a write watch on 8 bytes at `at`; (V1.3.53) debug register 2 as an execute breakpoint at
         // `step_at`; 0 for off; the others kept (debug register 0 is the research watch's, see who_debug_registers)
         void steer_dr7(DWORD64 &dr1, DWORD64 &dr2, DWORD64 &dr7, std::uint64_t at, std::uint64_t step_at)
@@ -9032,8 +9036,9 @@ namespace ingame
         // turned him (d), the way it goes; the log says how often the game left it, or put it back
         void papu_body_set(BossTuning &t, float d)
         {
-            // (V1.3.52: not while it's steered as the game copies it, see papu_steer)
-            if (!t.body_at || !t.body_sign || t.steer_on || papu_body_record(t.papu) != t.body_at)
+            // (V1.3.52: not while it's steered as the game copies it, see papu_steer; V1.4: once the steering's watch is in
+            // the game's threads, see arm_reached)
+            if (!t.body_at || !t.body_sign || (t.steer_on && arm_reached(t.steer_ticket)) || papu_body_record(t.papu) != t.body_at)
                 return;
             std::array<float, 2> now{};
             if (!read(t.body_at + 0x18, now) || !std::isfinite(now[0]) || !std::isfinite(now[1]))
@@ -9080,10 +9085,13 @@ namespace ingame
             // last aimed stand (one a frame when it's all there; his slams in a row, see papu_multi_slam, are 0.45 s apart):
             // Eric's V1.3.72 run had 6, then none, over 3 s each, after the wall's watch was set in every thread, see
             // debug_registers_now)
+            // (V1.4: it's set off the game's thread, see arm_others: new, into the threads that don't have it; the same one
+            // again, as it looked lost, into every thread again, in case one kept its old ones)
             const auto copies = steer_copies.load();
+            const bool kept = same && steer_arm_address.load() == t.body_at + 0x18;
             unsigned threads = 2;
-            if (!same || steer_arm_address.load() != t.body_at + 0x18 || static_cast<std::uint64_t>(copies - t.steer_seen) * 100 < now - t.steer_seen_at)
-                threads = steer_debug_register(t.body_at + 0x18, slam_arm_address.load());
+            if (!kept || static_cast<std::uint64_t>(copies - t.steer_seen) * 100 < now - t.steer_seen_at)
+                threads = steer_debug_register(t.body_at + 0x18, slam_arm_address.load(), kept), t.steer_ticket = arm_ticket();
             t.steer_on = threads > 1, t.steer_sign = sign;
             t.steer_from = steer_turned.load(), t.steer_seen = copies, t.steer_seen_at = now;
             if (!t.steer_told)
@@ -9138,8 +9146,9 @@ namespace ingame
             const auto steps = slam_steps.load();
             t.slam_from_steps = steps, t.slam_from_faster = slam_faster.load(), t.slam_from_hits = slam_hits.load(), slam_layers = 0;
             unsigned threads = 2;
-            if (slam_body.load() != data || slam_arm_address.load() != base() + slam_step || steps == t.slam_seen_steps)
-                slam_body = data, slam_seen = 0, threads = steer_debug_register(steer_arm_address.load(), base() + slam_step);
+            const bool kept = slam_body.load() == data && slam_arm_address.load() == base() + slam_step;
+            if (!kept || steps == t.slam_seen_steps) // (V1.4: none seen since the last stand: into every thread again, see arm_others)
+                slam_body = data, slam_seen = 0, threads = steer_debug_register(steer_arm_address.load(), base() + slam_step, kept);
             t.slam_seen_steps = steps;
             const float game = t.sc_slam_clock > 0 ? t.sc_slam_clock - t.sc_lead : 0.9f;
             t.slam_rate_used = threads <= 1        ? 1.0f
@@ -9689,7 +9698,7 @@ namespace ingame
             const float past = wall_shape(f, l, front, tf, tl, nf, nl);
             return past > 0 ? past : 0.0f;
         }
-        unsigned wall_debug_register(std::uint64_t at);
+        unsigned wall_debug_register(std::uint64_t at, bool all = false);
         // (V1.3.68) the wall's watch off: nothing set by it from here on, and debug register 3 cleared in every thread
         void papu_wall_off()
         {
@@ -9949,13 +9958,13 @@ namespace ingame
         // (the wall's watch on a place: on the 8 bytes with his y, a double's second 8, or a float's y and height when x isn't
         // at the start of 8; returns how many threads took it. V1.3.74, after the code review: also for the kept place's
         // arming again, with the place set again too: the rules turned off and on in between clear both)
-        unsigned papu_wall_arm(const BossTuning::CrashPlace &p)
+        unsigned papu_wall_arm(const BossTuning::CrashPlace &p, bool all = false)
         {
             const Address watched = p.kind == 1 ? p.at + 8 : (p.at & 7) ? p.at + 4 : p.at;
             wall_place = 0;
             wall_kind = p.kind, wall_far = 0, wall_last_known = false, wall_last_set = false;
             wall_place = p.at;
-            return wall_debug_register(watched);
+            return wall_debug_register(watched, all);
         }
         template <class Told, class Where>
         void papu_wall_watch(BossTuning &t, bool past, unsigned others, unsigned others_in, std::uint64_t now, const Told &told, const Where &where)
@@ -9981,12 +9990,16 @@ namespace ingame
                 auto &p = *next;
                 p.tried = true, t.wall_try = static_cast<std::size_t>(next - t.cplaces.begin());
                 const auto threads = papu_wall_arm(p);
+                t.wall_ticket = arm_ticket();
                 wall_live = true;
                 t.wall_watch = 1, t.wall_pressed = t.wall_rough = t.wall_quiet = 0, t.wall_rearmed = false;
                 told("the watch tries " + where(p.at) + " (place " + std::to_string(t.wall_try + 1) + " of " + std::to_string(t.cplaces.size()) + ", " + place_owner(p.at) +
                      "), in " + std::to_string(threads) + " threads");
                 return;
             }
+            // (V1.4: judged only once the watch is in the game's threads, see arm_reached)
+            if (!arm_reached(t.wall_ticket))
+                return;
             const auto &p = t.cplaces[std::min(t.wall_try, t.cplaces.size() - 1)];
             if (pressed)
                 ++t.wall_pressed, t.wall_rough += rough ? 1 : 0;
@@ -10000,7 +10013,8 @@ namespace ingame
                     if (!t.wall_rearmed)
                     {
                         t.wall_rearmed = true, t.wall_quiet = 0;
-                        wall_debug_register(wall_arm_address.load()); // (once more, into threads made since)
+                        wall_debug_register(wall_arm_address.load(), true); // (once more, into every thread: V1.4, see arm_others)
+                        t.wall_ticket = arm_ticket();
                         return;
                     }
                     why = "the game didn't store it while Crash was in the wall";
@@ -10025,7 +10039,8 @@ namespace ingame
             t.wall_quiet = fresh ? 0 : past ? t.wall_quiet + 1 : t.wall_quiet;
             if (t.wall_quiet >= 20 && now - t.wall_rearm_at >= 1000)
             {
-                const auto threads = papu_wall_arm(p);
+                const auto threads = papu_wall_arm(p, true); // (V1.4: every thread, see arm_others)
+                t.wall_ticket = arm_ticket();
                 t.wall_quiet = 0, t.wall_rearm_at = now, ++t.wall_rearms;
                 if (t.wall_rearms <= 3)
                     told("no store of the kept place seen while Crash was in the wall for 20 frames: the watch goes into every thread again (" + std::to_string(threads) +
@@ -11190,9 +11205,7 @@ namespace ingame
             papu_speed_timers(t, percent, s);
             // V1.3.41: what turns with him, looked for in his first spins of a visit (see papu_turn_research; before his state
             // is noted, so his spin's start is seen)
-#ifndef CRASH_NST_STABLE
-            papu_turn_research(t, s, now, state.boss_rules != 0); // (not in the Stable build: research for the aim)
-#endif
+            papu_turn_research(t, s, now, state.boss_rules != 0); // (what the aim needs; V1.4: in the Stable build too)
             // (after the code review: when the fight starts over from his throne his parts may be new, so what was found is
             // looked for again)
             if (s == 6 && (t.turn_spins || !t.turn_places.empty() || t.turn_tracking))
@@ -11340,9 +11353,8 @@ namespace ingame
             // fight starts over from his throne, what was found in his parts is looked for again
             papu_cycle(t, s, now);
             papu_clocks(t, s, now);
-#ifndef CRASH_NST_STABLE
-            // (not in the Stable build yet: his slam's speed (V1.3.53: his animation stepped faster as he stands, see
-            // papu_slam_speed; V1.3.35's search for it only while that isn't on) and the slam aim)
+            // (his slam's speed (V1.3.53: his animation stepped faster as he stands, see papu_slam_speed; V1.3.35's search for
+            // it only while that isn't on), the slam aim and the wall; V1.4: in the Stable build too)
             papu_slam_speed(t, s, percent, state.boss_slam_ms, state.boss_slam_fixed_ms, state.boss_rules != 0);
             papu_stand_clock(t, s, now);        // (V1.3.56)
             papu_multi_slam(t, state, s, now); // (V1.3.62)
@@ -11352,7 +11364,6 @@ namespace ingame
             papu_wall(t, state, s, now); // (V1.3.68)
             papu_aim(t, state, s, now);
             papu_reverse(t, state, s, now); // (V1.3.60)
-#endif
             papu_who(t, s, now);
             if (t.spin_search_due && now >= t.spin_search_due)
             {
@@ -13700,15 +13711,25 @@ namespace ingame
         // watch was set in every thread could keep the old ones, and each setting of one register wrote the others back as
         // it read them then. Now each setting writes all of them, and so does every return from the handler (V1.3.69's
         // wall_keep_register, for the wall's alone); nothing else in the game uses them
-        void debug_registers_now(CONTEXT &c)
+        // (V1.4: the watches as they are now, all four: the research watch's, the steering's, the slam's, the wall's)
+        using Watches = std::array<std::uint64_t, 4>;
+        Watches watches_now()
         {
-            const auto who = who_arm_address.load(std::memory_order_relaxed), wall = wall_arm_address.load(std::memory_order_relaxed);
+            return {who_arm_address.load(), steer_arm_address.load(), slam_arm_address.load(), wall_arm_address.load()};
+        }
+        void debug_registers_set(CONTEXT &c, const Watches &w)
+        {
+            const auto who = w[0], wall = w[3];
             DWORD64 dr7 = who ? 1ULL | (1ULL << 16) | (2ULL << 18) : 0, dr1 = 0, dr2 = 0;
-            steer_dr7(dr1, dr2, dr7, steer_arm_address.load(std::memory_order_relaxed), slam_arm_address.load(std::memory_order_relaxed));
+            steer_dr7(dr1, dr2, dr7, w[1], w[2]);
             if (wall)
                 dr7 |= (1ULL << 6) | (1ULL << 28) | (2ULL << 30);
             c.Dr0 = who, c.Dr1 = dr1, c.Dr2 = dr2, c.Dr3 = wall, c.Dr7 = dr7;
             c.ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+        }
+        void debug_registers_now(CONTEXT &c)
+        {
+            debug_registers_set(c, watches_now());
         }
         LONG who_single_step(CONTEXT *context, std::uint64_t page);
         LONG CALLBACK who_handler(EXCEPTION_POINTERS *e)
@@ -13787,125 +13808,193 @@ namespace ingame
             }
             return wall_stop ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
         }
+        // V1.4 (Eric's V1.3.82 run: "There is a little stutter shows in the clip"; his clip: the game stood still for a frame
+        // or two (35 to 70 ms) at the fight's start and as Papu Papu started a stand, twice a stand, each where a watch went
+        // into every thread: the slam's step as he stands, the steering's as his aim holds, the wall's as it tries a place).
+        // Each of the game's 108 threads was stopped, its debug registers written and let go, one after another, on the
+        // game's own thread, which waited for all of it. Now a thread of ours does it, so the game goes on meanwhile (the
+        // game's own thread still gets them at once, through the handler), and a thread that has the watches as they are
+        // now is left alone: setting them again with nothing changed only goes into the threads made since, unless a watch
+        // looked lost (`all`). Each thread is written from one reading of the watches, the one it's remembered with
+        struct ArmedThread
+        {
+            std::uint64_t created = 0;
+            Watches watches{};
+        };
+        std::unordered_map<DWORD, ArmedThread> armed_threads; // (our arming thread's alone)
+        std::atomic_uint arm_last{0}, arm_lines{0};
+        std::atomic<std::uint64_t> arm_asked{0}, arm_served{0};
+        std::atomic_uint arm_estimate{0};
+        std::atomic_bool arm_all_asked{false};
+        HANDLE arm_event = nullptr;
+        std::once_flag arm_once;
+        // the watches into every thread of the game's but this one; how many have them
+        unsigned arm_threads(bool all)
+        {
+            const auto started = precise_seconds();
+            const Watches now_watches = watches_now();
+            const DWORD self = GetCurrentThreadId(), process = GetCurrentProcessId();
+            unsigned done = 0, set = 0, seen = 0;
+            std::unordered_map<DWORD, ArmedThread> kept;
+            const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if (snapshot != INVALID_HANDLE_VALUE)
+            {
+                THREADENTRY32 entry{};
+                entry.dwSize = sizeof(entry);
+                for (BOOL ok = Thread32First(snapshot, &entry); ok; ok = Thread32Next(snapshot, &entry))
+                {
+                    if (entry.th32OwnerProcessID != process || entry.th32ThreadID == self)
+                        continue;
+                    const HANDLE thread =
+                        OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ThreadID);
+                    if (!thread)
+                        continue;
+                    ++seen;
+                    // (the same thread, not another one given its id since: by when it was made)
+                    FILETIME made{}, ended{}, kernel{}, user{};
+                    const std::uint64_t created = GetThreadTimes(thread, &made, &ended, &kernel, &user)
+                                                      ? (static_cast<std::uint64_t>(made.dwHighDateTime) << 32) | made.dwLowDateTime
+                                                      : 0;
+                    const auto had = armed_threads.find(entry.th32ThreadID);
+                    if (!all && created && had != armed_threads.end() && had->second.created == created && had->second.watches == now_watches)
+                    {
+                        kept[entry.th32ThreadID] = had->second, ++done;
+                        CloseHandle(thread);
+                        continue;
+                    }
+                    // (nothing between its stop and its going on that could wait on it: no memory taken, no log; the thread may
+                    // be holding the heap's lock)
+                    bool wrote = false;
+                    if (SuspendThread(thread) != static_cast<DWORD>(-1))
+                    {
+                        CONTEXT c{};
+                        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                        if (GetThreadContext(thread, &c))
+                        {
+                            debug_registers_set(c, now_watches); // (V1.3.73: every watch's, not only the one set)
+                            c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                            wrote = SetThreadContext(thread, &c) != 0;
+                        }
+                        ResumeThread(thread);
+                    }
+                    CloseHandle(thread);
+                    if (wrote)
+                    {
+                        ++done, ++set;
+                        if (created)
+                            kept[entry.th32ThreadID] = {created, now_watches};
+                    }
+                }
+                CloseHandle(snapshot);
+            }
+            armed_threads = std::move(kept);
+            arm_last = done;
+            const double ms = (precise_seconds() - started) * 1000;
+            if (set && arm_lines.fetch_add(1) < 24)
+            {
+                // (made whole first: the game's thread's lines may switch the log to hex as they go)
+                std::ostringstream line;
+                line << "Boss timing: the watches went into " << set << " of " << seen << " threads" << (all ? " (all of them again)" : "") << " in " << std::lround(ms)
+                     << " ms, off the game's thread\n";
+                std::cout << line.str() << std::flush;
+            }
+            return done;
+        }
+        void arm_worker()
+        {
+            std::uint64_t done = 0;
+            for (;;)
+            {
+                WaitForSingleObject(arm_event, INFINITE);
+                while (arm_asked.load() != done)
+                {
+                    done = arm_asked.load();
+                    arm_threads(arm_all_asked.exchange(false));
+                    arm_served = done;
+                }
+            }
+        }
+        // the watches as they are now into the game's other threads, by our arming thread (on this one, if it can't be made);
+        // how many threads have them or will, as of the last time
+        unsigned arm_others(bool all)
+        {
+            std::call_once(arm_once,
+                           []
+                           {
+                               arm_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                               try
+                               {
+                                   if (arm_event)
+                                       std::thread(arm_worker).detach();
+                               }
+                               catch (const std::exception &)
+                               {
+                                   CloseHandle(arm_event), arm_event = nullptr;
+                               }
+                           });
+            if (!arm_event)
+                return arm_threads(all);
+            if (all)
+                arm_all_asked = true;
+            arm_asked.fetch_add(1);
+            SetEvent(arm_event);
+            if (const unsigned last = arm_last.load())
+                return last;
+            if (const unsigned estimate = arm_estimate.load())
+                return estimate;
+            // (before its first time: the game's other threads, counted once)
+            unsigned others = 0;
+            const DWORD self = GetCurrentThreadId(), process = GetCurrentProcessId();
+            if (const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0); snapshot != INVALID_HANDLE_VALUE)
+            {
+                THREADENTRY32 entry{};
+                entry.dwSize = sizeof(entry);
+                for (BOOL ok = Thread32First(snapshot, &entry); ok; ok = Thread32Next(snapshot, &entry))
+                    others += entry.th32OwnerProcessID == process && entry.th32ThreadID != self;
+                CloseHandle(snapshot);
+            }
+            arm_estimate = std::max(others, 1u);
+            return arm_estimate.load();
+        }
+        // (V1.4) the arming asked for last, and whether the one asked for as `ticket` (or later) is done: the watches as they
+        // were then are in the game's threads
+        std::uint64_t arm_ticket()
+        {
+            return arm_asked.load();
+        }
+        bool arm_reached(std::uint64_t ticket)
+        {
+            return !arm_event || arm_served.load() >= ticket;
+        }
         // the hardware watch on (at != 0) or off in every thread; returns how many threads took it
         unsigned who_debug_registers(std::uint64_t at)
         {
             if (!who_handler_cookie)
                 who_handler_cookie = AddVectoredExceptionHandler(1, who_handler);
             who_arm_address = at;
-            const DWORD self = GetCurrentThreadId(), process = GetCurrentProcessId();
-            unsigned done = 0;
-            const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-            if (snapshot != INVALID_HANDLE_VALUE)
-            {
-                THREADENTRY32 entry{};
-                entry.dwSize = sizeof(entry);
-                for (BOOL ok = Thread32First(snapshot, &entry); ok; ok = Thread32Next(snapshot, &entry))
-                {
-                    if (entry.th32OwnerProcessID != process || entry.th32ThreadID == self)
-                        continue;
-                    const HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, entry.th32ThreadID);
-                    if (!thread)
-                        continue;
-                    if (SuspendThread(thread) != static_cast<DWORD>(-1))
-                    {
-                        CONTEXT c{};
-                        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                        if (GetThreadContext(thread, &c))
-                        {
-                            debug_registers_now(c); // (V1.3.73: every watch's, not only this one's)
-                            c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                            if (SetThreadContext(thread, &c))
-                                ++done;
-                        }
-                        ResumeThread(thread);
-                    }
-                    CloseHandle(thread);
-                }
-                CloseHandle(snapshot);
-            }
+            const unsigned done = arm_others(false);
             RaiseException(who_arm_code, 0, 0, nullptr); // this thread, through the handler
             return done + 1;
         }
         // (V1.3.52) the steering's watch (debug register 1, see steer_copy) and (V1.3.53) the slam's step (debug register 2, see
         // slam_step) on (not 0) or off in every thread; returns how many threads took them
-        unsigned steer_debug_register(std::uint64_t at, std::uint64_t step_at)
+        unsigned steer_debug_register(std::uint64_t at, std::uint64_t step_at, bool all)
         {
             if (!who_handler_cookie)
                 who_handler_cookie = AddVectoredExceptionHandler(1, who_handler);
             steer_arm_address = at, slam_arm_address = step_at;
-            const DWORD self = GetCurrentThreadId(), process = GetCurrentProcessId();
-            unsigned done = 0;
-            const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-            if (snapshot != INVALID_HANDLE_VALUE)
-            {
-                THREADENTRY32 entry{};
-                entry.dwSize = sizeof(entry);
-                for (BOOL ok = Thread32First(snapshot, &entry); ok; ok = Thread32Next(snapshot, &entry))
-                {
-                    if (entry.th32OwnerProcessID != process || entry.th32ThreadID == self)
-                        continue;
-                    const HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, entry.th32ThreadID);
-                    if (!thread)
-                        continue;
-                    if (SuspendThread(thread) != static_cast<DWORD>(-1))
-                    {
-                        CONTEXT c{};
-                        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                        if (GetThreadContext(thread, &c))
-                        {
-                            debug_registers_now(c); // (V1.3.73: every watch's, not only this one's)
-                            c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                            if (SetThreadContext(thread, &c))
-                                ++done;
-                        }
-                        ResumeThread(thread);
-                    }
-                    CloseHandle(thread);
-                }
-                CloseHandle(snapshot);
-            }
+            const unsigned done = arm_others(all);
             RaiseException(steer_arm_code, 0, 0, nullptr); // this thread, through the handler
             return done + 1;
         }
         // (V1.3.68) the wall's watch (debug register 3, see wall_apply) on 8 bytes at `at` (0: off) in every thread, the
         // others kept; returns how many threads took it
-        unsigned wall_debug_register(std::uint64_t at)
+        unsigned wall_debug_register(std::uint64_t at, bool all)
         {
             if (!who_handler_cookie)
                 who_handler_cookie = AddVectoredExceptionHandler(1, who_handler);
             wall_arm_address = at;
-            const DWORD self = GetCurrentThreadId(), process = GetCurrentProcessId();
-            unsigned done = 0;
-            const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-            if (snapshot != INVALID_HANDLE_VALUE)
-            {
-                THREADENTRY32 entry{};
-                entry.dwSize = sizeof(entry);
-                for (BOOL ok = Thread32First(snapshot, &entry); ok; ok = Thread32Next(snapshot, &entry))
-                {
-                    if (entry.th32OwnerProcessID != process || entry.th32ThreadID == self)
-                        continue;
-                    const HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, entry.th32ThreadID);
-                    if (!thread)
-                        continue;
-                    if (SuspendThread(thread) != static_cast<DWORD>(-1))
-                    {
-                        CONTEXT c{};
-                        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                        if (GetThreadContext(thread, &c))
-                        {
-                            debug_registers_now(c); // (V1.3.73: every watch's, not only this one's)
-                            c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                            if (SetThreadContext(thread, &c))
-                                ++done;
-                        }
-                        ResumeThread(thread);
-                    }
-                    CloseHandle(thread);
-                }
-                CloseHandle(snapshot);
-            }
+            const unsigned done = arm_others(all);
             RaiseException(wall_arm_code, 0, 0, nullptr); // this thread, through the handler
             return done + 1;
         }
@@ -14094,7 +14183,8 @@ namespace ingame
         // CBehaviorComponent (+0xd8, which the game put back every frame in V1.3.40) is caught by the write watch above, once a
         // visit, at his next aimed stand (nothing of ours is set there while it's on): the game's code that writes it, with
         // the calls that led there, their registers and their code, shows where the game keeps his facing
-        // (the watch off: every thread's debug registers cleared before his objects can go)
+        // (the watch off: every thread's debug registers cleared, V1.4: off the game's thread, see arm_others; a stop on the
+        // old watch meanwhile does nothing, who_armed being off)
         void papu_who_off(BossTuning &t, const char *why)
         {
             if (t.watch_step != 1)

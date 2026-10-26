@@ -645,10 +645,13 @@ void ClientRuntime::handle_commands()
                     boss_lead_test = -1;
                 else if (share >= 0 && share <= 1.2)
                     boss_lead_test = static_cast<int>(share * 100 + 0.5);
+                // (V1.4: the seed's is its YAML's boss_slam_aim, in percent; 55 for older seeds)
+                const auto &yaml = session.slot_data()["boss_slam_aim"];
+                const int seed = yaml.isIntegral() ? static_cast<int>(std::clamp<std::int64_t>(yaml.asInt64(), 0, 100)) : 55;
                 std::ostringstream out;
-                out << std::fixed << std::setprecision(2) << "Boss lead: Papu Papu's slam aims " << (boss_lead_test >= 0 ? boss_lead_test : 55) / 100.0
-                    << " of the way to where Crash will be as it lands" << (boss_lead_test >= 0 ? " (test)" : "")
-                    << ". /boss_lead 0 to 1.2 sets it (0: where he is, 1: where he'll be if he keeps going), /boss_lead off goes back to 0.55.";
+                out << std::fixed << std::setprecision(2) << "Boss lead: Papu Papu's slam aims " << (boss_lead_test >= 0 ? boss_lead_test : seed) / 100.0
+                    << " of the way to where Crash will be as it lands" << (boss_lead_test >= 0 ? " (test)" : yaml.isIntegral() ? " (this seed's boss_slam_aim)" : "")
+                    << ". /boss_lead 0 to 1.2 sets it (0: where he is, 1: where he'll be if he keeps going), /boss_lead off goes back to the seed's (" << seed / 100.0 << ").";
                 print_console(out.str());
             }
             else if (command == "/boss_rules")

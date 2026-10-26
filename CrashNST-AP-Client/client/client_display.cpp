@@ -329,9 +329,13 @@ void ClientRuntime::update_display(ClientTick &tick)
             };
             const unsigned slam_fixed = boss_slam_test >= 0 ? 0u : fixed_ms("boss_slam_time", 10, 25, 90);
             const unsigned window_fixed = boss_window_test >= 0 ? 0u : fixed_ms("boss_hit_window", 100, 5, 100);
+            // (V1.4: the YAML's boss_slam_aim, how far ahead of Crash his slam aims, in percent; 55 for older seeds; /boss_lead goes over it)
+            const auto &aim = slot["boss_slam_aim"];
+            const unsigned lead = boss_lead_test >= 0 ? static_cast<unsigned>(boss_lead_test)
+                                  : aim.isIntegral()   ? static_cast<unsigned>(std::clamp<std::int64_t>(aim.asInt64(), 0, 100))
+                                                       : 55u;
             box_markers->boss_settings(health, speed, rules, boss_bar_grow, masks, boss_slam_test >= 0 ? static_cast<unsigned>(boss_slam_test) : 450u,
-                                       boss_window_test >= 0 ? static_cast<unsigned>(boss_window_test) : 2200u, slam_fixed, window_fixed,
-                                       boss_lead_test >= 0 ? static_cast<unsigned>(boss_lead_test) : 55u);
+                                       boss_window_test >= 0 ? static_cast<unsigned>(boss_window_test) : 2200u, slam_fixed, window_fixed, lead);
         }
         auto collectible_checked = tick.checked;
         collectible_checked.insert(pending.begin(), pending.end());

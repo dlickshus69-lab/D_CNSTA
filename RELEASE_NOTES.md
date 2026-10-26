@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Landing on red Papu costs a life again:** if Crash came into the fight with a mask, the landing only made him flinch. In a harder boss fight he has no mask, so the landing now kills him like Papu's spin does.
-- **Crash keeps his speed at Papu's wall** (from V1.3.81): he runs along it as fast as he came; straight into it, he stops at it.
-- **The wall blends into the benches** (from V1.3.80) and is drawn in the fight while Crash is alive; F7 hides it.
-- **Stuck report in the log** (from V1.3.79): if the stick pushes Crash but he barely moves near the wall, the log says where.
-- Crash fixed (V1.3.76), crash reports in the log, no stutter after a respawn, Papu's facing stays on his aim, hit window 2.2 s at 200%.
+- **No stutter in Papu Papu's fight:** the game no longer stops for a moment as he stands up. The fight's watches on the game are now set in the background, and only where they're missing.
+- **Boss Slam Aim** (new YAML option, 0–100%, default 55): how far ahead of Crash his slam aims. 0 aims where Crash is, 100 where he's heading.
+- **Boss Hit Window** now goes from 2 s (20) to 10 s (100), or `by_speed` as before.
+- **Papu Papu is done**, and all of him is in **Stable V1.4** too: the red rule, the aimed slams, the faster fight, the wall in front of his throne (F7 hides it) and the YAML options.
+- From V1.3.82: landing on red Papu costs a life; Crash keeps his speed along the wall.

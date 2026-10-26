@@ -701,13 +701,24 @@ class BossSlamTime(NamedRange):
     special_range_names = {"by_speed": 0}
 
 
+class BossSlamAim(Range):
+    """How far ahead of Crash a harder boss aims his slam, in percent (needs Harder Bosses; for now Papu Papu): 0 aims
+    where Crash is as the boss stands, 100 where Crash will be as the slam lands if he keeps going the way he is. In
+    between, that share of the way."""
+
+    display_name = "Boss Slam Aim"
+    range_start = 0
+    range_end = 100
+    default = 55
+
+
 class BossHitWindow(NamedRange):
     """How long a harder boss can be hit once his red ends, in tenths of a second (needs Harder Bosses; for now Papu
     Papu); then he's red again until the slam after his next spin (or his next spin starts). by_speed: from Boss Speed, 4.4
-    s at 100% down to 2.2 s at 200%. 5 to 100: that time (0.5 to 10 s) at any Boss Speed."""
+    s at 100% down to 2.2 s at 200%. 20 to 100: that time (2 to 10 s) at any Boss Speed."""
 
     display_name = "Boss Hit Window"
-    range_start = 5
+    range_start = 20
     range_end = 100
     default = 0
     special_range_names = {"by_speed": 0}
@@ -781,6 +792,7 @@ crash_option_groups = [
         BossHealth,
         BossSpeed,
         BossSlamTime,
+        BossSlamAim,
         BossHitWindow,
         HarderBossesAkuAku,
     ]),
@@ -845,6 +857,7 @@ class CrashOptions(PerGameCommonOptions):
     boss_health: BossHealth
     boss_speed: BossSpeed
     boss_slam_time: BossSlamTime
+    boss_slam_aim: BossSlamAim
     boss_hit_window: BossHitWindow
     harder_bosses_aku_aku: HarderBossesAkuAku
     crash_fur_color: CrashFurColor

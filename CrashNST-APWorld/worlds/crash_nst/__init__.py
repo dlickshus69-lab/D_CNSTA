@@ -1126,5 +1126,7 @@ class CrashWorld(World):
         # speed; 0: by the boss speed
         result["boss_slam_time"] = self.options.boss_slam_time.value if harder else 0
         result["boss_hit_window"] = self.options.boss_hit_window.value if harder else 0
+        # (V1.4) how far ahead of Crash his slam aims, in percent (0: where Crash is, 100: where he's heading)
+        result["boss_slam_aim"] = self.options.boss_slam_aim.value if harder else 55
         result["boss_aku_aku"] = bool(self.options.harder_bosses_aku_aku.value)
         return result
