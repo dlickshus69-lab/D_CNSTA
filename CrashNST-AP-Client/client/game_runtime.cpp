@@ -738,6 +738,9 @@ namespace ingame
         }
         // the Aku Aku lock's message filter (event_sent) is on while the lock is
         std::atomic_bool aku_messages_blocked{false};
+        // V1.3.82 (see boss_rule_hit): a harder boss fight, where Crash has no mask (the game's count is 0), whatever Aku's
+        // manager still shows
+        std::atomic_bool boss_masks_off{false};
         // set while the client itself hands Aku a mask (/aku_give, the Aku Aku filler): that message goes through
         std::atomic_bool own_aku_message{false};
         // after /aku_give: when to look at Aku Aku's manager again, to log whether a mask came out
@@ -5566,6 +5569,9 @@ namespace ingame
             // a mask taken for it: checked a second later (the count, and whether his mask is still on screen)
             std::uint64_t hit_check_at = 0;
             int hit_masks = 0;
+            // (V1.3.82: Aku's manager as it was at the hit, see boss_rule_hit)
+            int hit_aku_state = 0;
+            bool hit_aku_out = false;
             // V1.3.13: a landing while red makes him flinch (the game's hit reaction); he stays red through it, so it's
             // clear it didn't count
             bool forbidden = false;
@@ -7292,11 +7298,20 @@ namespace ingame
                 texts += (texts.empty() ? "" : ", ") + text;
             return static_cast<unsigned>(red_constants.size());
         }
-        void boss_rule_hit(BossTuning &t, std::ostream &out)
+        // V1.3.82 (Eric's V1.3.81 run: "he was a little bugged out when I jumped on him, and I wasn't dying"; the log: Crash
+        // came into the fight with a mask out, the Aku Aku lock set the game's count to 0 and its no-masks switch on, but
+        // Aku's manager still showed it (state 1), so each landing on him while red sent Aku Aku the game's hit, which did
+        // nothing with no mask to take: Crash flinched and lived, three times; Papu Papu's spin killed him all the same):
+        // in a harder boss fight (boss_masks_off) he has no mask, as the game counts it, whatever Aku's manager shows, and
+        // `no_mask` (a mask's hit that didn't take, see the check a second on) goes straight to his death
+        int boss_rule_masks()
         {
-            const auto crash = player();
-            const auto [state, mask_out] = aku_manager_state(crash);
-            const int masks = mask_out ? std::clamp(state, 1, 3) : 0;
+            const auto [state, mask_out] = aku_manager_state(player());
+            return boss_masks_off.load() ? 0 : mask_out ? std::clamp(state, 1, 3) : 0;
+        }
+        void boss_rule_hit(BossTuning &t, std::ostream &out, bool no_mask = false)
+        {
+            const int masks = no_mask ? 0 : boss_rule_masks();
             if (masks >= 3)
             {
                 out << "; Crash is invincible (three masks): no hit";
@@ -7464,7 +7479,7 @@ namespace ingame
             // isn't that message at all (Crash's damage script takes his life, "Death_Common_Spin"). So the game's rule,
             // done directly: a mask less, nothing while invincible, a life without a mask
             const auto [state, mask_out] = aku_manager_state(player());
-            t.hit_masks = mask_out ? std::clamp(state, 1, 3) : 0;
+            t.hit_masks = boss_rule_masks(), t.hit_aku_state = state, t.hit_aku_out = mask_out;
             boss_rule_hit(t, line);
             if (t.hit_masks == 1 || t.hit_masks == 2)
                 t.hit_check_at = now + 1000;
@@ -11533,6 +11548,15 @@ namespace ingame
                 const auto [aku, out] = aku_manager_state(player());
                 std::cout << "Boss rule: a second after Crash's hit, Aku's manager is in state " << aku << (out ? ", his mask still on screen" : ", no mask on screen")
                           << " (" << t.hit_masks << " masks before)\n" << std::flush;
+                // (V1.3.82: the mask's hit didn't take, nothing changed and he isn't blinking: he had none to lose, so the
+                // landing costs him his life, see boss_rule_hit)
+                if (aku == t.hit_aku_state && out == t.hit_aku_out && crash_game_flag("DamagedInvulnerable") != 1 && !crash_dead_now())
+                {
+                    std::ostringstream line;
+                    line << "Boss rule: the mask's hit didn't take (Aku's manager as before, Crash not blinking): he had none to lose";
+                    boss_rule_hit(t, line, true);
+                    std::cout << line.str() << "\n" << std::flush;
+                }
             }
             if (red != t.red)
             {
@@ -15489,6 +15513,7 @@ namespace ingame
             // V1.3.33 (Eric: "get rid of Aku Aku Mask when we have hard bosses"): in a harder boss fight Crash has no mask:
             // the Aku Aku lock takes his (even a filler one) and keeps the fight's crates and items from giving one
             const bool hard = hard_boss_no_masks(state, boss_zone_key());
+            boss_masks_off = hard; // (V1.3.82, see boss_rule_hit)
             static bool hard_told = false;
             if (hard != hard_told)
             {
