@@ -4,7 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **`/roo_files` (from V1.4.3, research for the real Nitro in Ripper Roo's fight):** type it in the console (F1) anywhere. In about a minute it writes `CrashNSTAP\research\roo_nitro_files.zip` in the game's folder. Send the zip with your log.
-- **Ripper Roo's "jumps backwards":** the log now says which way he faces at the top of each hop, to tell a hop the other way round (meant to happen) from him facing backwards (not meant to).
-- Boss Speed speeds up his hops; the pause after each landing stays as the game has it for now (V1.4.2's change to it didn't take).
-- From V1.4.2: Ripper Roo doesn't stop after his third hit; with harder bosses on, each pattern goes either way round at random.
+- **Ripper Roo's patterns change (harder bosses on):** each time a stage starts (the fight's start, a death, a hit), he gets two new patterns, picked at random from 64 loops over his platforms (never the game's own V). Each time round he does one or the other.
+- **He sometimes hops onto Crash:** now and then (8 s apart at least) his next hop is to the platform Crash is on, then he goes back to his pattern.
+- **No more hopping backwards without turning:** his pattern is only changed while he's standing, not as a hop starts.
+- **`/roo_files` (for the real Nitro):** type it in the console (F1); it writes `CrashNSTAP\research\roo_nitro_files.zip` in the game's folder. Send the zip with your log.
