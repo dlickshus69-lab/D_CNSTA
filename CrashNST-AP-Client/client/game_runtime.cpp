@@ -12062,7 +12062,7 @@ namespace ingame
             // entry two ahead of the one he's on gets the platform it's to be, and the one three ahead too when the pool has
             // it. V1.4.6's rule holds (the game works out his turn for a hop as the hop before it starts, reading the entry
             // after next): an entry is only changed when it's neither the one he's on nor the next. Now and then (1 landing
-            // in 6, 8 s apart at least, from his third hop of a stage), the entry two ahead is the platform Crash is on
+            // in 5 since V1.4.8, 8 s apart at least, from his third hop of a stage), the entry two ahead is the platform Crash is on
             // instead, when it's next to the platforms before and after it, and his pattern goes on after it.
             static std::mt19937 rng{std::random_device{}()};
             const bool rules = state.boss_rules != 0;
@@ -12353,7 +12353,7 @@ namespace ingame
                             bool onto_crash = false;
                             int on_crash = -1;
                             std::array<float, 3> crash{};
-                            if (r.stage_hops >= 2 && now - r.crash_hop_at >= 8000 && rng() % 6 == 0 && player() && roo_where(player(), crash))
+                            if (r.stage_hops >= 2 && now - r.crash_hop_at >= 8000 && rng() % 5 == 0 && player() && roo_where(player(), crash))
                             {
                                 on_crash = platform_near(crash);
                                 if (on_crash >= 0 && on_crash != next_on && on_crash != roo_on && on_crash != want_b &&
@@ -12411,6 +12411,16 @@ namespace ingame
             for (const auto &st : r.stages)
                 if (st.data && st.jump_at)
                     paced(st.data + st.jump_at, (st.name + "'s hop time").c_str());
+            // (V1.4.8, Eric's V1.4.7 run: "I don't know if his speed is fast. It doesn't look, to me it doesn't look fast";
+            // the log: 0.40 s in the air at 200%, but still 0.64 s between hops, as at 100%. His hop turn's 0.7 s is set
+            // again as he lands from the three times in its data, 0.1, 0.2 and 0.4 s: those are shorter too)
+            if (const auto data = r.hop_turn ? value<Address>(r.hop_turn + 16) : 0; data && typed(data, 0x13bbb10))
+            {
+                const auto dmeta = value<Address>(data + 32);
+                for (const char *name : {"Float_id_tg4ry7rj", "Float_id_kmfljugp", "Float_id_z8tas0xm"})
+                    if (const unsigned at = field_offset(dmeta, name, 4))
+                        paced(data + at, ("turn before a hop (" + std::string(name).substr(9) + ")").c_str());
+            }
             // (V1.4.4: not his hop turn's 0.7 s: the game sets it again at each landing, and his wait stayed 0.7 s in Eric's
             // V1.4.2 run; his stage's timer is looked at as he lands instead, see roo_research_update)
             std::cout << std::flush;

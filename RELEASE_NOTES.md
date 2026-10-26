@@ -4,8 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Ripper Roo's patterns grow with each hit:** 3 platforms to start, a new pattern of 4 after your first hit, then 5, and so on (up to 8 for his last hit at 200% health).
-- He keeps each pattern, round and round, until you hit him. It's picked at random when the stage starts, so a death brings a new 3.
-- Every hop goes to a neighboring platform, diagonals included, and a pattern of up to 7 uses each platform once (8 repeats one or two). He never hops straight back.
-- He still hops onto your platform now and then, then picks up his pattern where he left it.
-- The real Nitro is still in the works.
+- **Ripper Roo waits less between hops with Boss Speed:** the turn before each hop was 0.7 s at every speed, and is now about 0.5 s at 200%. That's on top of his quicker hops (0.43 s in the air).
+- **He hops onto you a little more often:** 1 landing in 5 instead of 1 in 6, still at least 8 s apart.
+- Same as V1.4.7 otherwise: a pattern of 3, one more platform after each hit, kept until you hit him, new after a death.
+- The real Nitro is next.
