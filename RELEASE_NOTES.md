@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Ripper Roo research (Crash 1):** fight him (`/boss ripper1` on your test seed) and send the log and a clip. The log lists his arena, each hop (from platform to platform, with its timing) and each TNT as it comes and goes, to map his patterns.
-- **Nitro test:** with harder bosses on, after his first hops one Nitro appears on a platform he lands on, far from Crash. Keep Crash off it and watch what Roo does when he lands on it.
-- Boss Health already gives him more hits in this build.
-- The log may hold the game for a moment about 4 s into his fight, as it lists the arena (research only).
-- From V1.4: no stutter in Papu Papu's fight, Boss Slam Aim, and all of Papu in Stable V1.4.
+- **Ripper Roo no longer stops after his third hit:** with more health he has more hits than the game's 3 patterns, so after the third one he starts again from the first.
+- **Two ways round per pattern (harder bosses on):** each time he starts a pattern over, he goes one way round or the other, at random. Same platforms, other direction, so it's different after every death too.
+- **Faster with Boss Speed:** his hops and his wait after each landing are shorter, up to 35% faster at 200%.
+- No Nitro yet: the game doesn't load Nitro crates in his arena (more in the chat).
+- The log follows his stages and the changes above, to check them.

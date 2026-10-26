@@ -11680,6 +11680,25 @@ namespace ingame
             std::string sequence;
             std::map<Address, RooCrate> crates;
             std::set<std::string> nitro_whys;
+            // (V1.4.2) his stages: each a BossStage_0N whose stage script hops him over its list of platforms in order, one
+            // stage after another as he's hit (his AI's stage counter), and what's done with them
+            struct Stage
+            {
+                Address owner = 0, c = 0, data = 0, entries = 0;
+                unsigned on_at = 0, index_at = 0, jump_at = 0, count = 0;
+                int last_index = -1;
+                bool reversed = false;
+                std::string name, order;
+            };
+            std::vector<Stage> stages;
+            Address ai = 0, hop_turn = 0;
+            unsigned counter_at = 0, react_at = 0, fight_at = 0, wait_at = 0, control_lines = 0, watch_lines = 0, cycles = 0;
+            bool counter_fixed = false, stages_found = false;
+            std::uint64_t next_stages = 0;
+            std::map<Address, float> game_floats, pace_set; // (his pace's settings as the game had them, and as set)
+            std::set<Address> pace_wild;
+            std::vector<std::pair<std::string, Address>> watch_ints, watch_bytes;
+            std::map<Address, int> watch_last;
         } roo_research;
         std::string roo_xyz(const std::array<float, 3> &v)
         {
@@ -11757,6 +11776,311 @@ namespace ingame
                 ++r.list_lines;
                 std::cout << line.str() << "\n";
             }
+        }
+        // (V1.4.2) a list's entries: the list itself, or what its handle or pointer leads to, as the game's lists are laid
+        // out (count +16, room +20, entries +32); how it was found, for the log
+        bool roo_list_find(Address v, Address &entries, unsigned &count, std::string &how)
+        {
+            const std::array<std::pair<Address, const char *>, 3> tries{{{v, "itself"}, {resolve(v), "its handle"}, {readable(v, 8) ? value<Address>(v) : 0, "its pointer"}}};
+            for (const auto &[at, what] : tries)
+            {
+                if (at < 0x10000 || at > 0x7ffffffeffffULL || !readable(at, 40))
+                    continue;
+                const unsigned n = value<unsigned>(at + 16), room = value<unsigned>(at + 20);
+                const auto e = value<Address>(at + 32);
+                if (n >= 2 && n <= 16 && room >= n && room <= 64 && e && readable(e, n * 8))
+                {
+                    entries = e, count = n, how = what;
+                    return true;
+                }
+            }
+            return false;
+        }
+        // where a list's entry is: the thing itself or what its handle leads to, if it's on his arena's floor
+        bool roo_entry_where(Address e, std::array<float, 3> &at)
+        {
+            for (const auto thing : {e, resolve(e)})
+            {
+                if (thing < 0x10000 || thing > 0x7ffffffeffffULL || !readable(thing, 48))
+                    continue;
+                Matrix m{};
+                std::array<float, 3> p{};
+                if (entity_matrix(thing, m))
+                    p = {m[12], m[13], m[14]};
+                else if (!read(thing + 32, p))
+                    continue;
+                if (std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]) && std::abs(p[0]) < 2000 && std::abs(p[1]) < 2000 && p[2] > -100 && p[2] < 400)
+                {
+                    at = p;
+                    return true;
+                }
+            }
+            return false;
+        }
+        // his arena's platforms by where they are: 3 across (left, middle, right) and 3 deep (front, middle, back; Crash
+        // starts at the front)
+        std::string roo_platform_name(const std::array<float, 3> &at)
+        {
+            const char *row = at[1] < 110 ? "front" : at[1] < 520 ? "middle" : "back";
+            const char *column = at[0] < -200 ? "left" : at[0] > 190 ? "right" : "middle";
+            return std::string(row) + "-" + column;
+        }
+        std::string roo_stage_order(const RooResearch::Stage &st)
+        {
+            std::string order;
+            for (unsigned k = 0; k < st.count; ++k)
+            {
+                std::array<float, 3> at{};
+                order += (k ? ", " : "") + (roo_entry_where(value<Address>(st.entries + k * 8), at) ? roo_platform_name(at) : std::string("?"));
+            }
+            return order;
+        }
+        // (V1.4.2, Eric's V1.4.1 run: "at one point, he, like, stopped moving for a bit, like, after I hit him three times
+        // ... once I hit him again, he started moving again. But he went back to, like, his original pattern"; the log: he
+        // has three stages, BossStage_01 to 03, each hopping him over its list of 4 platforms in order, over and over (the
+        // first: middle-middle, front-left, middle-middle, front-right), his AI's stage counter going up by one at each hit
+        // (2.2 s on, once his hit is over) and the next stage starting: with 6 hits, after the third no stage was left and
+        // he stood 11 s, until a TNT got him again; what he wants: "two patterns per health or increment. So he'll do one
+        // or the other. Maybe he'll like do one of the pattern twice", "Every time you die, it's not the same pattern"):
+        // - with more hits than stages, the counter goes back to the first stage after the last one's hit, so he always
+        //   has one (1, 2, 3, 1, 2, 3 ...);
+        // - with the boss rules on, each time a stage starts its list over (and as it starts), it goes one way round or
+        //   the other, at random: the same platforms and hops, the other way (its entries after the first in reverse:
+        //   entries only swapped within the list, so the game's own count of them is as it was);
+        // - with Boss Speed above 100%, his hops (the stages' hop time, 0.581 s) and his wait after each landing (his hop
+        //   turn's 0.7 s) are shorter, 35% faster at 200% (from the game's own values, kept)
+        // and his AI's and his stages' whole-number and on/off settings go to the log as they change (600 lines)
+        void roo_control(const Shared &state, std::uint64_t now)
+        {
+            auto &r = roo_research;
+            if (!r.roo)
+                return;
+            // (his AI and his stages, once he's there; again if they're made again)
+            if ((!r.stages_found || !event_owner(r.ai ? value<Address>(r.ai + 24) : 0)) && now >= r.next_stages)
+            {
+                r.next_stages = now + 1000;
+                r.stages.clear(), r.ai = 0, r.hop_turn = 0, r.watch_ints.clear(), r.watch_bytes.clear(), r.watch_last.clear();
+                for (const auto &[c, script] : entity_scripts(r.roo))
+                {
+                    const auto meta = value<Address>(c + 56);
+                    if (script == "BossRipperRoo_AiBossManager")
+                    {
+                        r.ai = c, r.counter_at = field_offset(meta, "InternalStore__internalCounter_id_jkfq0yq8", 4);
+                        r.react_at = field_offset(meta, "Bool_id_2bqbieq0", 1), r.fight_at = field_offset(meta, "isBossFightOn_id_cag0puz2", 1);
+                    }
+                    else if (script == "BossRipperRoo_HopTurnHandler")
+                        r.hop_turn = c, r.wait_at = field_offset(meta, "Float_id_xx7td88g", 4);
+                }
+                for (const auto owner : event_owners())
+                {
+                    const auto name = string(value<Address>(owner + 128));
+                    if (name.rfind("BossStage_", 0) != 0)
+                        continue;
+                    for (const auto &[c, script] : entity_scripts(owner))
+                    {
+                        if (script != "BossRipperRoo_StageHandler")
+                            continue;
+                        RooResearch::Stage st;
+                        st.owner = owner, st.c = c, st.name = name;
+                        const auto meta = value<Address>(c + 56);
+                        st.on_at = field_offset(meta, "Bool_id_xqbcbtlk", 1), st.index_at = field_offset(meta, "Int_id_e1snv0nq", 4);
+                        const auto data = value<Address>(c + 16);
+                        if (data && typed(data, 0x13bbb10))
+                        {
+                            const auto dmeta = value<Address>(data + 32);
+                            st.data = data, st.jump_at = field_offset(dmeta, "Float_id_fs7pt9lr_metaField", 4);
+                            const unsigned list_at = field_offset(dmeta, "Waypoint_List_id_0pasx98y", 8);
+                            const auto v = list_at ? value<Address>(data + list_at) : 0;
+                            std::string how;
+                            if (v && roo_list_find(v, st.entries, st.count, how))
+                                st.order = roo_stage_order(st);
+                            // (research: the list's own words, and what its handle leads to)
+                            std::ostringstream raw;
+                            raw << "Roo research: " << name << "'s platform list (data +" << std::hex << list_at << ") 0x" << v << ":";
+                            for (unsigned k = 0; v && readable(v, 0x60) && k < 12; ++k)
+                                raw << " " << value<Address>(v + k * 8);
+                            if (const auto target = v ? resolve(v) : 0; target && readable(target, 0x60))
+                            {
+                                raw << " | its handle leads to 0x" << target << ":";
+                                for (unsigned k = 0; k < 12; ++k)
+                                    raw << " " << value<Address>(target + k * 8);
+                            }
+                            raw << std::dec << (st.entries ? " | found " + std::to_string(st.count) + " entries (" + how + "): " + st.order : std::string(" | no entries found"));
+                            std::cout << raw.str() << "\n";
+                        }
+                        r.stages.push_back(st);
+                        // (the watch: his stages' whole numbers and on/off settings)
+                        const unsigned count = value<unsigned>(meta + 24), size = value<std::uint16_t>(meta + 90);
+                        const auto fields = value<Address>(meta + 40);
+                        for (unsigned i = 0; fields && count <= 256 && i < count; ++i)
+                        {
+                            const auto field = value<Address>(fields + i * 8);
+                            const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                            if (value<Address>(field) == base() + 0x17afe98 || offset < 0x40 || offset + bytes > size)
+                                continue;
+                            const auto label = name + " " + string(value<Address>(field + 48), 64);
+                            if (bytes == 4)
+                                r.watch_ints.emplace_back(label, c + offset);
+                            else if (bytes == 1)
+                                r.watch_bytes.emplace_back(label, c + offset);
+                        }
+                    }
+                }
+                std::sort(r.stages.begin(), r.stages.end(), [](const auto &a, const auto &b) { return a.name < b.name; });
+                if (r.ai)
+                {
+                    const auto meta = value<Address>(r.ai + 56);
+                    const unsigned count = value<unsigned>(meta + 24), size = value<std::uint16_t>(meta + 90);
+                    const auto fields = value<Address>(meta + 40);
+                    for (unsigned i = 0; fields && count <= 256 && i < count; ++i)
+                    {
+                        const auto field = value<Address>(fields + i * 8);
+                        const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                        if (value<Address>(field) == base() + 0x17afe98 || offset < 0x40 || offset + bytes > size)
+                            continue;
+                        const auto label = "his AI " + string(value<Address>(field + 48), 64);
+                        if (bytes == 4)
+                            r.watch_ints.emplace_back(label, r.ai + offset);
+                        else if (bytes == 1)
+                            r.watch_bytes.emplace_back(label, r.ai + offset);
+                    }
+                    // (research: his AI's list of stages)
+                    const auto dmeta = value<Address>(value<Address>(r.ai + 16) + 32);
+                    const unsigned list_at = field_offset(dmeta, "Entity_List_id_07dn438y", 8);
+                    const auto v = list_at ? value<Address>(value<Address>(r.ai + 16) + list_at) : 0;
+                    Address entries = 0;
+                    unsigned n = 0;
+                    std::string how;
+                    std::ostringstream line;
+                    line << "Roo research: his AI's list of stages 0x" << std::hex << v << std::dec;
+                    if (v && roo_list_find(v, entries, n, how))
+                    {
+                        line << ": " << n << " (" << how << "):";
+                        for (unsigned k = 0; k < n; ++k)
+                        {
+                            const auto e = value<Address>(entries + k * 8);
+                            std::string named;
+                            for (const auto thing : {e, resolve(e)})
+                                if (thing >= 0x10000 && readable(thing, 0x90) && named.empty())
+                                    named = string(value<Address>(thing + 128), 64);
+                            line << " " << (named.empty() ? object_brief(e, 0x100, 2) : named);
+                        }
+                    }
+                    else
+                        line << ": no entries found";
+                    std::cout << line.str() << "\n";
+                }
+                r.stages_found = r.ai && r.counter_at && !r.stages.empty();
+                std::cout << "Roo control: his AI " << (r.ai ? "found" : "not found") << " (stage counter " << (r.counter_at ? "found" : "not found") << "), " << r.stages.size()
+                          << " stages:";
+                for (const auto &st : r.stages)
+                    std::cout << " " << st.name << " [" << (st.entries ? st.order : std::string("no list")) << "]";
+                std::cout << "\n" << std::flush;
+            }
+            if (!r.stages_found)
+                return;
+            // the watch
+            for (const auto &[label, at] : r.watch_ints)
+            {
+                const int v = value<int>(at);
+                if (const auto it = r.watch_last.find(at); it != r.watch_last.end() && it->second != v && r.watch_lines < 600)
+                    ++r.watch_lines, std::cout << "Roo watch +" << seconds(now - r.entered) << ": " << label << " " << it->second << " -> " << v << "\n";
+                r.watch_last[at] = v;
+            }
+            for (const auto &[label, at] : r.watch_bytes)
+            {
+                const int v = value<unsigned char>(at);
+                if (const auto it = r.watch_last.find(at); it != r.watch_last.end() && it->second != v && r.watch_lines < 600)
+                    ++r.watch_lines, std::cout << "Roo watch +" << seconds(now - r.entered) << ": " << label << " " << it->second << " -> " << v << "\n";
+                r.watch_last[at] = v;
+            }
+            const bool fight = value<unsigned char>(r.ai + r.fight_at) != 0, react = r.react_at && value<unsigned char>(r.ai + r.react_at) != 0;
+            const bool any_on = std::any_of(r.stages.begin(), r.stages.end(), [](const auto &st) { return st.on_at && value<unsigned char>(st.c + st.on_at); });
+            // more hits than stages: after the last stage's hit, the first one again
+            if (!react)
+                r.counter_fixed = false;
+            else if (fight && !any_on && !r.counter_fixed)
+            {
+                r.counter_fixed = true;
+                const int counter = value<int>(r.ai + r.counter_at);
+                const int health = health_getter_ok() ? actor_health(r.roo) : 0;
+                if (counter >= static_cast<int>(r.stages.size()) && health > 0)
+                {
+                    write(r.ai + r.counter_at, 0);
+                    if (r.control_lines < 60)
+                        ++r.control_lines, std::cout << "Roo control: hit on his last stage (" << counter << ") with " << health / 100 << " hits left: his next is the first stage again\n";
+                }
+            }
+            // each stage's way round, as it starts its list over
+            std::mt19937 &coin = []() -> std::mt19937 & { static std::mt19937 c{std::random_device{}()}; return c; }();
+            for (auto &st : r.stages)
+            {
+                const bool on = st.on_at && value<unsigned char>(st.c + st.on_at);
+                const int index = st.index_at ? value<int>(st.c + st.index_at) : -1;
+                const bool wanted_rules = state.boss_rules != 0 && st.entries && st.count >= 3;
+                if (!wanted_rules && st.reversed)
+                {
+                    for (unsigned a = 1, b = st.count - 1; a < b; ++a, --b)
+                    {
+                        const auto x = value<Address>(st.entries + a * 8), y = value<Address>(st.entries + b * 8);
+                        write(st.entries + a * 8, y), write(st.entries + b * 8, x);
+                    }
+                    st.reversed = false;
+                }
+                if (on && index != st.last_index && index == 0 && wanted_rules)
+                {
+                    const bool reverse = (coin() & 1) != 0;
+                    if (reverse != st.reversed)
+                    {
+                        for (unsigned a = 1, b = st.count - 1; a < b; ++a, --b)
+                        {
+                            const auto x = value<Address>(st.entries + a * 8), y = value<Address>(st.entries + b * 8);
+                            write(st.entries + a * 8, y), write(st.entries + b * 8, x);
+                        }
+                        st.reversed = reverse;
+                    }
+                    ++r.cycles;
+                    if (r.control_lines < 60)
+                        ++r.control_lines, std::cout << "Roo control: " << st.name << " starts its platforms over, " << (st.reversed ? "the other way round" : "the game's way round")
+                                                     << ": " << roo_stage_order(st) << "\n";
+                }
+                if (on || !st.on_at)
+                    st.last_index = on ? index : -1;
+                else
+                    st.last_index = -1;
+            }
+            // his pace at a boss speed: hops and the wait after each landing shorter
+            const unsigned speed = std::clamp(state.boss_speed, 100u, 200u);
+            const float pace = 1.0f + 0.35f * static_cast<float>(speed - 100) / 100.0f;
+            // (set only where it holds the game's own value or ours: one that changes by itself, a countdown, is left alone)
+            const auto paced = [&](Address at, const char *what)
+            {
+                const float now_value = value<float>(at);
+                if (!std::isfinite(now_value) || now_value <= 0 || now_value > 10 || r.pace_wild.count(at))
+                    return;
+                auto it = r.game_floats.find(at);
+                if (it == r.game_floats.end())
+                    it = r.game_floats.emplace(at, now_value).first;
+                const float game = it->second, want = game / pace, had = r.pace_set.count(at) ? r.pace_set[at] : game;
+                if (std::abs(now_value - want) <= 1e-4f)
+                    return;
+                if (std::abs(now_value - game) > 1e-4f && std::abs(now_value - had) > 1e-4f)
+                {
+                    r.pace_wild.insert(at);
+                    if (r.control_lines < 60)
+                        ++r.control_lines, std::cout << "Roo control: his " << what << " changes by itself (" << game << " -> " << now_value << "): left alone\n";
+                    return;
+                }
+                write(at, want), r.pace_set[at] = want;
+                if (r.control_lines < 60)
+                    ++r.control_lines, std::cout << "Roo control: his " << what << " at " << speed << "% boss speed: " << game << " s -> " << want << " s\n";
+            };
+            for (const auto &st : r.stages)
+                if (st.data && st.jump_at)
+                    paced(st.data + st.jump_at, (st.name + "'s hop time").c_str());
+            if (r.hop_turn && r.wait_at)
+                paced(r.hop_turn + r.wait_at, "wait after a landing");
+            std::cout << std::flush;
         }
         void roo_research_update(const Shared &state, const std::string &boss, std::uint64_t now)
         {
@@ -11921,38 +12245,7 @@ namespace ingame
                     it = r.crates.erase(it);
                 }
             }
-            // with the boss rules on: one Nitro on a platform he has landed on twice, the one farthest from Crash (150 at
-            // least), to see what he does with it
-            if (state.boss_rules && !r.nitro_done && r.nitro_tries < 40 && now >= r.nitro_next && r.hops >= 6)
-            {
-                r.nitro_next = now + 1000;
-                std::array<float, 3> crash{};
-                int pick = -1;
-                float farthest = 150;
-                const int on = r.moving ? -1 : roo_spot_near(r.last);
-                if (player() && roo_where(player(), crash))
-                    for (std::size_t i = 0; i < r.spots.size(); ++i)
-                        if (const float d = std::hypot(r.spots[i].at[0] - crash[0], r.spots[i].at[1] - crash[1]);
-                            r.spots[i].landings >= 2 && static_cast<int>(i) != on && d > farthest)
-                            pick = static_cast<int>(i), farthest = d;
-                if (pick >= 0)
-                {
-                    ++r.nitro_tries;
-                    std::string why;
-                    const auto spot = r.spots[pick].at;
-                    if (nitro_spawn(why, &spot, 0, true))
-                    {
-                        r.nitro_done = true;
-                        std::cout << "Roo research: a Nitro test: one Nitro made on " << roo_spot_text(pick) << " " << roo_xyz(spot) << ", " << std::lround(farthest)
-                                  << " from Crash: what he does when he lands on it\n"
-                                  << std::flush;
-                    }
-                    else if (r.nitro_whys.insert(why).second)
-                        std::cout << "Roo research: the Nitro test waits: " << why << "\n" << std::flush;
-                    if (r.nitro_tries == 40 && !r.nitro_done)
-                        std::cout << "Roo research: the Nitro test gave up after 40 tries\n" << std::flush;
-                }
-            }
+            roo_control(state, now); // (V1.4.2)
         }
 #endif
         void update_boss_tuning(const Shared &state, const std::string &boss)
