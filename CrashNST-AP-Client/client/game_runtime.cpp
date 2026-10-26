@@ -9432,9 +9432,9 @@ namespace ingame
         // V1.3.68: the wall's watch (debug register 3, see papu_wall and wall_apply): the 8 bytes it's on (V1.3.69, after the
         // code review: those with his y, so a store of his y alone is seen too), the place watched (where the game's physics
         // may keep Crash: his x and y in metres) and its kind (0 floats, 1 doubles); whether the wall is on now; the wall (the
-        // arena's middle, the chair's way, how far its curve is from the middle, how far its sides are from the chair's way),
-        // in the game's units; the thread setting the place right now (V1.3.69, after the code review: that setting stops the
-        // watch again, and is let through); and for the tries: the game's stores there, those set out of the wall, how far a
+        // arena's middle, the chair's way, how far it is from the middle), in the game's units; the thread setting the place
+        // right now (V1.3.69, after the code review: that setting stops the watch again, and is let through); and for the
+        // tries: the game's stores there, those set out of the wall, how far a
         // store went from the last one set (small if that place is where the physics goes on from; the gap to where the
         // physics really has him if it's only a copy), and the last store, in the game's units (one more than 300 from it is
         // a teleport, or that memory is something else's now: left alone)
@@ -9442,39 +9442,29 @@ namespace ingame
         std::atomic<std::uint64_t> wall_arm_address{0}, wall_place{0};
         std::atomic_int wall_kind{0};
         std::atomic_bool wall_live{false}, wall_last_known{false}, wall_last_set{false};
-        std::atomic<float> wall_mx{0}, wall_my{0}, wall_ux{1}, wall_uy{0}, wall_front{0}, wall_side{0}, wall_far{0}, wall_lx{0}, wall_ly{0};
+        std::atomic<float> wall_mx{0}, wall_my{0}, wall_ux{1}, wall_uy{0}, wall_front{0}, wall_far{0}, wall_lx{0}, wall_ly{0};
         std::atomic<DWORD> wall_setting_thread{0};
         std::atomic_uint wall_stores{0}, wall_stops{0};
         // V1.3.69 (Eric's V1.3.68 run: "it blocks, but ... when you try to approach it to the side of the chair, he like gets
         // pushed back into the middle ... it shouldn't be teleporting you ... the wall should be the shape of the whole
-        // arena", and "it kind of stutters a little bit ... when I'm walking towards it from the side"; the log: the wall held
-        // him, but past 30 degrees from the chair it went out steeply (to none at 50 degrees) and he was set onto it straight
-        // toward the middle, so a step sideways moved him up to 90 toward the middle): the wall closes the gap in the arena's
-        // ring of benches where the throne is, on the arena's own circle, 7.5% farther from the middle than where Papu Papu
-        // sits (his throne's seat starts 66 to 72 behind that: V1.3.64's run), across 32 degrees on either side of the chair's
-        // way (where the benches end), with straight sides from there out (so the throne can't be reached from the benches
-        // either). A point inside it goes to the nearest point out of it, half a unit past the wall: onto its curve, or square
-        // off a side, as a wall stops him
-        constexpr float wall_front_share = 1.075f, wall_side_angle = 0.5585f; // (32 degrees)
-        // how far a point (f toward the chair from the arena's middle, l to the side) is inside the wall (0: not), and where
-        // it goes out of it (tf, tl)
-        float wall_push(float f, float l, float front, float side, float &tf, float &tl)
+        // arena"; the log: past 30 degrees the wall went out steeply and he was set onto it straight toward the middle, so a
+        // step sideways moved him up to 90 inward): a point inside the wall goes to the nearest point out of it. V1.3.70
+        // (Eric's V1.3.69 run: "I'm like stuck in a corner ... Is there a way we can smooth that out where it's just not a
+        // corner, but it's basically just a straight line"; V1.3.69's wall followed the arena's circle across the throne with
+        // straight sides out from 32 degrees, and beside the throne a side met the curved benches square, a corner to be
+        // stuck in): one straight wall across the whole hut, square to the chair's way, as far from the arena's middle as
+        // V1.3.69's was in front of the throne (7.5% farther than where Papu Papu sits; his throne's seat starts 66 to 72
+        // behind that: V1.3.64's run), at any height. It meets the benches at a wide angle (150 degrees, open toward the
+        // arena), so there's no corner to be caught in; a point past it goes straight back, half a unit in front of it
+        constexpr float wall_front_share = 1.075f;
+        // how far a point (f toward the chair from the arena's middle, l to the side) is past the wall (0: not), and where it
+        // goes back to (tf, tl)
+        float wall_push(float f, float l, float front, float &tf, float &tl)
         {
-            const float r = std::hypot(f, l), a = std::atan2(l, f);
-            if (!(r > front) || !(std::abs(a) < side))
+            if (!(f > front))
                 return 0.0f;
-            // (onto the curve, toward the middle)
-            float depth = r - front;
-            tf = f * (front - 0.5f) / r, tl = l * (front - 0.5f) / r;
-            // (or square off the side's line, where that's nearer: never before the curve's end, which the curve is nearer to)
-            const float sd = a < 0 ? -side : side, cs = std::cos(sd), sn = std::sin(sd);
-            const float along = f * cs + l * sn, d = std::abs(f * sn - l * cs);
-            if (along >= front && d < depth)
-            {
-                const float nf = a < 0 ? sn : -sn, nl = a < 0 ? -cs : cs; // (away from the chair's way)
-                depth = d, tf = along * cs + 0.5f * nf, tl = along * sn + 0.5f * nl;
-            }
-            return depth;
+            tf = front - 0.5f, tl = l;
+            return f - front;
         }
         unsigned wall_debug_register(std::uint64_t at);
         // (V1.3.68) the wall's watch off: nothing set by it from here on, and debug register 3 cleared in every thread
@@ -9599,10 +9589,10 @@ namespace ingame
         }
         // V1.3.68 (Eric: "put the invisible wall basically in front of the chair, not so ... we're trying to reposition crash.
         // It's just an invisible wall where it still makes a circle shape around the arena"): with the harder rules on, an
-        // invisible wall in front of Papu Papu's throne (V1.3.69: on the arena's circle, with straight sides, see wall_push),
-        // at any height, through the whole fight (not once he's beaten). It's in the game's physics, where it keeps Crash (in
-        // metres, see crash_scan_run): inside it, his physics is set out of it each frame (V1.3.68's run: it held him), at the
-        // nearest point, so he goes no farther and can go along it. If that doesn't hold him, each place is watched as the
+        // invisible wall in front of Papu Papu's throne (V1.3.70: one straight line across the hut, see wall_push), at any
+        // height, through the whole fight (not once he's beaten). It's in the game's physics, where it keeps Crash (in metres,
+        // see crash_scan_run): past it, his physics is set back in front of it each frame (V1.3.68's and V1.3.69's runs: it
+        // held him), straight back, so he goes no farther and can go along it. If that doesn't hold him, each place is watched as the
         // game sets it instead (debug register 3, see wall_apply), and one that holds him is kept. The log says how it went
         void papu_wall(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
@@ -9612,7 +9602,7 @@ namespace ingame
             const bool alive = here && !crash_dead_now();
             const bool on = state.boss_rules && t.wall_known && alive && s >= 1 && s <= 6 && s != 4;
             const float front = wall_front_share * t.wall_span, ux = t.wall_dir[0], uy = t.wall_dir[1];
-            wall_mx = t.wall_mid[0], wall_my = t.wall_mid[1], wall_ux = ux, wall_uy = uy, wall_front = front, wall_side = wall_side_angle;
+            wall_mx = t.wall_mid[0], wall_my = t.wall_mid[1], wall_ux = ux, wall_uy = uy, wall_front = front;
             wall_live = on && (t.wall_mode == 1 || t.wall_mode == 3);
             if (!state.boss_rules || !here)
             {
@@ -9758,7 +9748,7 @@ namespace ingame
             // the point out of it, see wall_push)
             const float ax = at[0] - t.wall_mid[0], ay = at[1] - t.wall_mid[1];
             float tf = 0, tl = 0;
-            const float over = wall_push(ax * ux + ay * uy, ay * ux - ax * uy, front, wall_side_angle, tf, tl);
+            const float over = wall_push(ax * ux + ay * uy, ay * ux - ax * uy, front, tf, tl);
             const bool past = over > 0;
             const float tx = t.wall_mid[0] + tf * ux - tl * uy, ty = t.wall_mid[1] + tf * uy + tl * ux;
             // (each place set at the last push: did the game go on from ours, or put its own back?)
@@ -9873,7 +9863,7 @@ namespace ingame
                         std::abs(v[2] - (at[2] * m + t.cplaces[i].dz)) > 1.5)
                         continue;
                     float of = 0, ol = 0;
-                    const float oo = wall_push(ox * ux + oy * uy, oy * ux - ox * uy, front, wall_side_angle, of, ol);
+                    const float oo = wall_push(ox * ux + oy * uy, oy * ux - ox * uy, front, of, ol);
                     if (oo > others)
                         others = oo, other = i;
                 }
@@ -12980,8 +12970,7 @@ namespace ingame
             const float ax = px - mx, ay = py - my;
             float tf = 0, tl = 0;
             const float depth = std::hypot(ax, ay) > 1500 ? 0.0f
-                                                           : wall_push(ax * ux + ay * uy, ay * ux - ax * uy, wall_front.load(std::memory_order_relaxed),
-                                                                       wall_side.load(std::memory_order_relaxed), tf, tl);
+                                                           : wall_push(ax * ux + ay * uy, ay * ux - ax * uy, wall_front.load(std::memory_order_relaxed), tf, tl);
             if (!(depth > 0))
                 return keep(px, py, false);
             // (how far this store went from the last one set out of the wall: small if the physics goes on from this place)

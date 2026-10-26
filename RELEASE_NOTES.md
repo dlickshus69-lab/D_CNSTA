@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **The wall in front of his chair now follows the arena's round edge** across the throne, with straight sides where the benches end. Crash stops where he touches it, from the front or the side, and can walk along it; no more being pushed toward the middle.
-- **No stutter from the side:** the old wall bent sharply there, so each step sideways shoved Crash inward.
-- **The wall stays on:** those shoves made its own check think it had failed, which is how Crash could still get onto the chair.
+- **The wall in front of his chair is one straight line now**, across the whole hut: no corner beside the throne to get stuck in.
+- It's the same distance in front of the throne as before, and still stops Crash where he touches it, at any height.
+- From V1.3.69: no push toward the middle, no stutter, and the wall stays on.
 - His hit window (2 s at 200%) and slam aim (55%) are done.
 - From V1.3.64: 2 to 5 slams after a hit.
