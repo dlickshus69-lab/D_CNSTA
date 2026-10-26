@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **No stutter at the wall:** the moment the game's physics moves Crash into the wall, it's set back before the frame is drawn. The client tries his physics' places in turn and keeps the one that works; the log says which.
-- **His hit window is 2.2 s at 200%** (4.4 s at 100%).
-- From V1.3.70: the wall is one straight line across the hut, in front of the throne.
-- His slam is the same speed all fight; only his spin speeds up per hit, capped since V1.3.36.
-- From V1.3.64: 2 to 5 slams after a hit.
+- **No more going through the wall:** the wall now follows Crash's physics itself, not only where he's drawn, so nothing can hide him walking through it (V1.3.71's smoothing could, and he ended up out of the arena).
+- **Smoother at the wall:** the smoothing only keeps a spot when all of Crash's physics stays at the wall with it, and switches itself off if he ever gets deep past it.
+- **Papu's facing stays steady:** while Crash presses into the wall, his slam's aim no longer leads him into it.
+- **No freeze after a respawn:** finding Crash's physics again looks where it was first, at low priority, instead of reading all the game's memory at once.
+- His hit window is 2.2 s at 200% (4.4 s at 100%).
