@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Papu's wall blends into the benches:** the red wall stays where it was in front of the throne, and each end now curves into the bench, so there's no corner to get stuck in. The yellow parts are gone.
-- **The stick's help at the wall stays on:** before, a turn or a bounce could switch it off for the rest of the fight, so Crash ran in place at the wall.
-- **The wall is drawn in the fight** (from V1.3.79), and only while Crash is alive. F7 hides it.
+- **Crash keeps his speed at Papu's wall:** running into it at an angle, he runs along it as fast as he came, instead of slowing to a walk or stopping. Pushing straight into it, he stops at it.
+- **No falling animation at the wall from the first life:** the wall's help with the stick is on from the start of the fight, and running along the arena's benches no longer switches it off.
+- **The wall blends into the benches** (from V1.3.80): straight in front of the throne, curving into the bench at each end. It's drawn in the fight while Crash is alive; F7 hides it.
 - **Stuck report in the log** (from V1.3.79): if the stick pushes Crash but he barely moves near the wall, the log says where.
 - Crash fixed (V1.3.76), crash reports in the log, no stutter after a respawn, Papu's facing stays on his aim, hit window 2.2 s at 200%.

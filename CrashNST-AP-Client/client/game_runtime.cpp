@@ -9607,7 +9607,9 @@ namespace ingame
         std::atomic<float> wall_stick_rx{1}, wall_stick_ry{0}, wall_stick_fx{0}, wall_stick_fy{1};
         std::atomic<float> wall_stick_in_x{0}, wall_stick_in_y{0}; // (the stick the game was about to get, -1 to 1)
         std::atomic_uint wall_stick_cut{0};                         // (polls with some of the push into the wall taken out)
-        bool wall_stick_known = false; // (trusted earlier this session: the next visits start trusted, still checked)
+        // (V1.3.81: the stick found not to move Crash the camera's way this session: the next visits start without the wall
+        // in the stick; V1.3.74 to V1.3.80 started each session without it until the checks trusted it)
+        bool wall_stick_wrong = false;
         // (after the code review: when the game's thread last set it, so nothing is taken out if that stops, and which pad
         // the stick recorded for the check was from: the one being pushed, not an idle second pad)
         std::atomic<std::uint64_t> wall_stick_at{0};
@@ -10047,8 +10049,17 @@ namespace ingame
                 return;
             }
             rx /= rl, ry /= rl, fx /= fl, fy /= fl;
-            if (wall_stick_known && !t.stick_samples && !t.stick_trusted)
-                t.stick_trusted = t.stick_told = t.stick_carried = true, t.stick_trust = 1.0f; // (as earlier this session)
+            // V1.3.81 (Eric's V1.3.80 run: "he's falling, he's doing the falling animation again"; the log: the stick's checks
+            // trusted it only 18 s in, in his third life, so his first two lives had the wall in his physics alone): the wall
+            // is in the stick from the start of each visit (it has moved him the camera's way in every run: 29 of 30, 210 of
+            // 216, 275 of 282, 186 of 188, 16 of 20 ...), and the checks only take it out if they find it doesn't, as before
+            if (!t.stick_carried)
+            {
+                t.stick_carried = true, t.stick_trusted = !wall_stick_wrong, t.stick_trust = t.stick_trusted ? 1.0f : 0.0f;
+                if (t.stick_trusted && !t.stick_told)
+                    t.stick_told = true, told("the wall is in the stick from the start: within " + std::to_string(static_cast<int>(wall_stick_zone)) +
+                                              " of it, the stick's push into it is turned along it");
+            }
             // (V1.3.77: how far in front of the wall he is and its way into it, where he's nearest it, curved ends and all: see
             // wall_shape)
             const float ux = t.wall_dir[0], uy = t.wall_dir[1], front = wall_front_share * t.wall_span;
@@ -10060,8 +10071,8 @@ namespace ingame
             // (the check, while he runs freely away from the wall. V1.3.80 (Eric's V1.3.79 run: the stick's steering was off
             // 1.4 s after it was trusted, and in each of his stuck spots; every frame was a check, so a turn's or a bounce's
             // or a landing's 9 frames in a row undid 30 right ones): only with the stick held the same way (within 15
-            // degrees) for 0.25 s, at most 10 a second, and him running on the floor (150 to 700 a second); trusted from 20
-            // checks on with 3 in 4 right (as they go: a moving average), and not trusted again only under 2 in 5)
+            // degrees) for 0.25 s, at most 10 a second, and him running on the floor (150 to 700 a second); from 20 checks on,
+            // the wall is taken out of the stick under 2 in 5 right (as they go: a moving average), and put back from 3 in 4)
             const auto now = GetTickCount64();
             const float sx = wall_stick_in_x.load(), sy = wall_stick_in_y.load(), vx = t.crash_v[0], vy = t.crash_v[1], v = std::hypot(vx, vy);
             const float wx = rx * sx + fx * sy, wy = ry * sx + fy * sy, w = std::hypot(wx, wy);
@@ -10072,22 +10083,25 @@ namespace ingame
             if (pushed)
                 t.stick_wx = wx / w, t.stick_wy = wy / w;
             const float h = at[2] - (t.arena_known ? t.arena_at[2] : wall_floor.load());
-            if (held && now - t.stick_held_at >= 250 && now - t.stick_check_at >= 100 && v > 150 && v < 700 && h < 10 && -past > 2 * wall_stick_zone)
+            // (V1.3.81, Eric's V1.3.80 run: the checks took the wall out of the stick at 68 of 84 right, after 9 or more wrong
+            // in a row: running around the arena along its bench, the stick pushed into the bench and he went along it.
+            // Only well inside the bench's ring, 40 from it, see wall_shape)
+            const float ring_f = ax * ux + ay * uy - wall_ring_mid_share * t.wall_span, ring_l = ay * ux - ax * uy;
+            const bool clear = std::hypot(ring_f, ring_l) < wall_ring_share * t.wall_span - 40;
+            if (held && now - t.stick_held_at >= 250 && now - t.stick_check_at >= 100 && v > 150 && v < 700 && h < 10 && clear && -past > 2 * wall_stick_zone)
             {
                 t.stick_check_at = now;
                 const bool agrees = (wx * vx + wy * vy) / (w * v) > 0.866f;
                 ++t.stick_samples, t.stick_agree += agrees ? 1 : 0;
-                // (after the code review: from the first check only when it isn't carried over from earlier this session)
-                t.stick_trust = t.stick_samples == 1 && !t.stick_carried ? (agrees ? 1.0f : 0.0f) : t.stick_trust * 0.9f + (agrees ? 0.1f : 0.0f);
+                t.stick_trust = t.stick_trust * 0.9f + (agrees ? 0.1f : 0.0f);
                 if (t.stick_samples >= 20)
                 {
                     const bool was = t.stick_trusted;
                     t.stick_trusted = t.stick_trust >= (was ? 0.4f : 0.75f);
-                    wall_stick_known = t.stick_trusted;
-                    if (t.stick_trusted && !t.stick_told)
-                        t.stick_told = true, told("the wall is in the stick too: within " + std::to_string(static_cast<int>(wall_stick_zone)) +
-                                                  " of it, the stick's push into it is taken out (it moves him the camera's way: " + std::to_string(t.stick_agree) + " of " +
-                                                  std::to_string(t.stick_samples) + " checks)");
+                    wall_stick_wrong = !t.stick_trusted;
+                    if (t.stick_trusted && !was)
+                        told("the wall is in the stick again: the stick moves Crash the camera's way (" + std::to_string(t.stick_agree) + " of " +
+                             std::to_string(t.stick_samples) + " checks)");
                     if (was && !t.stick_trusted && !t.stick_lost_told)
                         t.stick_lost_told = true, told("the stick stopped moving Crash the camera's way (" + std::to_string(t.stick_agree) + " of " +
                                                        std::to_string(t.stick_samples) + " checks in all): the wall is in his physics only until it does again");
@@ -15772,7 +15786,7 @@ namespace ingame
     }
     // V1.3.74 (see wall_stick_zone): the left stick as the game is about to get it (after the traps), with the push into
     // Papu Papu's wall taken out as Crash comes up to it: what's left of it into the wall goes from all of it wall_stick_zone
-    // in front of the wall to none 2 in front of it; along it, untouched
+    // in front of the wall to none 2 in front of it; along it, untouched (V1.3.81: and as long as the stick was)
     bool wall_stick(unsigned pad, short &x, short &y)
     {
         const float sx = x / 32767.0f, sy = y / 32767.0f;
@@ -15797,7 +15811,19 @@ namespace ingame
         const float det = rx * fy - fx * ry;
         if (!(into > 0) || keep >= 1 || !std::isfinite(keep) || !(std::abs(det) > 0.3f))
             return false;
+        const float full = std::hypot(wx, wy), along = std::hypot(wx - into * ux, wy - into * uy);
         wx -= (1 - keep) * into * ux, wy -= (1 - keep) * into * uy;
+        // V1.3.81 (Eric's V1.3.80 run: "sometimes he like walks when he's like running towards the wall ... I think he
+        // sometimes stops a little bit ... running towards a normal wall ... He doesn't stop. He doesn't like lose his
+        // momentum"; the log: pushed toward the wall 32 degrees off straight into it, the stick's push into it taken out
+        // left 16% of it, and he stood): what's left is as long as the stick was, so he runs along the wall as fast as he
+        // came; pushed straight into it (within 15 degrees: what's along it under a quarter of the stick), less of that, down
+        // to none, so he stops at it
+        if (const float left = std::hypot(wx, wy); left > 1e-4f && full > 1e-4f)
+        {
+            const float length = left + (full - left) * std::clamp(along / (0.25f * full), 0.0f, 1.0f);
+            wx *= length / left, wy *= length / left;
+        }
         // (back to the stick: x along the camera's right, y along where it looks; after the code review, both scaled
         // down together past the stick's edge, so its way stays along the wall)
         float nx = (fy * wx - fx * wy) / det, ny = (rx * wy - ry * wx) / det;
