@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **The wall in front of his chair is one straight line now**, across the whole hut: no corner beside the throne to get stuck in.
-- It's the same distance in front of the throne as before, and still stops Crash where he touches it, at any height.
-- From V1.3.69: no push toward the middle, no stutter, and the wall stays on.
-- His hit window (2 s at 200%) and slam aim (55%) are done.
+- **No stutter at the wall:** the moment the game's physics moves Crash into the wall, it's set back before the frame is drawn. The client tries his physics' places in turn and keeps the one that works; the log says which.
+- **His hit window is 2.2 s at 200%** (4.4 s at 100%).
+- From V1.3.70: the wall is one straight line across the hut, in front of the throne.
+- His slam is the same speed all fight; only his spin speeds up per hit, capped since V1.3.36.
 - From V1.3.64: 2 to 5 slams after a hit.

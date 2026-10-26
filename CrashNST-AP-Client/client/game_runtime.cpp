@@ -5549,7 +5549,7 @@ namespace ingame
             std::uint64_t slam_wait_since = 0, start_timer_at = 0;
             // V1.3.58 (see papu_window): once his red ends, how long he can be hit (ms, /boss_window), until when, whether
             // that's on, and a red begun in his spin waits for the next one's end (red_skip_spin)
-            unsigned window_ms = 2000, window_lines = 0, window_percent = 200;
+            unsigned window_ms = 2200, window_lines = 0, window_percent = 200;
             std::uint64_t window_until = 0;
             bool window_on = false, red_skip_spin = false, window_fixed = false;
             // V1.3.59 (Eric's V1.3.58 run: after some hits the game's immunity timer didn't run, so his red ended as his next
@@ -5610,9 +5610,11 @@ namespace ingame
             // the read's step (0 not yet, 1 reading, 2 read, 3 checked that they follow him), the reads for this Crash, where he
             // was then, when the next may start; each place (floats or doubles, its height over his feet, and after it was
             // set: whether the game went on from ours or put its own back); the wall's pushes, those in a row now and the
-            // farthest and least past it in them; how it holds him (0 his physics set each frame, 1 a place watched as the game
-            // sets it, being tried, 2 none held him, 3 a watched place holds him), the place tried (since when, its watch's
-            // stores and stops then, re-armed or not), and the kind of place that held him (looked for first after a new read)
+            // deepest in it then. V1.3.71 (see papu_wall_watch): the watch's step (0 not tried yet, 1 trying a place, 2 one
+            // kept: what's drawn stays at the wall with it, 3 none did), the place tried, its frames with Crash pressing into the
+            // wall and those he was drawn in it (and before any watch, for the log), its frames in the wall with no store of
+            // the game's set out of it, re-armed or not, the watch's stops seen last frame, and the kind of place kept (tried
+            // first after a new read)
             bool wall_known = false;
             std::array<float, 2> wall_mid{}, wall_dir{};
             float wall_span = 0;
@@ -5631,19 +5633,14 @@ namespace ingame
             std::array<float, 3> cplace_from{};
             std::uint64_t cplace_scan_at = 0, cplace_lost_at = 0, cplace_check_at = 0;
             Address wall_actor = 0;
-            unsigned wall_pushes = 0, wall_run = 0, wall_run_set = 0, wall_lines = 0;
-            float wall_run_max = 0, wall_run_min = 1e9f;
-            int wall_mode = 0;
+            unsigned wall_pushes = 0, wall_run = 0, wall_lines = 0;
+            float wall_run_max = 0;
+            bool wall_held_told = false;
+            int wall_watch = 0;
             std::size_t wall_try = 0;
-            bool wall_trying = false, wall_held_told = false, wall_try_rearmed = false;
-            std::uint64_t wall_try_at = 0;
-            unsigned wall_try_stores = 0, wall_try_stops = 0, wall_others_run = 0;
-            float wall_try_over = 0;
+            unsigned wall_pressed = 0, wall_rough = 0, wall_quiet = 0, wall_stops_seen = 0, base_pressed = 0, base_rough = 0;
+            bool wall_rearmed = false;
             std::string wall_good;
-            // V1.3.69: how often setting his physics each frame didn't hold him in this fight (after two, the watch is tried
-            // first after a new read), and when none of the places held him (tried again 20 s later)
-            unsigned wall_fails = 0;
-            std::uint64_t wall_none_at = 0;
             Address ms_wait_seen = 0;
             float ms_wait_last = 0;
             unsigned slams_seen = 0;
@@ -9525,9 +9522,12 @@ namespace ingame
                 // (V1.3.68: the wall, see papu_wall)
                 if (t.wall_pushes)
                 {
-                    static const char *const ways[] = {"his physics set each frame", "a place watched as the game sets it, being tried", "none of the places held him",
-                                                       "a watched place holds him"};
-                    out << "; the wall: " << t.wall_pushes << " frames with Crash past it, " << ways[std::clamp(t.wall_mode, 0, 3)];
+                    // (V1.3.71: and the watch, see papu_wall)
+                    static const char *const ways[] = {"no watch yet", "a place being tried with the watch", "a watched place keeps what's drawn at it",
+                                                       "no watched place kept"};
+                    out << "; the wall: " << t.wall_pushes << " frames with Crash in it, his physics set each frame, " << ways[std::clamp(t.wall_watch, 0, 3)];
+                    if (t.base_pressed)
+                        out << " (unwatched, drawn in it " << t.base_rough << " of " << t.base_pressed << " frames)";
                     unsigned listed = 0;
                     for (const auto &p : t.cplaces)
                         if ((p.ours || p.theirs) && listed < 6)
@@ -9587,6 +9587,94 @@ namespace ingame
             const double m = body_meters;
             return std::abs(v[0] - at[0] * m) <= tolerance && std::abs(v[1] - at[1] * m) <= tolerance && std::abs(v[2] - (at[2] * m + p.dz)) <= tolerance + 0.3;
         }
+        // V1.3.71 (Eric's V1.3.70 run: "It does work, but there is a little bit of like stutter"; the log: setting his physics
+        // each frame held him, at most 19 into the wall, but the game put back most of the bigger settings before its next
+        // frame, so he was drawn a little in the wall, then out, then in again): the watch (debug register 3, see wall_apply)
+        // on the places that follow Crash, one at a time (the kind kept before first, then the character controller's), sets
+        // the place back in front of the wall the moment the game stores it, before anything reads it. Kept is one with which
+        // Crash is drawn in the wall (more than 4) in at most 1 of 10 frames he presses into it (out of 40); one the game
+        // doesn't store while he's in the wall is passed over after 60 such frames (watched once more first, in threads made
+        // since). His physics is set each frame all the while, so the wall holds whichever place is being tried; a kept one
+        // that stops keeping him out of it (3 in 10 of 120 frames) has the others tried again
+        template <class Told, class Where>
+        void papu_wall_watch(BossTuning &t, bool past, float over, const Told &told, const Where &where)
+        {
+            const unsigned stops = wall_stops.load(), fresh = stops - t.wall_stops_seen;
+            t.wall_stops_seen = stops;
+            const bool pressed = past || fresh > 0, rough = past && over > 4;
+            // (unwatched, for the log)
+            if (pressed && (t.wall_watch == 0 || t.wall_watch == 3))
+                ++t.base_pressed, t.base_rough += rough ? 1 : 0;
+            if (t.cplace_step != 3 || t.cplaces.empty() || t.wall_watch == 3 || IsDebuggerPresent())
+                return;
+            if (t.wall_watch == 0)
+            {
+                const auto next = std::find_if(t.cplaces.begin(), t.cplaces.end(), [](const BossTuning::CrashPlace &c) { return !c.tried; });
+                if (next == t.cplaces.end())
+                {
+                    t.wall_watch = 3;
+                    told("the watch kept none of the " + std::to_string(t.cplaces.size()) + " places (his physics is still set each frame)");
+                    papu_wall_off();
+                    return;
+                }
+                auto &p = *next;
+                p.tried = true, t.wall_try = static_cast<std::size_t>(next - t.cplaces.begin());
+                // (on the 8 bytes with his y: a double's second 8, or a float's y and height when x isn't at the start of 8)
+                const Address watched = p.kind == 1 ? p.at + 8 : (p.at & 7) ? p.at + 4 : p.at;
+                wall_place = 0;
+                wall_kind = p.kind, wall_far = 0, wall_last_known = false, wall_last_set = false;
+                wall_place = p.at;
+                const auto threads = wall_debug_register(watched);
+                wall_live = true;
+                t.wall_watch = 1, t.wall_pressed = t.wall_rough = t.wall_quiet = 0, t.wall_rearmed = false;
+                told("the watch tries " + where(p.at) + " (place " + std::to_string(t.wall_try + 1) + " of " + std::to_string(t.cplaces.size()) + ", " + place_owner(p.at) +
+                     "), in " + std::to_string(threads) + " threads");
+                return;
+            }
+            const auto &p = t.cplaces[std::min(t.wall_try, t.cplaces.size() - 1)];
+            if (pressed)
+                ++t.wall_pressed, t.wall_rough += rough ? 1 : 0;
+            const std::string counts = std::to_string(t.wall_rough) + " of " + std::to_string(t.wall_pressed) + " frames he pressed into it";
+            if (t.wall_watch == 1)
+            {
+                t.wall_quiet = fresh ? 0 : past ? t.wall_quiet + 1 : t.wall_quiet;
+                std::string why;
+                if (t.wall_quiet >= 60)
+                {
+                    if (!t.wall_rearmed)
+                    {
+                        t.wall_rearmed = true, t.wall_quiet = 0;
+                        wall_debug_register(wall_arm_address.load()); // (once more, into threads made since)
+                        return;
+                    }
+                    why = "the game didn't store it while Crash was in the wall";
+                }
+                else if (t.wall_pressed >= 40 && t.wall_rough * 10 <= t.wall_pressed)
+                {
+                    t.wall_watch = 2, t.wall_good = place_owner(p.at), t.wall_pressed = t.wall_rough = 0;
+                    told("the watch keeps " + where(p.at) + " (" + t.wall_good + "): Crash drawn in the wall in " + counts + " (unwatched: " + std::to_string(t.base_rough) + " of " +
+                         std::to_string(t.base_pressed) + ")");
+                    return;
+                }
+                else if (t.wall_pressed >= 40)
+                    why = "Crash was still drawn in the wall in " + counts;
+                if (!why.empty())
+                    told(where(p.at) + " isn't it: " + why), t.wall_watch = 0, wall_place = 0;
+                return;
+            }
+            // (kept: still keeping him out of it?)
+            if (t.wall_pressed >= 120)
+            {
+                if (t.wall_rough * 10 > 3 * t.wall_pressed)
+                {
+                    told("the watch's place stopped keeping Crash out of the wall (drawn in it in " + counts + "): the others are tried again");
+                    for (auto &c : t.cplaces)
+                        c.tried = &c == &p;
+                    t.wall_watch = 0, wall_place = 0;
+                }
+                t.wall_pressed = t.wall_rough = 0;
+            }
+        }
         // V1.3.68 (Eric: "put the invisible wall basically in front of the chair, not so ... we're trying to reposition crash.
         // It's just an invisible wall where it still makes a circle shape around the arena"): with the harder rules on, an
         // invisible wall in front of Papu Papu's throne (V1.3.70: one straight line across the hut, see wall_push), at any
@@ -9603,7 +9691,7 @@ namespace ingame
             const bool on = state.boss_rules && t.wall_known && alive && s >= 1 && s <= 6 && s != 4;
             const float front = wall_front_share * t.wall_span, ux = t.wall_dir[0], uy = t.wall_dir[1];
             wall_mx = t.wall_mid[0], wall_my = t.wall_mid[1], wall_ux = ux, wall_uy = uy, wall_front = front;
-            wall_live = on && (t.wall_mode == 1 || t.wall_mode == 3);
+            wall_live = on && (t.wall_watch == 1 || t.wall_watch == 2);
             if (!state.boss_rules || !here)
             {
                 if (!state.boss_rules && (wall_arm_address.load() || wall_place.load()))
@@ -9611,7 +9699,7 @@ namespace ingame
                 return;
             }
             const auto told = [&](const std::string &line) {
-                if (t.wall_lines < 40)
+                if (t.wall_lines < 60)
                     ++t.wall_lines, std::cout << "Boss chair: " << line << "\n" << std::flush;
             };
             const auto where = [](Address a) {
@@ -9619,9 +9707,9 @@ namespace ingame
                 out << "0x" << std::hex << a;
                 return out.str();
             };
-            // (V1.3.69: setting his physics each frame first again after a new read, unless it already didn't hold twice)
+            // (V1.3.71: the watch tried again after a new read, the kind of place kept before first)
             const auto start_over = [&] {
-                t.cplace_step = 0, t.cplaces.clear(), t.wall_trying = false, t.wall_try = 0, t.wall_mode = t.wall_fails >= 2 ? 1 : 0;
+                t.cplace_step = 0, t.cplaces.clear(), t.wall_try = 0, t.wall_watch = 0;
                 papu_wall_off();
             };
             // (a new Crash, after a respawn: where his physics keeps him is looked for again)
@@ -9632,9 +9720,6 @@ namespace ingame
                 t.wall_actor = crash, t.cplace_scan_at = 0, t.cplace_scans = 0;
                 start_over();
             }
-            // (none held him: all tried again 20 s on)
-            if (t.wall_mode == 2 && now - t.wall_none_at >= 20000)
-                t.cplace_scan_at = now, start_over();
             const float speed = std::hypot(t.crash_v[0], t.crash_v[1]);
             const double m = body_meters;
             crash_scan.now_x = at[0], crash_scan.now_y = at[1], crash_scan.now_z = at[2], crash_scan.now_speed = speed;
@@ -9717,7 +9802,8 @@ namespace ingame
                     t.cplace_scan_at = now + 2000;
                 else
                     t.cplace_scans = 0; // (a read that worked: the count is of those in a row that didn't)
-                t.wall_mode = t.wall_fails >= 2 ? 1 : 0, t.wall_try = 0, t.wall_trying = false, wall_place = 0;
+                t.wall_try = 0, t.wall_watch = 0;
+                papu_wall_off();
             }
             // (none of them follows him any more, for a second: looked for again)
             if (t.cplace_step == 3 && now >= t.cplace_check_at && alive)
@@ -9741,11 +9827,11 @@ namespace ingame
             }
             if (!on || t.cplace_step < 2)
             {
-                t.wall_run = t.wall_run_set = 0, t.wall_run_max = 0, t.wall_run_min = 1e9f;
+                t.wall_run = 0, t.wall_run_max = 0;
                 return;
             }
-            // (where he is against the wall: f toward the chair from the arena's middle, l to the side; how far inside it, and
-            // the point out of it, see wall_push)
+            // (where he is against the wall: f toward the chair from the arena's middle, l to the side; how far past it, and
+            // the point back in front of it, see wall_push)
             const float ax = at[0] - t.wall_mid[0], ay = at[1] - t.wall_mid[1];
             float tf = 0, tl = 0;
             const float over = wall_push(ax * ux + ay * uy, ay * ux - ax * uy, front, tf, tl);
@@ -9761,19 +9847,13 @@ namespace ingame
                         ++(std::hypot(v[0] - p.wrote[0], v[1] - p.wrote[1]) < std::hypot(v[0] - p.old[0], v[1] - p.old[1]) ? p.ours : p.theirs);
                 }
             if (past)
-            {
                 ++t.wall_pushes, ++t.wall_run, t.wall_run_max = std::max(t.wall_run_max, over);
-                if (t.wall_run > 2)
-                    t.wall_run_min = std::min(t.wall_run_min, over);
-            }
             else
-                t.wall_run = t.wall_run_set = 0, t.wall_run_max = 0, t.wall_run_min = 1e9f;
-            if (t.wall_mode == 0)
+                t.wall_run = 0, t.wall_run_max = 0;
+            // (past it: his physics set back in front of it, each frame; before the places are checked, only those holding where
+            // he is right now, within 5 cm and as far as he goes in 50 ms, and 256 of them looked at at most)
+            if (past)
             {
-                if (!past)
-                    return;
-                // (before they're checked, only those holding where he is right now, within 5 cm and as far as he goes in 50
-                // ms, and 256 of them looked at at most)
                 const double tolerance = t.cplace_step == 3 ? 0.25 + speed * m * 0.1 : 0.05 + speed * m * 0.05;
                 const std::array<double, 2> to{tx * m, ty * m};
                 unsigned set = 0, looked = 0;
@@ -9787,134 +9867,15 @@ namespace ingame
                     p.old = {v[0], v[1]}, p.wrote = to, p.pending = true;
                     set += cplace_write(p, to) ? 1 : 0;
                 }
-                t.wall_run_set += set ? 1 : 0;
                 if (t.wall_run == 1 && t.wall_lines < 16)
                     told("Crash went into the wall in front of the chair (" + std::to_string(static_cast<int>(over)) + " into it, " +
                          std::to_string(static_cast<int>(std::hypot(ax, ay))) + " from the middle, height " + std::to_string(static_cast<int>(at[2] - t.arena_at[2])) +
                          "): his physics set out of it at " + std::to_string(set) + " places");
-                // (how it went, in frames it set some: he goes on into it as if nothing stopped him, or stays at it; V1.3.69:
-                // how far inside it is to the nearest point out, which a step along it can't change by much)
-                if (set && ((t.wall_run_set >= 6 && over > 60) || (t.wall_run_set >= 15 && t.wall_run_min > 30)))
-                {
-                    ++t.wall_fails;
-                    told("setting his physics each frame didn't hold him (" + std::to_string(static_cast<int>(over)) + " into the wall after " + std::to_string(t.wall_run_set) +
-                         " frames): each place is watched as the game sets it instead");
-                    t.wall_mode = 1, t.wall_try = 0, t.wall_trying = false;
-                }
-                else if (!t.wall_held_told && t.wall_run >= 20 && t.wall_run_max <= 30)
+                if (!t.wall_held_told && t.wall_run >= 20 && t.wall_run_max <= 30)
                     t.wall_held_told = true, told("the wall holds: Crash stayed at it (at most " + std::to_string(static_cast<int>(t.wall_run_max)) + " into it) for " +
                                                   std::to_string(t.wall_run) + " frames in a row");
-                return;
             }
-            if (t.wall_mode == 1)
-            {
-                if (!t.wall_trying)
-                {
-                    // (a try starts as he goes into it, once the places are checked: not with him already deep in it, where a
-                    // copy of his place set out of the wall can't be told from where the physics goes on from)
-                    if (!past || over > 30 || t.cplace_step != 3)
-                        return;
-                    // (the one another try pointed at, or the first not tried yet)
-                    if (t.wall_try >= t.cplaces.size() || t.cplaces[t.wall_try].tried)
-                        t.wall_try = static_cast<std::size_t>(std::find_if(t.cplaces.begin(), t.cplaces.end(), [](const BossTuning::CrashPlace &c) { return !c.tried; }) -
-                                                              t.cplaces.begin());
-                    if (t.wall_try >= t.cplaces.size() || IsDebuggerPresent())
-                    {
-                        t.wall_mode = 2, t.wall_none_at = now;
-                        told("none of the " + std::to_string(t.cplaces.size()) + " places that follow Crash held him when watched (all tried again in 20 s)");
-                        papu_wall_off();
-                        return;
-                    }
-                    auto &p = t.cplaces[t.wall_try];
-                    p.tried = true;
-                    // (V1.3.69, after the code review: the watch on the 8 bytes with his y: a double's second 8, or a float's y
-                    // and height when x isn't at the start of 8)
-                    const Address watched = p.kind == 1 ? p.at + 8 : (p.at & 7) ? p.at + 4 : p.at;
-                    wall_place = 0;
-                    wall_kind = p.kind, wall_far = 0, wall_last_known = false, wall_last_set = false;
-                    wall_place = p.at;
-                    const auto threads = wall_debug_register(watched);
-                    wall_live = true;
-                    t.wall_trying = true, t.wall_try_at = now, t.wall_try_stores = wall_stores.load(), t.wall_try_stops = wall_stops.load(), t.wall_try_rearmed = false;
-                    t.wall_run = 1, t.wall_run_max = over, t.wall_run_min = 1e9f, t.wall_try_over = 0, t.wall_others_run = 0;
-                    told("the wall watches " + where(p.at) + " (place " + std::to_string(t.wall_try + 1) + " of " + std::to_string(t.cplaces.size()) + ", " + place_owner(p.at) +
-                         ") as the game sets it, in " + std::to_string(threads) + " threads");
-                    return;
-                }
-                // (how the try goes, whether he's in the wall now or held at it: what's drawn is where the watched place has
-                // him once it's where the physics goes on from)
-                const auto &p = t.cplaces[t.wall_try];
-                const unsigned stores = wall_stores.load() - t.wall_try_stores, stops = wall_stops.load() - t.wall_try_stops;
-                const float went = wall_far.load();
-                if (now - t.wall_try_at > 200) // (after its first setting out of the wall)
-                    t.wall_try_over = std::max(t.wall_try_over, over);
-                const std::string counts = " (" + std::to_string(stops) + " of " + std::to_string(stores) + " stores set out of the wall)";
-                // (with the place the physics goes on from watched, its copies are at the wall too; with a copy watched, the
-                // place the physics uses (another of them) stays in it: the deepest in it of the others near him, and which)
-                float others = 0;
-                std::size_t other = t.cplaces.size();
-                for (std::size_t i = 0; i < t.cplaces.size() && i < 64; ++i)
-                {
-                    std::array<double, 3> v{};
-                    if (i == t.wall_try || !cplace_read(t.cplaces[i], v))
-                        continue;
-                    const float ox = static_cast<float>(v[0] / m) - t.wall_mid[0], oy = static_cast<float>(v[1] / m) - t.wall_mid[1];
-                    if (std::hypot(static_cast<float>(v[0] / m) - at[0], static_cast<float>(v[1] / m) - at[1]) > 300 ||
-                        std::abs(v[2] - (at[2] * m + t.cplaces[i].dz)) > 1.5)
-                        continue;
-                    float of = 0, ol = 0;
-                    const float oo = wall_push(ox * ux + oy * uy, oy * ux - ox * uy, front, of, ol);
-                    if (oo > others)
-                        others = oo, other = i;
-                }
-                t.wall_others_run = others >= 30 ? t.wall_others_run + 1 : 0;
-                // (where the physics goes on from, each store is a step from where the wall set the last one: at most the way he
-                // goes in a step, never the gap to where he really is; and what's drawn is at the wall, not in it)
-                std::string why;
-                if (t.wall_others_run >= 20)
-                    why = where(t.cplaces[other].at) + " has him " + std::to_string(static_cast<int>(others)) + " into the wall" + counts + ": that one is tried next";
-                else if (went > 50)
-                    why = "the game's stores went up to " + std::to_string(static_cast<int>(went)) + " from where the wall had set it" + counts + ": a copy of where the physics has him";
-                else if (t.wall_run >= 10 && over > 100)
-                    why = "Crash went " + std::to_string(static_cast<int>(over)) + " into the wall with it watched" + counts;
-                else if (t.wall_run >= 12 && t.wall_run_min > 25)
-                    why = "Crash stayed " + std::to_string(static_cast<int>(t.wall_run_min)) + " or more into the wall with it watched" + counts;
-                else if (stops >= 120 && went > 45)
-                    why = "the game's stores went up to " + std::to_string(static_cast<int>(went)) + " from where the wall had set it in " + std::to_string(stops) + " stops" + counts;
-                else if (!stores && now - t.wall_try_at > 1000 && (past || speed > 50))
-                {
-                    if (!t.wall_try_rearmed)
-                    {
-                        // (once more, into threads made since)
-                        t.wall_try_rearmed = true, t.wall_try_at = now;
-                        wall_debug_register(wall_arm_address.load());
-                        return;
-                    }
-                    why = "the game didn't set it while Crash moved";
-                }
-                if (!why.empty())
-                {
-                    told(where(p.at) + " isn't it: " + why);
-                    t.wall_try = t.wall_others_run >= 20 ? other : t.wall_try + 1, t.wall_trying = false, wall_place = 0;
-                    return;
-                }
-                if (stops >= 45 && went <= 25 && t.wall_try_over <= 30)
-                {
-                    t.wall_mode = 3, t.wall_good = place_owner(p.at);
-                    told("the wall holds: " + where(p.at) + " watched, Crash at most " + std::to_string(static_cast<int>(t.wall_try_over)) +
-                         " into it (the game's stores at most " + std::to_string(static_cast<int>(went)) + " from where it had set it" + counts + ")");
-                }
-                return;
-            }
-            // (a watched place that held him: still holding him?)
-            if (t.wall_mode == 3 && (wall_far.load() > 80 || (t.wall_run >= 10 && over > 100) || (t.wall_run >= 12 && t.wall_run_min > 25)))
-            {
-                told("the watched place stopped holding Crash (" + std::to_string(static_cast<int>(over)) + " into the wall, the game's stores up to " +
-                     std::to_string(static_cast<int>(wall_far.load())) + " from where it had set it): the places are tried again");
-                t.wall_mode = 1, t.wall_try = 0, t.wall_trying = false, wall_place = 0;
-                for (auto &c : t.cplaces)
-                    c.tried = false;
-            }
+            papu_wall_watch(t, past, over, told, where);
         }
         void papu_aim(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
@@ -10305,9 +10266,9 @@ namespace ingame
         // own immunity as always; the fight starting over, or the rule off, ends it
         // V1.3.59 (Eric: "the two second is good for 200% speed ... scale it based on the speed"): /boss_window's time is his
         // time at 200%, and it's longer by the same pace at lower speeds. V1.3.61 (Eric: "make the hit window for 200% speed to
-        // 1.5 seconds"); V1.3.64 (1 s); V1.3.65 (1.3 s); V1.3.66 (1.5 s); V1.3.67 (1.8 s); V1.3.68 (Eric: "let's just make the
-        // hit window to 2 seconds. I think that's fair"): 2 s at 200%, 2.29 s at 175%, 2.67 s at 150%, 3.2 s at 125%, 4 s at
-        // 100%; or the seed's own time at any speed (its YAML's boss_hit_window).
+        // 1.5 seconds"); V1.3.64 (1 s); V1.3.65 (1.3 s); V1.3.66 (1.5 s); V1.3.67 (1.8 s); V1.3.68 (2 s); V1.3.71 (Eric: "make his
+        // hit window to 2.2 instead"): 2.2 s at 200%, 2.51 s at 175%, 2.93 s at 150%, 3.52 s at 125%, 4.4 s at 100%; or the
+        // seed's own time at any speed (its YAML's boss_hit_window).
         // V1.3.64 (Eric's V1.3.63 clips: after his slam he could be hit into his next spin, turned red in it, and that spin didn't
         // count, so he stayed red at the slam after it): his time to be hit also ends as his next spin starts, and that spin counts
         void papu_window(BossTuning &t, const Shared &state, int s, std::uint64_t now)

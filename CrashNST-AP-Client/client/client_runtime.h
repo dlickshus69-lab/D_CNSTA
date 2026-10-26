@@ -181,7 +181,7 @@ class ClientRuntime
     // (V1.3.57 test, /boss_slam) Papu Papu's slam at 200% boss speed, in ms after he stands; -1: 450 (the speeds between follow it)
     int boss_slam_test = -1;
     // (V1.3.58 test, /boss_window) how long Papu Papu can be hit once his red ends, in ms (V1.3.59: at 200% boss speed, the
-    // speeds below follow it); -1: the seed's (V1.3.61: boss_hit_window), or 2000 at 200% (V1.3.68)
+    // speeds below follow it); -1: the seed's (V1.3.61: boss_hit_window), or 2200 at 200% (V1.3.71)
     int boss_window_test = -1;
     // (V1.3.66 test, /boss_lead) how far Papu Papu's slam aim leads Crash, in percent; -1: 55 (V1.3.67)
     int boss_lead_test = -1;

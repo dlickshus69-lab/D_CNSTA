@@ -330,7 +330,7 @@ void ClientRuntime::update_display(ClientTick &tick)
             const unsigned slam_fixed = boss_slam_test >= 0 ? 0u : fixed_ms("boss_slam_time", 10, 25, 90);
             const unsigned window_fixed = boss_window_test >= 0 ? 0u : fixed_ms("boss_hit_window", 100, 5, 100);
             box_markers->boss_settings(health, speed, rules, boss_bar_grow, masks, boss_slam_test >= 0 ? static_cast<unsigned>(boss_slam_test) : 450u,
-                                       boss_window_test >= 0 ? static_cast<unsigned>(boss_window_test) : 2000u, slam_fixed, window_fixed,
+                                       boss_window_test >= 0 ? static_cast<unsigned>(boss_window_test) : 2200u, slam_fixed, window_fixed,
                                        boss_lead_test >= 0 ? static_cast<unsigned>(boss_lead_test) : 55u);
         }
         auto collectible_checked = tick.checked;
