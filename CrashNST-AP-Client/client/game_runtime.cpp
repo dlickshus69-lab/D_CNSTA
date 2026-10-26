@@ -27,11 +27,75 @@
 #include <cctype>
 #include <map>
 #include <functional>
+#include <limits>
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
 #include <tlhelp32.h>
 #include <cstdio>
+
+// V1.3.76, after the code review (see cplace_swap): a compare-and-swap of 8 or 4 bytes of the game's memory whose fault,
+// should that memory be let go between the check and the swap, is caught (see swap_guard): it returns 1 swapped, 0 not (the
+// memory held something else), 2 faulted
+extern "C" int crashnst_swap64(volatile void *at, long long was, long long now);
+extern "C" int crashnst_swap32(volatile void *at, int was, int now);
+#if defined(__GNUC__) || defined(__clang__)
+extern "C" char crashnst_swap64_at[], crashnst_swap32_at[], crashnst_swap_faulted[];
+__asm__(".text\n"
+        ".p2align 4\n"
+        ".globl crashnst_swap64\n"
+        "crashnst_swap64:\n"
+        "    movq %rdx, %rax\n"
+        ".globl crashnst_swap64_at\n"
+        "crashnst_swap64_at:\n"
+        "    lock cmpxchgq %r8, (%rcx)\n"
+        "    sete %al\n"
+        "    movzbl %al, %eax\n"
+        "    ret\n"
+        ".p2align 4\n"
+        ".globl crashnst_swap32\n"
+        "crashnst_swap32:\n"
+        "    movl %edx, %eax\n"
+        ".globl crashnst_swap32_at\n"
+        "crashnst_swap32_at:\n"
+        "    lock cmpxchgl %r8d, (%rcx)\n"
+        "    sete %al\n"
+        "    movzbl %al, %eax\n"
+        "    ret\n"
+        ".globl crashnst_swap_faulted\n"
+        "crashnst_swap_faulted:\n"
+        "    movl $2, %eax\n"
+        "    ret\n");
+// (put before the game's own handlers: a fault on one of the two swaps goes on as "faulted"; anything else is left to the
+// others)
+static LONG CALLBACK swap_guard(EXCEPTION_POINTERS *e)
+{
+    const auto code = e->ExceptionRecord->ExceptionCode;
+    const auto rip = e->ContextRecord->Rip;
+    if ((code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_IN_PAGE_ERROR) &&
+        (rip == reinterpret_cast<DWORD64>(crashnst_swap64_at) || rip == reinterpret_cast<DWORD64>(crashnst_swap32_at)))
+    {
+        e->ContextRecord->Rip = reinterpret_cast<DWORD64>(crashnst_swap_faulted);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static bool swap_guarded()
+{
+    static const PVOID handler = AddVectoredExceptionHandler(1, swap_guard);
+    return handler != nullptr;
+}
+#else
+extern "C" int crashnst_swap64(volatile void *at, long long was, long long now)
+{
+    return InterlockedCompareExchange64(static_cast<volatile LONG64 *>(at), now, was) == was ? 1 : 0;
+}
+extern "C" int crashnst_swap32(volatile void *at, int was, int now)
+{
+    return InterlockedCompareExchange(static_cast<volatile LONG *>(at), now, was) == was ? 1 : 0;
+}
+static bool swap_guarded() { return true; }
+#endif
 
 namespace ingame
 {
@@ -5626,6 +5690,10 @@ namespace ingame
                 std::array<double, 2> old{}, wrote{};
                 bool pending = false, tried = false;
                 unsigned ours = 0, theirs = 0;
+                // V1.3.76 (see cplace_read): the checks in a row it didn't follow him, and whether it's dropped (left alone from
+                // then on: that memory may be something else's now)
+                unsigned misses = 0;
+                bool stale = false;
             };
             std::vector<CrashPlace> cplaces;
             int cplace_step = 0;
@@ -5655,6 +5723,8 @@ namespace ingame
             float stick_trust = 0;
             bool stick_trusted = false, stick_told = false, stick_doubt_told = false, stick_carried = false, wall_was_dead = false, wall_refresh = false;
             std::uint64_t wall_rearm_at = 0, wall_respawn_at = 0;
+            // V1.3.76 (see cplace_read): the places dropped, and the settings left out as the place changed while it was set
+            unsigned wall_dropped = 0, wall_raced = 0;
             Address ms_wait_seen = 0;
             float ms_wait_last = 0;
             unsigned slams_seen = 0;
@@ -9489,6 +9559,8 @@ namespace ingame
         std::atomic_int wall_kind{0};
         std::atomic_bool wall_live{false}, wall_last_known{false}, wall_last_set{false};
         std::atomic<float> wall_mx{0}, wall_my{0}, wall_ux{1}, wall_uy{0}, wall_front{0}, wall_far{0}, wall_lx{0}, wall_ly{0};
+        // V1.3.76 (see wall_apply): where Crash is drawn, each frame the wall is on
+        std::atomic<float> wall_cx{0}, wall_cy{0};
         std::atomic<DWORD> wall_setting_thread{0};
         std::atomic_uint wall_stores{0}, wall_stops{0};
         // V1.3.69 (Eric's V1.3.68 run: "it blocks, but ... when you try to approach it to the side of the chair, he like gets
@@ -9620,6 +9692,11 @@ namespace ingame
                     if (t.wall_rearms)
                         out << "; the watch went into every thread again " << t.wall_rearms << " times";
                 }
+                // (V1.3.76, see cplace_read)
+                if (t.wall_dropped)
+                    out << "; " << t.wall_dropped << " of his physics' places dropped (they didn't hold where he is any more)";
+                if (t.wall_raced)
+                    out << "; " << t.wall_raced << " settings of them left out (the place changed as it was set)";
                 // (V1.3.74: the wall in the stick, see papu_wall_stick)
                 if (const auto cut = wall_stick_cut.load())
                     out << "; the stick's push into the wall taken out in " << cut << " polls (it moved him the camera's way in " << t.stick_agree << " of " << t.stick_samples
@@ -9673,22 +9750,87 @@ namespace ingame
             // frame, and what's drawn jumped between the two (Eric's V1.3.66 run: "it was stuttering a lot"). V1.3.68's wall is
             // in his physics itself, see papu_wall)
         }
-        // (V1.3.68) a place of Crash's physics, in metres: read (x, y and height) and set (x and y)
+        // V1.3.76 (Eric's V1.3.75 run: "game crashed", 10 s after his respawn, the first time after it that Crash went past
+        // the wall low down, with his physics set out of it at 11 places (9 every time before it, up high); the crash
+        // report: in Havok's step, the game took the x and y the wall had just set, (1.97, 6.00) m, for an address: one of
+        // the places held an address by then, which read as floats is about (0, 0), within 300 of Crash at the wall, and
+        // a third float near the ground passed the height check): from a float's or a double's bits, is it a number (not
+        // infinite or NaN), and is it one too small for its kind to hold whole (as an address's top half or a count read as
+        // a float is; so is most else that isn't a place)? After the code review: from the bits, not the number, as a thread
+        // that takes such numbers as 0 (physics code often has that on) would read one as 0
+        constexpr bool finite_bits(std::uint32_t b) { return ((b >> 23) & 0xff) != 0xff; }
+        constexpr bool finite_bits(std::uint64_t b) { return ((b >> 52) & 0x7ff) != 0x7ff; }
+        constexpr bool too_small_bits(std::uint32_t b) { return ((b >> 23) & 0xff) == 0 && (b & 0x7fffff) != 0; }
+        constexpr bool too_small_bits(std::uint64_t b) { return ((b >> 52) & 0x7ff) == 0 && (b & 0xfffffffffffffULL) != 0; }
+        // (V1.3.68) a place of Crash's physics, in metres: read (x, y and height) and set (x and y). V1.3.76: `sane` says
+        // whether what it holds can be where Crash is: none of its numbers too small for its kind (see finite_bits), none
+        // past 10 km; read without it, a place that can't is as one that can't be read
+        bool cplace_read(const BossTuning::CrashPlace &p, std::array<double, 3> &v, bool &sane)
+        {
+            bool finite = true, small = false;
+            sane = false;
+            if (p.kind == 1)
+            {
+                std::array<std::uint64_t, 3> b{};
+                if (!read(p.at, b))
+                    return false;
+                for (std::size_t i = 0; i < 3; ++i)
+                    finite = finite && finite_bits(b[i]), small = small || too_small_bits(b[i]), std::memcpy(&v[i], &b[i], sizeof b[i]);
+            }
+            else
+            {
+                std::array<std::uint32_t, 3> b{};
+                if (!read(p.at, b))
+                    return false;
+                for (std::size_t i = 0; i < 3; ++i)
+                {
+                    float f = 0;
+                    std::memcpy(&f, &b[i], sizeof f);
+                    finite = finite && finite_bits(b[i]), small = small || too_small_bits(b[i]), v[i] = f;
+                }
+            }
+            sane = finite && !small && std::abs(v[0]) <= 1e4 && std::abs(v[1]) <= 1e4 && std::abs(v[2]) <= 1e4;
+            return finite;
+        }
         bool cplace_read(const BossTuning::CrashPlace &p, std::array<double, 3> &v)
         {
-            if (p.kind == 1)
-                return read(p.at, v) && std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
-            std::array<float, 3> f{};
-            if (!read(p.at, f) || !std::isfinite(f[0]) || !std::isfinite(f[1]) || !std::isfinite(f[2]))
-                return false;
-            v = {f[0], f[1], f[2]};
-            return true;
+            bool sane = false;
+            return cplace_read(p, v, sane) && sane;
         }
-        bool cplace_write(const BossTuning::CrashPlace &p, const std::array<double, 2> &xy)
+        // V1.3.76: a place set (x and y) only if it still holds what was just read (read sane, so its numbers come back
+        // exactly as they were): the game's own threads go on meanwhile, and that memory could be something else's by the
+        // time it's set (V1.3.68 to V1.3.75 set it outright); only in memory that can be written, and (after the code review)
+        // with a fault there caught, should that memory be let go in between (see crashnst_swap64); counted as set only if x
+        // and y both were (one at a time for doubles, or floats not on 8 bytes: y may have changed after x was set, as the
+        // game moved him on)
+        bool cplace_swap(const BossTuning::CrashPlace &p, const std::array<double, 3> &was, const std::array<double, 2> &xy)
         {
+            const Address size = p.kind == 1 ? 16 : 8;
+            MEMORY_BASIC_INFORMATION info{};
+            constexpr DWORD writable = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+            if (!swap_guarded() || (p.at & 3) || VirtualQuery(reinterpret_cast<void *>(p.at), &info, sizeof info) != sizeof info || info.State != MEM_COMMIT ||
+                (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) || !(info.Protect & writable) ||
+                p.at + size > reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize)
+                return false;
+            auto *at = reinterpret_cast<volatile char *>(p.at);
             if (p.kind == 1)
-                return write(p.at, xy);
-            return write(p.at, std::array<float, 2>{static_cast<float>(xy[0]), static_cast<float>(xy[1])});
+            {
+                if (p.at & 7)
+                    return false;
+                long long old[2]{}, now[2]{};
+                std::memcpy(old, was.data(), sizeof old), std::memcpy(now, xy.data(), sizeof now);
+                return crashnst_swap64(at, old[0], now[0]) == 1 && crashnst_swap64(at + 8, old[1], now[1]) == 1;
+            }
+            const float of[2]{static_cast<float>(was[0]), static_cast<float>(was[1])}, nf[2]{static_cast<float>(xy[0]), static_cast<float>(xy[1])};
+            if (!(p.at & 7))
+            {
+                long long old = 0, now = 0;
+                std::memcpy(&old, of, sizeof old), std::memcpy(&now, nf, sizeof now);
+                return crashnst_swap64(at, old, now) == 1;
+            }
+            int old[2]{}, now[2]{};
+            std::memcpy(old, of, sizeof old), std::memcpy(now, nf, sizeof now);
+            return crashnst_swap32(at, old[0], now[0]) == 1 && crashnst_swap32(at + 4, old[1], now[1]) == 1;
         }
         // (it holds where Crash is now, `at` in the game's units: his x and y within `tolerance` metres, its height over his
         // feet as it was when found, within 0.3 m more)
@@ -9734,7 +9876,7 @@ namespace ingame
                 return;
             if (t.wall_watch == 0)
             {
-                const auto next = std::find_if(t.cplaces.begin(), t.cplaces.end(), [](const BossTuning::CrashPlace &c) { return !c.tried; });
+                const auto next = std::find_if(t.cplaces.begin(), t.cplaces.end(), [](const BossTuning::CrashPlace &c) { return !c.tried && !c.stale; });
                 if (next == t.cplaces.end())
                 {
                     t.wall_watch = 3;
@@ -9875,6 +10017,8 @@ namespace ingame
             const bool on = state.boss_rules && t.wall_known && alive && s >= 1 && s <= 6 && s != 4;
             const float front = wall_front_share * t.wall_span, ux = t.wall_dir[0], uy = t.wall_dir[1];
             wall_mx = t.wall_mid[0], wall_my = t.wall_mid[1], wall_ux = ux, wall_uy = uy, wall_front = front;
+            if (here)
+                wall_cx = at[0], wall_cy = at[1]; // (V1.3.76, see wall_apply)
             wall_live = on && (t.wall_watch == 1 || t.wall_watch == 2);
             if (!state.boss_rules || !here)
             {
@@ -9897,6 +10041,19 @@ namespace ingame
                 std::ostringstream out;
                 out << "0x" << std::hex << a;
                 return out.str();
+            };
+            // V1.3.76 (see cplace_read): a place that holds what can't be where Crash is, or hasn't followed him for 3 checks
+            // in a row, is dropped: never read for the wall or set again (a new read of the game's memory finds his places
+            // anew); the watch on it, if it's the watched one, is off, and the next is tried
+            const auto drop = [&](BossTuning::CrashPlace &p, const std::string &why) {
+                const auto i = static_cast<std::size_t>(&p - t.cplaces.data());
+                const bool watched = (t.wall_watch == 1 || t.wall_watch == 2) && i == t.wall_try;
+                p.stale = true, p.pending = false, ++t.wall_dropped;
+                if (t.wall_dropped <= 8)
+                    told(where(p.at) + " (place " + std::to_string(i + 1) + " of " + std::to_string(t.cplaces.size()) + ") " + why + ": it's left alone from now on" +
+                         (watched ? ", and the watch on it is off" : ""));
+                if (watched)
+                    p.tried = true, t.wall_watch = 0, papu_wall_off();
             };
             // (V1.3.74: the wall in the stick, see papu_wall_stick: it needs none of his physics' places)
             papu_wall_stick(t, on, state.menu_paused != 0, at, told);
@@ -10020,7 +10177,7 @@ namespace ingame
                 told(line.str());
                 t.cplaces = std::move(sorted);
                 for (auto &p : t.cplaces)
-                    p.ours = p.theirs = 0, p.pending = false, p.tried = false;
+                    p.ours = p.theirs = p.misses = 0, p.pending = p.tried = p.stale = false;
                 t.cplace_step = t.cplaces.empty() ? 0 : 3, t.cplace_lost_at = 0, t.cplace_check_at = now + 500;
                 if (!t.cplaces.empty() && !t.cplace_regional)
                     t.cplace_full_done = true; // (V1.3.73: a read of all of it that found him; later ones while he fights rest)
@@ -10031,15 +10188,32 @@ namespace ingame
                 t.wall_try = 0, t.wall_watch = 0;
                 papu_wall_off();
             }
-            // (none of them follows him any more, for a second: looked for again)
+            // (none of them follows him any more, for a second: looked for again. V1.3.76: and each that holds what can't be
+            // where he is, or isn't within 1 m of him (and as far as he goes in 100 ms) for 3 checks in a row, is dropped: after
+            // his respawn in Eric's V1.3.75 run, places that weren't his any more were still set)
             if (t.cplace_step == 3 && now >= t.cplace_check_at && alive)
             {
                 t.cplace_check_at = now + 500;
-                const double tolerance = 0.25 + speed * m * 0.1;
-                const bool any = std::any_of(t.cplaces.begin(), t.cplaces.end(), [&](const BossTuning::CrashPlace &p) {
+                const double tolerance = 0.25 + speed * m * 0.1, loose = 1.0 + speed * m * 0.1;
+                bool any = false;
+                for (auto &p : t.cplaces)
+                {
                     std::array<double, 3> v{};
-                    return cplace_read(p, v) && cplace_tracks(p, v, at, tolerance);
-                });
+                    bool sane = false;
+                    if (p.stale)
+                        continue;
+                    const bool got = cplace_read(p, v, sane);
+                    if (got && !sane)
+                    {
+                        drop(p, "holds what can't be where Crash is");
+                        continue;
+                    }
+                    any = any || (got && cplace_tracks(p, v, at, tolerance));
+                    if (got && cplace_tracks(p, v, at, loose))
+                        p.misses = 0;
+                    else if (++p.misses >= 3)
+                        drop(p, "hasn't followed Crash for 3 checks in a row");
+                }
                 if (any)
                     t.cplace_lost_at = 0;
                 else if (!t.cplace_lost_at)
@@ -10086,30 +10260,41 @@ namespace ingame
                 t.wall_run = 0, t.wall_run_max = 0;
                 return;
             }
-            // (where he's drawn against the wall: f toward the chair from the arena's middle, l to the side; how far past it, and
-            // the point back in front of it: the same f for every place, see wall_push)
+            // (where he's drawn against the wall: f toward the chair from the arena's middle, l to the side; how far past it, see
+            // wall_push. V1.3.76: each place is set back from where it is itself, below)
             const float ax = at[0] - t.wall_mid[0], ay = at[1] - t.wall_mid[1], al = ay * ux - ax * uy;
             float tf = 0, tl = 0;
             const float drawn = wall_push(ax * ux + ay * uy, al, front, tf, tl);
-            const float tx = t.wall_mid[0] + (front - 0.5f) * ux - al * uy, ty = t.wall_mid[1] + (front - 0.5f) * uy + al * ux;
             // V1.3.72 (Eric's V1.3.71 run: "it shows me clipping through the invisible wall and out of the whole arena"; the log:
             // the watch kept a copy of where he's drawn (his place +32 came from it), so he was never drawn past the wall and
             // nothing set his physics back, which went on through it): how far past the wall the deepest of the places that
             // follow him is (each that's his: within 300 of where he's drawn and at his height, within 2 m), and how many of
             // them, the watched one aside, are more than 4 past it (for the watch's tries, see papu_wall_watch)
-            float over = drawn;
+            // (V1.3.76: not those dropped, and one that holds what can't be where he is is dropped now, see cplace_read; after
+            // the code review, within 120 of where he's drawn, as for their setting below, so one that isn't set doesn't keep him
+            // "in the wall" with nothing set; within 300 still for the deepest of them, for the safety below)
+            float over = drawn, deep = drawn;
             unsigned others = 0, others_in = 0;
             if (t.cplace_step == 3)
                 for (std::size_t i = 0; i < t.cplaces.size() && i < 64; ++i)
                 {
-                    const auto &p = t.cplaces[i];
+                    auto &p = t.cplaces[i];
                     std::array<double, 3> v{};
-                    if (!cplace_read(p, v))
+                    bool sane = false;
+                    if (p.stale || !cplace_read(p, v, sane))
                         continue;
-                    const float px = static_cast<float>(v[0] / m), py = static_cast<float>(v[1] / m);
-                    if (std::hypot(px - at[0], py - at[1]) > 300 || std::abs(v[2] - (at[2] * m + p.dz)) > 2.0)
+                    if (!sane)
+                    {
+                        drop(p, "holds what can't be where Crash is");
+                        continue;
+                    }
+                    const float px = static_cast<float>(v[0] / m), py = static_cast<float>(v[1] / m), away = std::hypot(px - at[0], py - at[1]);
+                    if (away > 300 || std::abs(v[2] - (at[2] * m + p.dz)) > 2.0)
                         continue;
                     const float in = (px - t.wall_mid[0]) * ux + (py - t.wall_mid[1]) * uy - front;
+                    deep = std::max(deep, in);
+                    if (away > 120)
+                        continue;
                     over = std::max(over, in);
                     if (!(t.wall_watch == 1 || t.wall_watch == 2) || i != t.wall_try)
                         ++others, others_in += in > 4 ? 1 : 0;
@@ -10130,24 +10315,42 @@ namespace ingame
                 t.wall_run = 0, t.wall_run_max = 0;
             // (past it: his physics set back in front of it, each frame: once checked, every place that follows him (V1.3.72: not
             // only those at where he's drawn); before that, only those holding where he is right now, within 5 cm and as far as
-            // he goes in 50 ms, and 256 of them looked at at most)
+            // he goes in 50 ms, and 256 of them looked at at most. V1.3.76 (see cplace_read): only a place that is past the
+            // wall itself, within 120 of where he's drawn (was: any within 300, wherever it was, set onto the wall where he's
+            // drawn), straight back from where it is (as the watch does, see wall_apply), and only if it still holds what was
+            // read as it's set, see cplace_swap)
             if (past)
             {
                 const double tolerance = 0.05 + speed * m * 0.05;
-                const std::array<double, 2> to{tx * m, ty * m};
                 unsigned set = 0, looked = 0;
                 for (auto &p : t.cplaces)
                 {
                     std::array<double, 3> v{};
+                    bool sane = false;
                     if (set >= 64 || ++looked > 256)
                         break;
-                    if (!cplace_read(p, v))
+                    if (p.stale || !cplace_read(p, v, sane))
                         continue;
-                    if (t.cplace_step == 3 ? std::hypot(static_cast<float>(v[0] / m) - at[0], static_cast<float>(v[1] / m) - at[1]) > 300 || std::abs(v[2] - (at[2] * m + p.dz)) > 2.0
-                                           : !cplace_tracks(p, v, at, tolerance))
+                    if (!sane)
+                    {
+                        if (t.cplace_step == 3)
+                            drop(p, "holds what can't be where Crash is");
                         continue;
+                    }
+                    const float px = static_cast<float>(v[0] / m), py = static_cast<float>(v[1] / m), pa = px - t.wall_mid[0], pb = py - t.wall_mid[1];
+                    float pf = 0, pl = 0;
+                    if (!(wall_push(pa * ux + pb * uy, pb * ux - pa * uy, front, pf, pl) > 0))
+                        continue;
+                    if (t.cplace_step == 3 ? std::hypot(px - at[0], py - at[1]) > 120 || std::abs(v[2] - (at[2] * m + p.dz)) > 2.0 : !cplace_tracks(p, v, at, tolerance))
+                        continue;
+                    const std::array<double, 2> to{(t.wall_mid[0] + pf * ux - pl * uy) * m, (t.wall_mid[1] + pf * uy + pl * ux) * m};
+                    if (!cplace_swap(p, v, to))
+                    {
+                        ++t.wall_raced;
+                        continue;
+                    }
                     p.old = {v[0], v[1]}, p.wrote = to, p.pending = true;
-                    set += cplace_write(p, to) ? 1 : 0;
+                    ++set;
                 }
                 if (t.wall_run == 1 && t.wall_lines < 16)
                     told("Crash went into the wall in front of the chair (" + std::to_string(static_cast<int>(over)) + " into it, " +
@@ -10156,13 +10359,14 @@ namespace ingame
                 if (!t.wall_held_told && t.wall_run >= 20 && t.wall_run_max <= 30)
                     t.wall_held_told = true, told("the wall holds: Crash stayed at it (at most " + std::to_string(static_cast<int>(t.wall_run_max)) + " into it) for " +
                                                   std::to_string(t.wall_run) + " frames in a row");
-                // (V1.3.72: a safety: with the watch on, deep past the wall is the watch's doing; it's off for this fight)
-                if ((t.wall_watch == 1 || t.wall_watch == 2) && over > 120)
-                {
-                    told("Crash got " + std::to_string(static_cast<int>(over)) + " past the wall with the watch on: the watch is off for this fight");
-                    t.wall_watch = 3;
-                    papu_wall_off();
-                }
+            }
+            // (V1.3.72: a safety: with the watch on, deep past the wall is the watch's doing; it's off for this fight. V1.3.76,
+            // after the code review: from the deepest of his places within 300, whether or not one within 120 is past it)
+            if ((t.wall_watch == 1 || t.wall_watch == 2) && deep > 120)
+            {
+                told("Crash got " + std::to_string(static_cast<int>(deep)) + " past the wall with the watch on: the watch is off for this fight");
+                t.wall_watch = 3;
+                papu_wall_off();
             }
             papu_wall_watch(t, past, others, others_in, now, told, where);
         }
@@ -13202,23 +13406,38 @@ namespace ingame
             }
             wall_stores.fetch_add(1, std::memory_order_relaxed);
             const int kind = wall_kind.load(std::memory_order_relaxed);
+            // V1.3.76 (see finite_bits): what was stored has to be able to be where Crash is (no number too small for its kind,
+            // as an address's top half is, from the bits: this thread may take such numbers as 0; none past 10 km), and (see
+            // below) near where he's drawn; anything else is left alone
             double x = 0, y = 0;
+            bool finite = true, small = false;
             if (kind == 1)
             {
-                std::array<double, 2> v{};
-                if (!read(static_cast<Address>(at), v))
+                std::array<std::uint64_t, 2> b{};
+                if (!read(static_cast<Address>(at), b))
                     return;
-                x = v[0], y = v[1];
+                for (const auto w : b)
+                    finite = finite && finite_bits(w), small = small || too_small_bits(w);
+                std::memcpy(&x, &b[0], sizeof x), std::memcpy(&y, &b[1], sizeof y);
             }
             else
             {
-                std::array<float, 2> v{};
-                if (!read(static_cast<Address>(at), v))
+                std::array<std::uint32_t, 2> b{};
+                if (!read(static_cast<Address>(at), b))
                     return;
-                x = v[0], y = v[1];
+                float f[2]{};
+                for (const auto w : b)
+                    finite = finite && finite_bits(w), small = small || too_small_bits(w);
+                std::memcpy(f, b.data(), sizeof f);
+                x = f[0], y = f[1];
             }
-            if (!std::isfinite(x) || !std::isfinite(y))
+            if (!finite)
                 return;
+            if (small || std::abs(x) > 1e4 || std::abs(y) > 1e4)
+            {
+                wall_last_known.store(false, std::memory_order_relaxed);
+                return;
+            }
             const float px = static_cast<float>(x / body_meters), py = static_cast<float>(y / body_meters);
             const bool known = wall_last_known.load(std::memory_order_relaxed), was_set = wall_last_set.load(std::memory_order_relaxed);
             const float step = std::hypot(px - wall_lx.load(std::memory_order_relaxed), py - wall_ly.load(std::memory_order_relaxed));
@@ -13226,7 +13445,10 @@ namespace ingame
                 wall_lx.store(lx, std::memory_order_relaxed), wall_ly.store(ly, std::memory_order_relaxed);
                 wall_last_known.store(true, std::memory_order_relaxed), wall_last_set.store(set, std::memory_order_relaxed);
             };
-            if (!known || !(step <= 300))
+            // (V1.3.76: within 60 of where he was drawn this frame: his physics is a frame's run from it at most; after the code
+            // review, not 150, so less of what isn't his can pass)
+            const float from_drawn = std::hypot(px - wall_cx.load(std::memory_order_relaxed), py - wall_cy.load(std::memory_order_relaxed));
+            if (!known || !(step <= 300) || !(from_drawn <= 60))
                 return keep(px, py, false);
             const float mx = wall_mx.load(std::memory_order_relaxed), my = wall_my.load(std::memory_order_relaxed);
             const float ux = wall_ux.load(std::memory_order_relaxed), uy = wall_uy.load(std::memory_order_relaxed);

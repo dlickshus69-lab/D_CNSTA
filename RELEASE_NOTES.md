@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Crash reports in the log:** if the game crashes, the log now says where it happened (which part of the game or the client, and how it got there), so a crash can be tracked down from one log.
-- **From V1.3.74 (not tested yet):** as Crash comes up to Papu's wall, the stick's push into it fades out, so he stops at it or runs along it with the game's own moves instead of flipping into his falling animation; the old pull-back stays for jumps, the d-pad and the keyboard.
-- **No stutter after a respawn:** if the wall's smoothing loses track of Crash after a respawn, it finds him again within a second.
-- The wall is up before the fight starts, and Papu's facing stays on his aim.
+- **Crash fixed:** after a respawn, Papu's wall could write into game memory that no longer held Crash's position, and the game crashed later; now it only touches memory that still holds where Crash is, and drops any that doesn't.
+- **Crash reports in the log** (from V1.3.75): if the game crashes, the log says where, so it can be tracked down from one log.
+- **From V1.3.74:** as Crash comes up to Papu's wall, the stick's push into it fades out, so he stops at it or runs along it instead of flipping into his falling animation.
+- No stutter after a respawn; the wall is up before the fight starts, and Papu's facing stays on his aim.
 - His hit window is 2.2 s at 200% (4.4 s at 100%).
