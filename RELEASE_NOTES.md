@@ -4,7 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Ripper Roo waits less between hops with Boss Speed:** the turn before each hop was 0.7 s at every speed, and is now about 0.5 s at 200%. That's on top of his quicker hops (0.43 s in the air).
-- **He hops onto you a little more often:** 1 landing in 5 instead of 1 in 6, still at least 8 s apart.
-- Same as V1.4.7 otherwise: a pattern of 3, one more platform after each hit, kept until you hit him, new after a death.
-- The real Nitro is next.
+- **The real Nitro in Ripper Roo's fight (a test):** type `/roo_nitro on`, wait for "Roo Nitro: on" (a minute or so), then restart the game. His arena then gets N. Sanity Beach's crate files, and with harder bosses on, a real Nitro sits on two of his platforms.
+- What to look for: does Roo go through them, does Crash die on touch, and do any beach crates show up somewhere in his arena. Send the log and a clip either way.
+- `/roo_nitro off` and a restart put his own files back exactly. If his fight won't load at all, do that from the hub.
+- **Before going back to the Stable build,** run `/roo_nitro off` and restart once on Testing. Stable doesn't know to put his files back.
+- Same as V1.4.8 otherwise: patterns that grow with each hit, a shorter wait at high Boss Speed, and a hop onto you 1 landing in 5.

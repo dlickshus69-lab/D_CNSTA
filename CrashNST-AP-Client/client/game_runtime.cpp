@@ -7,6 +7,7 @@
 #include "game_pickups.h"
 #include "game_memory.h"
 #include "crate_specs.h"
+#include "game_archive.h"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -4105,8 +4106,15 @@ namespace ingame
                 if (skip)
                     continue;
                 const auto scripts = owner_scripts(owner);
-                if (scripts.find("LevelCount") != std::string::npos || scripts.find("Count") != std::string::npos ||
-                    scripts.find("Checkpoint") != std::string::npos)
+                // (Testing: in a boss arena nothing counts boxes, and Ripper Roo's has no spawner of its own: there, with
+                // /roo_nitro's patched archive, a plain crate's from N. Sanity Beach's crate layer may be borrowed)
+#ifndef CRASH_NST_STABLE
+                const bool arena_crate = level == "Boss" && kind_of(name) == "Crate_Basic" && scripts.find("Checkpoint") == std::string::npos;
+#else
+                const bool arena_crate = false;
+#endif
+                if (!arena_crate && (scripts.find("LevelCount") != std::string::npos || scripts.find("Count") != std::string::npos ||
+                                     scripts.find("Checkpoint") != std::string::npos))
                     continue;
                 for (const auto c : list(value<Address>(owner + 24), 64))
                     if (spawner_method(c, owner, true))
@@ -11718,6 +11726,15 @@ namespace ingame
             std::uint64_t crash_hop_at = 0;
             unsigned stage_hops = 0, crash_hops = 0, desync_lines = 0;
             std::string stage_walk;
+            // (V1.4.9) the real Nitro: the platforms his Nitros go on, each one's crate (0: none now), and what's been told
+            std::vector<int> nitro_platforms;
+            std::vector<Address> nitro_crates;
+            std::vector<std::uint64_t> nitro_made_at;
+            std::set<Address> nitro_moved;
+            int nitro_making = -1;
+            std::uint64_t nitro_making_since = 0;
+            bool nitro_layer_told = false;
+            unsigned nitro_lines = 0;
             std::vector<std::pair<std::string, Address>> watch_ints, watch_bytes;
             std::map<Address, int> watch_last;
         } roo_research;
@@ -12381,6 +12398,123 @@ namespace ingame
                         }
                     }
                 }
+            }
+            // (V1.4.9, Testing, Eric: "Nitro's on platform", "some of the platforms are blocked off by Nitro, but we'll make it
+            // where you're still able to hit them, but you just gotta work around ... he goes through the Nitro, but you're
+            // not allowed to"; "You should do the real nitro, just like the nitro trap"): with /roo_nitro's patched archive in
+            // place (N. Sanity Beach's crate layer in his arena: the Nitro's template, and its crates' spawners to make one
+            // with; his arena has none) and the boss rules on, a real Nitro on two of his platforms, picked at random each
+            // visit (not the front middle, where Crash starts, nor the middle right, where he does), made the way the Nitro
+            // Trap makes its own (a plain crate's spawner from the layer borrowed for it), made again 3 s after one is gone,
+            // and put back on its platform if the game moves it. What the layer brought, and what becomes of each, to the log
+            if (rules && r.pool_ready && ingame::level_patch_in_place())
+            {
+                const auto nitro_spot = [&](int id) {
+                    auto at = r.platforms[static_cast<std::size_t>(id)];
+                    if (!(at[2] > 40 && at[2] < 120))
+                        at[2] = 76;
+                    return at;
+                };
+                if (!r.nitro_layer_told && now - r.entered >= 5000)
+                {
+                    r.nitro_layer_told = true;
+                    unsigned crates = 0;
+                    std::map<std::string, unsigned> kinds;
+                    std::string sample;
+                    for (const auto owner : event_owners())
+                    {
+                        const auto name = string(value<Address>(owner + 128));
+                        if (name.rfind("Crate_", 0) != 0 || name.find("Spawned") != std::string::npos)
+                            continue;
+                        ++crates, ++kinds[kind_of(name)];
+                        std::array<float, 3> at{};
+                        if (sample.size() < 700 && roo_where(owner, at))
+                            sample += " " + name + " " + roo_xyz(at) + ";";
+                    }
+                    std::ostringstream line;
+                    line << "Roo Nitro: N. Sanity Beach's crate layer in his arena: " << crates << " crates (";
+                    bool first = true;
+                    for (const auto &[kind, count] : kinds)
+                        line << (first ? "" : ", ") << count << " " << kind, first = false;
+                    line << ")" << (sample.empty() ? std::string() : ":" + sample);
+                    std::cout << line.str() << "\n" << std::flush;
+                }
+                if (r.nitro_platforms.empty())
+                {
+                    std::vector<int> can;
+                    for (std::size_t q = 0; q < r.platforms.size(); ++q)
+                        if (const auto name = platform_name(static_cast<int>(q)); name != "front-middle" && name != "middle-right")
+                            can.push_back(static_cast<int>(q));
+                    std::shuffle(can.begin(), can.end(), rng);
+                    can.resize(std::min<std::size_t>(can.size(), 2));
+                    r.nitro_platforms = can, r.nitro_crates.assign(can.size(), 0), r.nitro_made_at.assign(can.size(), 0);
+                    std::string names;
+                    for (const int q : can)
+                        names += (names.empty() ? "" : " and ") + platform_name(q);
+                    std::cout << "Roo Nitro: his Nitros go on " << names << "\n" << std::flush;
+                }
+                // the one being made: there once the Nitro Trap's spawn has made it
+                if (r.nitro_making >= 0 && !nitro_spawn_state.component)
+                {
+                    const auto k = static_cast<std::size_t>(r.nitro_making);
+                    if (trap_nitro.entity && trap_nitro.appeared >= r.nitro_making_since && live_crate(trap_nitro.entity))
+                    {
+                        r.nitro_crates[k] = trap_nitro.entity, r.nitro_made_at[k] = now;
+                        if (r.nitro_lines < 60)
+                            ++r.nitro_lines, std::cout << "Roo Nitro: one on " << platform_name(r.nitro_platforms[k]) << ", at " << roo_xyz(trap_nitro.at) << "\n" << std::flush;
+                    }
+                    else if (r.nitro_lines < 60)
+                        ++r.nitro_lines, std::cout << "Roo Nitro: none came on " << platform_name(r.nitro_platforms[k]) << "\n" << std::flush;
+                    r.nitro_making = -1, r.nitro_next = now + 3000;
+                }
+                for (std::size_t k = 0; k < r.nitro_crates.size(); ++k)
+                {
+                    const auto e = r.nitro_crates[k];
+                    if (!e)
+                        continue;
+                    const auto spot = nitro_spot(r.nitro_platforms[k]);
+                    std::array<float, 3> at{};
+                    if (!live_crate(e) || !read(e + 32, at))
+                    {
+                        // gone: set off (by whom?), or the fight made over
+                        std::array<float, 3> crash{};
+                        const bool crash_known = player() && roo_where(player(), crash);
+                        if (r.nitro_lines < 60)
+                            ++r.nitro_lines, std::cout << "Roo Nitro: the one on " << platform_name(r.nitro_platforms[k]) << " is gone after " << seconds(now - r.nitro_made_at[k])
+                                                       << " (Ripper Roo " << std::lround(std::hypot(roo_at[0] - spot[0], roo_at[1] - spot[1])) << " from it"
+                                                       << (crash_known ? ", Crash " + std::to_string(std::lround(std::hypot(crash[0] - spot[0], crash[1] - spot[1]))) : std::string())
+                                                       << "; his health " << (health_getter_ok() ? std::to_string(actor_health(r.roo) / 100) + " hits" : std::string("?")) << ")\n" << std::flush;
+                        r.nitro_crates[k] = 0, r.nitro_next = now + 3000;
+                        continue;
+                    }
+                    // moved by the game (a borrowed spawner's crate can go "home" to it): back on its platform
+                    if (std::hypot(at[0] - spot[0], at[1] - spot[1]) > 20)
+                    {
+                        if (r.nitro_moved.insert(e).second && r.nitro_lines < 60)
+                            ++r.nitro_lines, std::cout << "Roo Nitro: the game moved the one on " << platform_name(r.nitro_platforms[k]) << " to " << roo_xyz(at) << ": put back\n" << std::flush;
+                        set_entity_position(e, spot);
+                    }
+                }
+                // the next one, while the fight is on
+                if (fight && r.nitro_making < 0 && !nitro_spawn_state.component && now >= r.nitro_next)
+                    for (std::size_t k = 0; k < r.nitro_crates.size(); ++k)
+                    {
+                        if (r.nitro_crates[k])
+                            continue;
+                        nitro_level_scan("Boss");
+                        const auto spot = nitro_spot(r.nitro_platforms[k]);
+                        std::string why;
+                        r.nitro_making_since = GetTickCount64();
+                        if (nitro_spawn(why, &spot, 0, true))
+                            r.nitro_making = static_cast<int>(k), ++r.nitro_tries;
+                        else
+                        {
+                            if (r.nitro_whys.insert(why).second && r.nitro_whys.size() <= 12)
+                                std::cout << "Roo Nitro: can't make one yet: " << why << "\n" << std::flush;
+                            r.nitro_next = now + 1000;
+                        }
+                        break;
+                    }
             }
             // his pace at a boss speed: hops and the wait after each landing shorter
             const unsigned speed = std::clamp(state.boss_speed, 100u, 200u);

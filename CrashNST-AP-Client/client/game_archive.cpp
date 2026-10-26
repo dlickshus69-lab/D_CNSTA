@@ -87,6 +87,14 @@ namespace ingame
                 return string_at(names, p + build.size() + 1);
             }
             std::uint32_t length(unsigned i) { return word(read(56ull + count * 4ull + i * 16ull, 16), 8); }
+            // (V1.4.7) the first of a member's two names in the name table (the game's build folder), and its record
+            std::string prefix(unsigned i)
+            {
+                const auto p = word(names, i * 4);
+                require(p >= count * 4);
+                return string_at(names, p);
+            }
+            Bytes record(unsigned i) { return read(56ull + count * 4ull + i * 16ull, 16); }
             Bytes member(unsigned i)
             {
                 const auto info = read(56ull + count * 4ull + i * 16ull, 16);
@@ -885,6 +893,722 @@ namespace ingame
         lines.push_back("Roo files: done: " + zip_path.string() + " (" + std::to_string(zip.files) + " files, " + std::to_string((zip.at + 1023) / 1024) +
                         " KB). Send it in the chat with your log.");
         return lines;
+    }
+    // V1.4.7 (Testing build): the real Nitro in Ripper Roo's arena (Eric: "You should do the real nitro, just like the
+    // nitro trap"; /roo_files: a level loads the files its package list names (packages/generated/maps/.../<level>
+    // _pkg.igz: pairs of a kind and a file, "igx_entities" for its map layers), an archive's table is sorted by the
+    // FNV-1a hash of each member's name in lower case (all 1030 of Roo's in order), and the Nitro's template
+    // (Crate_Nitro_Spawned_gen) is only in N. Sanity Beach's crate layer, l101_nsanitybeach_crates.igz, with its files
+    // (the Nitro's model, material, script, explosion) in N. Sanity Beach's archive and not Roo's). A copy of Roo's
+    // archive is made with that crate layer (as a plain file, "igx_file", not a map layer), everything it needs that
+    // Roo's archive lacks (its dependency list, TDEP, followed through every file it names), and those added to his
+    // package list; every member stored whole. The loader puts it in place at the game's start (see dinput_proxy.cpp)
+    namespace
+    {
+        std::uint32_t fnv1a_lower(const std::string &name)
+        {
+            std::uint32_t h = 0x811c9dc5u;
+            for (const unsigned char c : name)
+                h = (h ^ static_cast<unsigned char>(std::tolower(c))) * 0x01000193u;
+            return h;
+        }
+        void put32(Bytes &b, std::size_t at, std::uint32_t v) { std::memcpy(b.data() + at, &v, 4); }
+        void put64(Bytes &b, std::size_t at, std::uint64_t v) { std::memcpy(b.data() + at, &v, 8); }
+        // an IGZ (version 10) file: its 0x800-byte header with the section table, its fixup chunks, and its data
+        struct IgzChunk
+        {
+            std::string magic;
+            std::uint32_t count = 0, header = 16;
+            Bytes data;
+        };
+        struct Igz
+        {
+            Bytes head;
+            std::vector<IgzChunk> chunks;
+            Bytes data;
+        };
+        Igz igz_read(const Bytes &b)
+        {
+            require(b.size() >= 0x800 && word(b, 0) == 0x49475a01 && word(b, 4) == 10);
+            Igz f;
+            f.head.assign(b.begin(), b.begin() + 0x800);
+            // sections: {pool, 0, offset, size}; the first the fixups, the second the data (a package list has just these)
+            require(word(b, 0x30 + 8) == 0 && word(b, 0x30 + 12) == 0);
+            const auto fix_at = word(b, 0x18), fix_size = word(b, 0x1c), data_at = word(b, 0x28), data_size = word(b, 0x2c);
+            require(fix_at == 0x800 && data_at == fix_at + fix_size && data_at + static_cast<std::uint64_t>(data_size) <= b.size());
+            for (std::uint32_t p = fix_at; p < fix_at + fix_size;)
+            {
+                IgzChunk c;
+                c.magic.assign(reinterpret_cast<const char *>(b.data() + p), 4);
+                c.count = word(b, p + 4);
+                const auto size = word(b, p + 8);
+                c.header = word(b, p + 12);
+                require(size >= c.header && c.header >= 16 && p + static_cast<std::uint64_t>(size) <= fix_at + fix_size);
+                c.data.assign(b.begin() + p + c.header, b.begin() + p + size);
+                f.chunks.push_back(std::move(c));
+                p += size;
+            }
+            f.data.assign(b.begin() + data_at, b.begin() + data_at + data_size);
+            return f;
+        }
+        Bytes igz_write(Igz f)
+        {
+            Bytes fix;
+            for (auto &c : f.chunks)
+            {
+                while (c.data.size() % 4)
+                    c.data.push_back(0);
+                const auto at = fix.size();
+                fix.resize(at + c.header + c.data.size());
+                std::memcpy(fix.data() + at, c.magic.data(), 4);
+                put32(fix, at + 4, c.count), put32(fix, at + 8, static_cast<std::uint32_t>(c.header + c.data.size())), put32(fix, at + 12, c.header);
+                std::copy(c.data.begin(), c.data.end(), fix.begin() + static_cast<std::ptrdiff_t>(at + c.header));
+            }
+            Bytes out = f.head;
+            put32(out, 0x18, 0x800), put32(out, 0x1c, static_cast<std::uint32_t>(fix.size()));
+            put32(out, 0x28, static_cast<std::uint32_t>(0x800 + fix.size())), put32(out, 0x2c, static_cast<std::uint32_t>(f.data.size()));
+            out.insert(out.end(), fix.begin(), fix.end());
+            out.insert(out.end(), f.data.begin(), f.data.end());
+            return out;
+        }
+        IgzChunk *igz_chunk(Igz &f, const char *magic)
+        {
+            for (auto &c : f.chunks)
+                if (c.magic == magic)
+                    return &c;
+            return nullptr;
+        }
+        // the string table: each string on an even offset
+        std::vector<std::string> igz_strings(const IgzChunk &c)
+        {
+            std::vector<std::string> out;
+            std::size_t i = 0;
+            for (std::uint32_t k = 0; k < c.count; ++k)
+            {
+                require(i < c.data.size());
+                const auto end = std::find(c.data.begin() + static_cast<std::ptrdiff_t>(i), c.data.end(), 0);
+                require(end != c.data.end());
+                out.emplace_back(c.data.begin() + static_cast<std::ptrdiff_t>(i), end);
+                i = static_cast<std::size_t>(end - c.data.begin()) + 1;
+                i += i & 1;
+            }
+            return out;
+        }
+        Bytes igz_string_table(const std::vector<std::string> &strings)
+        {
+            Bytes out;
+            for (const auto &text : strings)
+            {
+                out.insert(out.end(), text.begin(), text.end());
+                out.push_back(0);
+                if (out.size() & 1)
+                    out.push_back(0);
+            }
+            return out;
+        }
+        // the fixup lists' offsets (in 4-byte steps): each the one before plus 3 bits a nibble, low nibble first, the
+        // high bit of a nibble saying more follow
+        std::vector<std::uint32_t> igz_unpack(const Bytes &d, std::uint32_t count)
+        {
+            std::vector<std::uint32_t> out;
+            std::uint32_t at = 0;
+            std::size_t nibble = 0;
+            const auto next = [&]() -> unsigned {
+                require(nibble / 2 < d.size());
+                const unsigned v = nibble % 2 ? d[nibble / 2] >> 4 : d[nibble / 2] & 15;
+                ++nibble;
+                return v;
+            };
+            while (out.size() < count)
+            {
+                std::uint32_t value = 0, shift = 0;
+                unsigned n = 0;
+                do
+                {
+                    n = next();
+                    value |= (n & 7u) << shift, shift += 3;
+                } while ((n & 8) && shift < 32);
+                at += value;
+                out.push_back(at);
+            }
+            return out;
+        }
+        Bytes igz_pack(const std::vector<std::uint32_t> &values)
+        {
+            std::vector<unsigned> nibbles;
+            std::uint32_t before = 0;
+            for (const auto v : values)
+            {
+                require(v >= before);
+                std::uint32_t d = v - before;
+                before = v;
+                do
+                {
+                    const unsigned n = d & 7;
+                    d >>= 3;
+                    nibbles.push_back(d ? n | 8 : n);
+                } while (d);
+            }
+            if (nibbles.size() % 2)
+                nibbles.push_back(0);
+            Bytes out;
+            for (std::size_t i = 0; i < nibbles.size(); i += 2)
+                out.push_back(static_cast<unsigned char>(nibbles[i] | (nibbles[i + 1] << 4)));
+            return out;
+        }
+        // a dependency's path as an archive member's name: "<build>models:/Levels/x.igz" -> "models/levels/x.igz"
+        std::string member_of(std::string path)
+        {
+            if (path.rfind("<build>", 0) == 0)
+                path.erase(0, 7);
+            const auto colon = path.find(":/");
+            if (colon == std::string::npos)
+                return {};
+            const auto ns = lower(path.substr(0, colon));
+            auto rest = path.substr(colon + 2);
+            static const std::map<std::string, std::string> folders{{"materials", "materialinstances/"}, {"data", ""}};
+            if (ns == "project")
+            {
+                const auto out = rest.find("/output/");
+                rest = out == std::string::npos ? rest : rest.substr(out + 8);
+                return lower(rest);
+            }
+            const auto it = folders.find(ns);
+            return lower((it == folders.end() ? ns + "/" : it->second) + rest);
+        }
+        // an IGZ file's dependencies (its TDEP list: name, path, name, path ...) as member names
+        std::vector<std::string> igz_dependencies(const Bytes &b)
+        {
+            std::vector<std::string> out;
+            if (b.size() < 0x800 || word(b, 0) != 0x49475a01 || word(b, 4) != 10)
+                return out;
+            const auto fix_at = word(b, 0x18), fix_size = word(b, 0x1c);
+            for (std::uint32_t p = fix_at; p + 16 <= fix_at + static_cast<std::uint64_t>(fix_size) && p + 16 <= b.size();)
+            {
+                const auto size = word(b, p + 8), header = word(b, p + 12), count = word(b, p + 4);
+                if (size < 16 || p + static_cast<std::uint64_t>(size) > b.size())
+                    break;
+                if (std::memcmp(b.data() + p, "TDEP", 4) == 0)
+                {
+                    std::vector<std::string> strings;
+                    std::size_t i = p + header;
+                    while (strings.size() < count && i < p + size)
+                    {
+                        const auto end = std::find(b.begin() + static_cast<std::ptrdiff_t>(i), b.begin() + p + size, 0);
+                        strings.emplace_back(b.begin() + static_cast<std::ptrdiff_t>(i), end);
+                        i = static_cast<std::size_t>(end - b.begin()) + 1;
+                    }
+                    for (std::size_t k = 1; k < strings.size(); k += 2)
+                        if (const auto m = member_of(strings[k]); !m.empty())
+                            out.push_back(m);
+                }
+                p += size;
+            }
+            return out;
+        }
+        // a package list's pairs (kind, file); its string table, chunk info and pair array
+        struct Package
+        {
+            Igz igz;
+            std::vector<std::string> strings;
+            std::size_t info = 0; // the igStreamingChunkInfo's place in the data
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs;
+        };
+        Package package_read(const Bytes &b)
+        {
+            Package p;
+            p.igz = igz_read(b);
+            const auto *tstr = igz_chunk(p.igz, "TSTR");
+            const auto *tmet = igz_chunk(p.igz, "TMET");
+            const auto *rvtb = igz_chunk(p.igz, "RVTB");
+            require(tstr && tmet && rvtb && igz_chunk(p.igz, "RSTT"));
+            p.strings = igz_strings(*tstr);
+            // the chunk info: the object whose type (its first word, a TMET index) is igStreamingChunkInfo
+            std::vector<std::string> types;
+            for (std::size_t i = 0; i < tmet->data.size();)
+            {
+                const auto end = std::find(tmet->data.begin() + static_cast<std::ptrdiff_t>(i), tmet->data.end(), 0);
+                types.emplace_back(tmet->data.begin() + static_cast<std::ptrdiff_t>(i), end);
+                i = static_cast<std::size_t>(end - tmet->data.begin()) + 1;
+                i += i & 1;
+            }
+            bool found = false;
+            for (const auto at : igz_unpack(rvtb->data, rvtb->count))
+            {
+                const std::size_t object = at * 4ull;
+                require(object + 8 <= p.igz.data.size());
+                const auto type = get<std::uint64_t>(p.igz.data, object);
+                if (type < types.size() && types[type] == "igStreamingChunkInfo")
+                    require(object + 64 <= p.igz.data.size()), p.info = object, found = true;
+            }
+            require(found);
+            const auto n = get<std::uint64_t>(p.igz.data, p.info + 0x28), at = get<std::uint64_t>(p.igz.data, p.info + 0x38);
+            require(n < 100000 && at + n * 16 <= p.igz.data.size());
+            for (std::uint64_t k = 0; k < n; ++k)
+            {
+                const auto kind = get<std::uint64_t>(p.igz.data, at + k * 16), file = get<std::uint64_t>(p.igz.data, at + k * 16 + 8);
+                require(kind < p.strings.size() && file < p.strings.size());
+                p.pairs.emplace_back(kind, file);
+            }
+            return p;
+        }
+        // the list with more pairs: their strings at the end of the string table, the whole pair array again at the end of
+        // the data (the old one left where it was, unused), and its string references added to RSTT
+        Bytes package_add(Package p, const std::vector<std::pair<std::string, std::string>> &more)
+        {
+            std::map<std::string, std::uint64_t> index;
+            for (std::size_t i = 0; i < p.strings.size(); ++i)
+                index.emplace(p.strings[i], i);
+            const auto string_of = [&](const std::string &text) {
+                if (const auto it = index.find(text); it != index.end())
+                    return it->second;
+                p.strings.push_back(text);
+                index.emplace(text, p.strings.size() - 1);
+                return static_cast<std::uint64_t>(p.strings.size() - 1);
+            };
+            for (const auto &[kind, file] : more)
+                p.pairs.emplace_back(string_of(kind), string_of(file));
+            auto &data = p.igz.data;
+            while (data.size() % 16)
+                data.push_back(0);
+            const auto at = data.size();
+            data.resize(at + p.pairs.size() * 16);
+            for (std::size_t k = 0; k < p.pairs.size(); ++k)
+                put64(data, at + k * 16, p.pairs[k].first), put64(data, at + k * 16 + 8, p.pairs[k].second);
+            const auto memory = get<std::uint64_t>(data, p.info + 0x30);
+            put64(data, p.info + 0x28, p.pairs.size());
+            put64(data, p.info + 0x30, (memory & 0xffffffff00000000ULL) | (p.pairs.size() * 16)); // (its flags kept)
+            put64(data, p.info + 0x38, at);
+            auto *tstr = igz_chunk(p.igz, "TSTR");
+            tstr->data = igz_string_table(p.strings), tstr->count = static_cast<std::uint32_t>(p.strings.size());
+            auto *rstt = igz_chunk(p.igz, "RSTT");
+            auto refs = igz_unpack(rstt->data, rstt->count);
+            require(refs.empty() || refs.back() * 4ull < at);
+            for (std::size_t k = 0; k < p.pairs.size() * 2; ++k)
+                refs.push_back(static_cast<std::uint32_t>((at + k * 8) / 4));
+            rstt->data = igz_pack(refs), rstt->count = static_cast<std::uint32_t>(refs.size());
+            return igz_write(p.igz);
+        }
+        // the lookup numbers in an archive's header (words 20 and 24): a name's place in the table is about its hash /
+        // divider, within slop of it (the game's own: divider 0xffffffff / count, slop the furthest any member is from
+        // there; Crash.pak: 4219024 and 22 for its 1018 files)
+        std::uint32_t hash_divider(std::size_t n) { return n ? static_cast<std::uint32_t>(0xffffffffu / n) : 0; }
+        std::uint32_t hash_slop(const std::vector<std::uint32_t> &hashes, std::uint32_t divider)
+        {
+            std::int64_t most = 0;
+            for (std::size_t i = 0; divider && i < hashes.size(); ++i)
+            {
+                const auto off = static_cast<std::int64_t>(hashes[i] / divider) - static_cast<std::int64_t>(i);
+                most = std::max<std::int64_t>(most, off < 0 ? -off : off);
+            }
+            return static_cast<std::uint32_t>(most);
+        }
+        // a member to add, stored whole
+        struct NewMember
+        {
+            std::string name, prefix;
+            Bytes data;
+        };
+        // a copy of the archive `a` at `target`: its members as they are, byte for byte (compressed ones with their block
+        // tables), moved along by whole sectors if the table grew; the `replaced` ones (by index) and the `added` ones
+        // stored whole after them, each on its own sectors; the table sorted by name hash, the names last; the header's
+        // count, table size, lookup numbers and names' place made again. Each member's number (its record's second word,
+        // above its lowest byte; different for each, Crash.pak: 0 to 1017 and one 0xffffff) is kept, and an added one gets
+        // the next free one. `notes` gets what was found
+        void write_archive(const std::filesystem::path &target, Archive &a, const std::map<unsigned, Bytes> &replaced, const std::vector<NewMember> &added,
+                           std::vector<std::string> &notes)
+        {
+            const std::uint32_t n0 = a.count;
+            const auto table0 = a.read(56, a.toc);
+            const std::uint64_t blocks = a.toc - n0 * 20ull;
+            std::vector<std::uint32_t> hashes0(n0);
+            for (std::uint32_t i = 0; i < n0; ++i)
+                hashes0[i] = word(table0, i * 4ull);
+            const auto divider0 = word(a.header, 20), slop0 = word(a.header, 24);
+            {
+                std::ostringstream line;
+                line << "Roo Nitro: Roo's archive: " << n0 << " files, lookup numbers " << divider0 << " and " << slop0 << " (made again here: " << hash_divider(n0) << " and "
+                     << hash_slop(hashes0, divider0) << "), flags " << word(a.header, 52) << ", blocks " << word(a.header, 28) << "/" << word(a.header, 32) << "/" << word(a.header, 36);
+                notes.push_back(line.str());
+            }
+            // (the game's lookup numbers worked out as it does, or the copy isn't made)
+            if (divider0 != hash_divider(n0) || slop0 != hash_slop(hashes0, divider0))
+                throw std::runtime_error("Roo's archive's lookup numbers aren't what the client works them out to be, so no copy was made (send the log)");
+            struct Entry
+            {
+                std::uint32_t hash = 0, second = 0, length = 0, command = 0;
+                std::uint64_t at = 0;
+                std::string prefix, name;
+                const Bytes *whole = nullptr;
+            };
+            std::vector<Entry> entries;
+            std::set<std::uint32_t> numbers;
+            std::uint64_t first = ~std::uint64_t{0};
+            const auto names_at0 = get<std::uint64_t>(a.header, 40);
+            for (std::uint32_t i = 0; i < n0; ++i)
+            {
+                Entry e;
+                const auto r = n0 * 4ull + i * 16ull;
+                e.hash = hashes0[i], e.second = word(table0, r + 4), e.length = word(table0, r + 8), e.command = word(table0, r + 12);
+                e.at = word(table0, r) + ((static_cast<std::uint64_t>(e.second) & 1) << 32);
+                e.prefix = a.prefix(i), e.name = a.name(i);
+                require(e.hash == fnv1a_lower(e.name) && e.at < names_at0 && (i == 0 || hashes0[i - 1] < e.hash));
+                numbers.insert(e.second >> 8);
+                if (const auto it = replaced.find(i); it != replaced.end())
+                    e.whole = &it->second, e.length = static_cast<std::uint32_t>(it->second.size()), e.command = 0xffffffffu;
+                else
+                    first = std::min(first, e.at);
+                entries.push_back(std::move(e));
+            }
+            require(first != ~std::uint64_t{0} && first % 0x800 == 0 && first >= 56ull + a.toc);
+            std::uint32_t number = n0;
+            for (const auto &m : added)
+            {
+                Entry e;
+                e.hash = fnv1a_lower(m.name), e.prefix = m.prefix, e.name = m.name, e.whole = &m.data;
+                e.length = static_cast<std::uint32_t>(m.data.size()), e.command = 0xffffffffu;
+                while (numbers.count(number))
+                    ++number;
+                numbers.insert(number), e.second = number << 8;
+                entries.push_back(std::move(e));
+            }
+            std::sort(entries.begin(), entries.end(), [](const Entry &x, const Entry &y) { return x.hash < y.hash; });
+            for (std::size_t i = 1; i < entries.size(); ++i)
+                require(entries[i - 1].hash != entries[i].hash);
+            const auto n = static_cast<std::uint32_t>(entries.size());
+            const auto toc = static_cast<std::uint32_t>(n * 20ull + blocks);
+            const std::uint64_t start = std::max<std::uint64_t>(first, (56ull + toc + 0x7ff) & ~std::uint64_t{0x7ff}), delta = start - first;
+            std::ofstream out(target, std::ios::binary | std::ios::trunc);
+            require(static_cast<bool>(out));
+            {
+                const Bytes head(static_cast<std::size_t>(start));
+                out.write(reinterpret_cast<const char *>(head.data()), static_cast<std::streamsize>(head.size()));
+            }
+            // the members as they are, 8 MB at a time
+            std::uint64_t at = start;
+            for (std::uint64_t p = first; p < names_at0;)
+            {
+                const auto chunk = std::min<std::uint64_t>(8ull << 20, names_at0 - p);
+                const auto bytes = a.read(p, static_cast<std::size_t>(chunk));
+                out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+                require(static_cast<bool>(out));
+                p += chunk, at += chunk;
+            }
+            // then the ones stored whole
+            const Bytes zeros(0x800);
+            const auto pad = [&] {
+                const auto padded = (at + 0x7ff) & ~std::uint64_t{0x7ff};
+                out.write(reinterpret_cast<const char *>(zeros.data()), static_cast<std::streamsize>(padded - at));
+                at = padded;
+            };
+            for (auto &e : entries)
+            {
+                if (!e.whole)
+                {
+                    e.at += delta;
+                    continue;
+                }
+                pad();
+                e.at = at;
+                out.write(reinterpret_cast<const char *>(e.whole->data()), static_cast<std::streamsize>(e.whole->size()));
+                at += e.whole->size();
+            }
+            // the names: an offset each, then "prefix\0name\0" each
+            pad();
+            const auto names_at = at;
+            Bytes names(n * 4ull);
+            std::vector<std::uint32_t> hashes(n);
+            for (std::uint32_t i = 0; i < n; ++i)
+            {
+                hashes[i] = entries[i].hash;
+                put32(names, i * 4ull, static_cast<std::uint32_t>(names.size()));
+                names.insert(names.end(), entries[i].prefix.begin(), entries[i].prefix.end());
+                names.push_back(0);
+                names.insert(names.end(), entries[i].name.begin(), entries[i].name.end());
+                names.push_back(0);
+            }
+            out.write(reinterpret_cast<const char *>(names.data()), static_cast<std::streamsize>(names.size()));
+            // the header and table (the block tables as they were: the compressed members' records still point into them)
+            Bytes head(a.header.begin(), a.header.begin() + 56);
+            const auto divider = hash_divider(n), slop = hash_slop(hashes, divider);
+            put32(head, 8, toc), put32(head, 12, n), put32(head, 20, divider), put32(head, 24, slop);
+            put64(head, 40, names_at), put32(head, 48, static_cast<std::uint32_t>(names.size()));
+            Bytes table(toc);
+            for (std::uint32_t i = 0; i < n; ++i)
+            {
+                const auto &e = entries[i];
+                const auto r = n * 4ull + i * 16ull;
+                put32(table, i * 4ull, e.hash);
+                put32(table, r, static_cast<std::uint32_t>(e.at)), put32(table, r + 4, (e.second & ~1u) | static_cast<std::uint32_t>((e.at >> 32) & 1));
+                put32(table, r + 8, e.length), put32(table, r + 12, e.command);
+            }
+            std::copy(table0.begin() + static_cast<std::ptrdiff_t>(n0 * 20ull), table0.end(), table.begin() + static_cast<std::ptrdiff_t>(n * 20ull));
+            out.seekp(0);
+            out.write(reinterpret_cast<const char *>(head.data()), 56);
+            out.write(reinterpret_cast<const char *>(table.data()), static_cast<std::streamsize>(table.size()));
+            out.flush();
+            require(static_cast<bool>(out));
+            notes.push_back("Roo Nitro: the copy: " + std::to_string(n) + " files, lookup numbers " + std::to_string(divider) + " and " + std::to_string(slop) + ", his files moved along " +
+                            std::to_string(delta) + " bytes, " + std::to_string((names_at + names.size()) / (1024 * 1024)) + " MB");
+        }
+    }
+    std::vector<std::string> roo_nitro_archive(const std::filesystem::path &folder, const std::filesystem::path &original, std::string &built, bool as_layer)
+    {
+        std::vector<std::string> lines;
+        std::filesystem::path beach;
+        for (const auto &path : archives())
+            if (lower(path.filename().string()) == "l101_nsanitybeach.pak")
+                beach = path;
+        require(!beach.empty() && std::filesystem::exists(original));
+        Archive roo(original), source(beach);
+        std::map<std::string, unsigned> in_roo, in_beach;
+        for (unsigned i = 0; i < roo.count; ++i)
+            in_roo.emplace(lower(roo.name(i)), i);
+        for (unsigned i = 0; i < source.count; ++i)
+            in_beach.emplace(lower(source.name(i)), i);
+        // Roo's and the beach's package lists
+        const std::string roo_pkg = "packages/generated/maps/crash1/bosses/b102_ripperroo/b102_ripperroo_pkg.igz";
+        const std::string beach_pkg = "packages/generated/maps/crash1/l101_nsanitybeach/l101_nsanitybeach_pkg.igz";
+        const std::string crates = "maps/crash1/l101_nsanitybeach/l101_nsanitybeach_crates.igz";
+        require(in_roo.count(roo_pkg) && in_beach.count(beach_pkg) && in_beach.count(crates));
+        // (only ever made from the game's own: a copy already has the beach's crate layer)
+        if (in_roo.count(crates))
+            throw std::runtime_error("this B102_RipperRoo.pak is already a patched copy, not the game's own. Restart the game once so the loader sorts it out, or "
+                                     "Steam's verify of the game files puts the game's own back");
+        const auto roo_list = package_read(roo.member(in_roo[roo_pkg]));
+        const auto beach_list = package_read(source.member(in_beach[beach_pkg]));
+        std::set<std::string> roo_files;
+        for (const auto &[kind, file] : roo_list.pairs)
+            roo_files.insert(lower(roo_list.strings[file]));
+        std::map<std::string, std::string> beach_kind;
+        for (const auto &[kind, file] : beach_list.pairs)
+            beach_kind.emplace(lower(beach_list.strings[file]), beach_list.strings[kind]);
+        // the crate layer and everything it needs that Roo's archive lacks
+        std::vector<std::string> add, queue{crates};
+        std::set<std::string> seen{crates};
+        unsigned missing = 0;
+        std::string missing_names;
+        while (!queue.empty())
+        {
+            const auto name = queue.back();
+            queue.pop_back();
+            if (in_roo.count(name))
+                continue;
+            const auto it = in_beach.find(name);
+            if (it == in_beach.end())
+            {
+                ++missing, missing_names += (missing_names.empty() ? "" : ", ") + name;
+                continue;
+            }
+            add.push_back(name);
+            if (name.size() > 4 && name.compare(name.size() - 4, 4, ".igz") == 0)
+                for (const auto &dep : igz_dependencies(source.member(it->second)))
+                    if (seen.insert(dep).second)
+                        queue.push_back(dep);
+        }
+        // the package list: the crate layer as a plain file; the others as the beach lists them, when it does
+        // (as_layer: as the beach lists it, a map layer, so its things are made, its spawners too: Roo's arena has none to
+        // make a Nitro with; otherwise as a plain file)
+        const auto crates_kind = beach_kind.count(crates) ? beach_kind[crates] : std::string("igx_entities");
+        std::vector<std::pair<std::string, std::string>> more{{as_layer ? crates_kind : std::string("igx_file"), crates}};
+        for (const auto &name : add)
+            if (name != crates && !roo_files.count(name))
+                if (const auto it = beach_kind.find(name); it != beach_kind.end())
+                    more.emplace_back(it->second, name);
+        auto pkg = package_add(roo_list, more);
+        // (read back)
+        {
+            const auto check = package_read(pkg);
+            require(check.pairs.size() == roo_list.pairs.size() + more.size());
+            require(lower(check.strings[check.pairs.back().second]) == lower(more.back().second));
+        }
+        // Roo's archive with his package list replaced and the beach's files added
+        std::map<unsigned, Bytes> replaced{{in_roo[roo_pkg], pkg}};
+        std::vector<NewMember> members;
+        std::uint64_t added_bytes = 0;
+        for (const auto &name : add)
+        {
+            const auto i = in_beach[name];
+            members.push_back({source.name(i), source.prefix(i), source.member(i)});
+            added_bytes += members.back().data.size();
+        }
+        std::error_code error;
+        std::filesystem::create_directories(folder, error);
+        const auto target = folder / original.filename();
+        auto temporary = target;
+        temporary += L".tmp";
+        write_archive(temporary, roo, replaced, members, lines);
+        // read back: every name found by its hash, the lookup numbers right, his package list and the beach's files as
+        // made, and every one of his files up to 1 MB the same as in his own archive (the bigger ones by their records)
+        unsigned compared = 0;
+        {
+            Archive check(temporary);
+            require(check.count == roo.count + members.size());
+            std::vector<std::uint32_t> hashes(check.count);
+            std::map<std::string, unsigned> names;
+            for (unsigned i = 0; i < check.count; ++i)
+            {
+                const auto name = check.name(i);
+                hashes[i] = word(check.read(56ull + i * 4ull, 4), 0);
+                require(hashes[i] == fnv1a_lower(name) && (i == 0 || hashes[i - 1] < hashes[i]));
+                names.emplace(lower(name), i);
+            }
+            require(word(check.header, 20) == hash_divider(check.count) && word(check.header, 24) == hash_slop(hashes, word(check.header, 20)));
+            require(names.count(roo_pkg) && check.member(names[roo_pkg]) == pkg);
+            for (const auto &m : members)
+                require(names.count(lower(m.name)) && check.member(names[lower(m.name)]) == m.data);
+            for (unsigned j = 0; j < roo.count; ++j)
+            {
+                const auto name = lower(roo.name(j));
+                require(names.count(name));
+                if (name == roo_pkg)
+                    continue;
+                const auto mine = roo.record(j), theirs = check.record(names[name]);
+                require(word(mine, 8) == word(theirs, 8) && word(mine, 12) == word(theirs, 12) && (word(mine, 4) & ~1u) == (word(theirs, 4) & ~1u));
+                if (roo.length(j) <= 1024 * 1024)
+                    require(check.member(names[name]) == roo.member(j)), ++compared;
+            }
+        }
+        // (on disk before it's named: the loader goes by its size and write time)
+        if (const auto file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr); file != INVALID_HANDLE_VALUE)
+            FlushFileBuffers(file), CloseHandle(file);
+        if (!MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            throw std::runtime_error("couldn't write " + target.string() + " (Windows error " + std::to_string(GetLastError()) + ")");
+        built = target.string();
+        std::ostringstream line;
+        line << "Roo Nitro: made " << target.string() << ": Roo's " << roo.count << " files as they were (" << compared << " read back the same) and " << add.size()
+             << " from N. Sanity Beach (" << added_bytes / 1024 << " KB: its crate layer, as a " << more.front().first << ", and what it needs), " << more.size()
+             << " added to his package list" << (missing ? "; " + std::to_string(missing) + " needed files found nowhere: " + missing_names : std::string());
+        lines.push_back(line.str());
+        std::string listed;
+        for (std::size_t k = 0; k < add.size() && k < 80; ++k)
+            listed += (k ? ", " : "") + add[k];
+        lines.push_back("Roo Nitro: added: " + listed);
+        return lines;
+    }
+    // /roo_nitro (Testing): the loader's plan for Roo's archive (see dinput_proxy.cpp, level patches). On: the copy made from
+    // the game's own (in the archives folder, or kept aside in patches\original while a copy is in place) and its line in
+    // the plan; off: its line taken out. Either way it happens at the next game start
+    namespace
+    {
+        bool file_stamp(const std::filesystem::path &path, unsigned long long &size, unsigned long long &written)
+        {
+            WIN32_FILE_ATTRIBUTE_DATA data{};
+            if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) || (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                return false;
+            size = (static_cast<unsigned long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+            written = (static_cast<unsigned long long>(data.ftLastWriteTime.dwHighDateTime) << 32) | data.ftLastWriteTime.dwLowDateTime;
+            return true;
+        }
+        std::vector<std::string> bar_fields(const std::string &line)
+        {
+            std::vector<std::string> parts;
+            std::size_t from = 0;
+            for (auto bar = line.find('|'); bar != std::string::npos; bar = line.find('|', from))
+                parts.push_back(line.substr(from, bar - from)), from = bar + 1;
+            parts.push_back(line.substr(from));
+            return parts;
+        }
+    }
+    std::vector<std::string> roo_nitro_set(bool on, const std::filesystem::path &state_folder)
+    {
+        const auto root = game_archives();
+        const auto patches = root.parent_path() / L"CrashNSTAP" / L"patches";
+        std::filesystem::path game;
+        for (const auto &path : archives())
+            if (lower(path.filename().string()) == "b102_ripperroo.pak")
+                game = path;
+        if (game.empty())
+            return {"Roo Nitro: Ripper Roo's archive (B102_RipperRoo.pak) isn't in " + root.string()};
+        const auto relative = std::filesystem::relative(game, root);
+        const auto key = lower(relative.string());
+        const auto plan_file = state_folder / "level_patches.txt";
+        // the plan's other lines, as they are
+        std::vector<std::string> others;
+        {
+            std::ifstream in(plan_file);
+            std::string line;
+            while (std::getline(in, line))
+                if (const auto f = bar_fields(line); f.size() == 5 && lower(f[0]) != key)
+                    others.push_back(line);
+        }
+        const auto write_plan = [&](const std::string &mine) {
+            std::error_code error;
+            std::filesystem::create_directories(state_folder, error);
+            auto temporary = plan_file;
+            temporary += ".tmp";
+            {
+                std::ofstream out(temporary, std::ios::trunc | std::ios::binary);
+                for (const auto &line : others)
+                    out << line << '\n';
+                if (!mine.empty())
+                    out << mine << '\n';
+            }
+            if (!MoveFileExW(temporary.c_str(), plan_file.c_str(), MOVEFILE_REPLACE_EXISTING))
+                throw std::runtime_error("couldn't write " + plan_file.string());
+        };
+        if (!on)
+        {
+            write_plan({});
+            return {"Roo Nitro: off. At the next game start his own archive is put back."};
+        }
+        // the game's own: in the archives folder, or kept aside while a copy is in place
+        unsigned long long size = 0, written = 0;
+        require(file_stamp(game, size, written));
+        auto original = game;
+        unsigned long long source_size = size, source_written = written;
+        {
+            std::ifstream in(patches / L"installed.txt");
+            std::string line;
+            while (std::getline(in, line))
+                if (const auto f = bar_fields(line); f.size() == 5 && lower(f[0]) == key && std::strtoull(f[1].c_str(), nullptr, 10) == size &&
+                                                     std::strtoull(f[2].c_str(), nullptr, 10) == written)
+                {
+                    original = patches / L"original" / relative;
+                    source_size = std::strtoull(f[3].c_str(), nullptr, 10), source_written = std::strtoull(f[4].c_str(), nullptr, 10);
+                    unsigned long long kept_size = 0, kept_written = 0;
+                    if (!file_stamp(original, kept_size, kept_written) || kept_size != source_size || kept_written != source_written)
+                        return {"Roo Nitro: the game's own B102_RipperRoo.pak isn't where the client kept it (" + original.string() +
+                                "). Steam's verify of the game files puts it back; then /roo_nitro on again."};
+                }
+        }
+        std::string built;
+        auto lines = roo_nitro_archive(patches / relative.parent_path(), original, built, true);
+        unsigned long long patch_size = 0, patch_written = 0;
+        require(file_stamp(built, patch_size, patch_written));
+        write_plan(relative.string() + "|" + std::to_string(source_size) + "|" + std::to_string(source_written) + "|" + std::to_string(patch_size) + "|" +
+                   std::to_string(patch_written));
+        lines.push_back("Roo Nitro: on. Restart the game: as it starts, his arena's archive is swapped for this copy (/roo_nitro off and a restart put his own back).");
+        return lines;
+    }
+    // what the loader did with level patches as the game started (CRASHNSTAP_LEVEL_PATCHES: "in place|put back|skipped|why")
+    std::string level_patch_status()
+    {
+        char text[1024]{};
+        const auto count = GetEnvironmentVariableA("CRASHNSTAP_LEVEL_PATCHES", text, sizeof(text));
+        if (!count || count >= sizeof(text))
+            return {};
+        const auto f = bar_fields(text);
+        if (f.size() < 4)
+            return {};
+        std::string line;
+        if (std::strtoul(f[0].c_str(), nullptr, 10))
+            line = "Roo Nitro: his arena's archive has the Nitro's files this session (/roo_nitro off and a restart put his own back).";
+        if (std::strtoul(f[1].c_str(), nullptr, 10))
+            line += std::string(line.empty() ? "" : " ") + "Roo Nitro: his own archive is back.";
+        if (std::strtoul(f[2].c_str(), nullptr, 10))
+            line += std::string(line.empty() ? "" : " ") + "Roo Nitro: couldn't swap his archive (" + f[3] + ").";
+        return line;
+    }
+    bool level_patch_in_place()
+    {
+        // (set by the loader before the game started; the same all session)
+        static const bool in_place = [] {
+            char text[256]{};
+            const auto count = GetEnvironmentVariableA("CRASHNSTAP_LEVEL_PATCHES", text, sizeof(text));
+            return count && count < sizeof(text) && std::strtoul(text, nullptr, 10) > 0;
+        }();
+        return in_place;
     }
     std::vector<std::string> archive_census()
     {

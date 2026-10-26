@@ -46,6 +46,17 @@ namespace ingame
     // (V1.4.3 research) Ripper Roo's arena, N. Sanity Beach and Crash_Crates.pak: their member lists, small level files
     // and every member naming the Nitro crate, in folder\roo_nitro_files.zip; console lines saying what's in it
     std::vector<std::string> nitro_research_export(const std::filesystem::path &folder);
+    // (Testing) a copy of Ripper Roo's archive `original` in `folder` with N. Sanity Beach's crate layer (where the Nitro's
+    // template is; `as_layer`: as a map layer, so its spawners are made too) and what it needs, added to his package list;
+    // his own files as they were. Console lines; `built` gets the copy's path. Throws with a reason when it can't
+    std::vector<std::string> roo_nitro_archive(const std::filesystem::path &folder, const std::filesystem::path &original, std::string &built, bool as_layer = true);
+    // (Testing) /roo_nitro on|off: the loader's plan for Ripper Roo's archive (on: the copy made now, in the background), in
+    // `state_folder`; it takes effect at the next game start. Console lines; throws with a reason when it can't
+    std::vector<std::string> roo_nitro_set(bool on, const std::filesystem::path &state_folder);
+    // what the loader did with level patches as this game started, as a console line (empty: nothing to say)
+    std::string level_patch_status();
+    // whether Roo's patched archive is in place this session
+    bool level_patch_in_place();
     // console lines describing the archives: how many, and where their sound files are and what they're called
     std::vector<std::string> archive_census();
     // console lines about the sounds matching `text`. With `choose`, it also picks the Nitro Trap countdown's sound
