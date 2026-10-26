@@ -4,8 +4,5 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Ripper Roo no longer stops after his third hit:** with more health he has more hits than the game's 3 patterns, so after the third one he starts again from the first.
-- **Two ways round per pattern (harder bosses on):** each time he starts a pattern over, he goes one way round or the other, at random. Same platforms, other direction, so it's different after every death too.
-- **Faster with Boss Speed:** his hops and his wait after each landing are shorter, up to 35% faster at 200%.
-- No Nitro yet: the game doesn't load Nitro crates in his arena (more in the chat).
-- The log follows his stages and the changes above, to check them.
+- **`/roo_files` (research for the real Nitro in Ripper Roo's fight):** type it in the console (F1) anywhere. In about a minute it writes `CrashNSTAP\research\roo_nitro_files.zip` in the game's folder: what Roo's arena, N. Sanity Beach and the crates archive hold. Send the zip with your log.
+- From V1.4.2: Ripper Roo doesn't stop after his third hit; with harder bosses on each pattern goes either way round at random; Boss Speed speeds him up.

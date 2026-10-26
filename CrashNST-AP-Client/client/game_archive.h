@@ -43,6 +43,9 @@ namespace ingame
     std::vector<std::string> archive_member_report(const std::string &text);
     // copies the first archive member whose name contains `text` to `folder`; the file's path, or empty
     std::filesystem::path dump_archive_member(const std::string &text, const std::filesystem::path &folder);
+    // (V1.4.3 research) Ripper Roo's arena, N. Sanity Beach and Crash_Crates.pak: their member lists, small level files
+    // and every member naming the Nitro crate, in folder\roo_nitro_files.zip; console lines saying what's in it
+    std::vector<std::string> nitro_research_export(const std::filesystem::path &folder);
     // console lines describing the archives: how many, and where their sound files are and what they're called
     std::vector<std::string> archive_census();
     // console lines about the sounds matching `text`. With `choose`, it also picks the Nitro Trap countdown's sound

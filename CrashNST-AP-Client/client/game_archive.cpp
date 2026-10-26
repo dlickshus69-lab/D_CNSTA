@@ -13,6 +13,7 @@
 #include <map>
 #include <initializer_list>
 #include <stdexcept>
+#include <sstream>
 
 namespace ingame
 {
@@ -733,6 +734,157 @@ namespace ingame
             {
             }
         return {};
+    }
+    // (V1.4.3 research, Testing build: the real Nitro in Ripper Roo's arena, Eric: "You should do the real nitro, just
+    // like the nitro trap"; his arena's archive has the Nitro's textures but no Nitro template is loaded there, while
+    // N. Sanity Beach (L101) has one): what Roo's arena, N. Sanity Beach and Crash_Crates.pak hold, to find what makes a
+    // level load the Nitro. One zip: each archive's member list (name, size, how it's stored), its small level files
+    // (not textures, sounds, models, animations, materials, shaders or effects; 3 MB each at most, 24 MB an archive),
+    // and every member of theirs naming the Nitro crate (Crash_Crate_Nitro), up to 16 MB each
+    namespace
+    {
+        std::uint32_t crc32_of(const Bytes &data)
+        {
+            static const auto table = []
+            {
+                std::array<std::uint32_t, 256> t{};
+                for (std::uint32_t i = 0; i < 256; ++i)
+                {
+                    std::uint32_t c = i;
+                    for (int k = 0; k < 8; ++k)
+                        c = c & 1 ? 0xedb88320u ^ (c >> 1) : c >> 1;
+                    t[i] = c;
+                }
+                return t;
+            }();
+            std::uint32_t c = 0xffffffffu;
+            for (const auto b : data)
+                c = table[(c ^ b) & 0xff] ^ (c >> 8);
+            return c ^ 0xffffffffu;
+        }
+        // a zip of whole files, stored (no compression)
+        struct ZipOut
+        {
+            std::ofstream out;
+            Bytes central;
+            unsigned files = 0;
+            std::uint64_t at = 0;
+            explicit ZipOut(const std::filesystem::path &path) : out(path, std::ios::binary) {}
+            static void put16(Bytes &b, std::uint16_t v) { b.push_back(v & 0xff), b.push_back(v >> 8); }
+            static void put32(Bytes &b, std::uint32_t v) { put16(b, v & 0xffff), put16(b, v >> 16); }
+            void add(const std::string &name, const Bytes &data)
+            {
+                const auto crc = crc32_of(data);
+                const auto size = static_cast<std::uint32_t>(data.size());
+                Bytes local;
+                put32(local, 0x04034b50), put16(local, 20), put16(local, 0), put16(local, 0), put16(local, 0), put16(local, 0x21);
+                put32(local, crc), put32(local, size), put32(local, size), put16(local, static_cast<std::uint16_t>(name.size())), put16(local, 0);
+                local.insert(local.end(), name.begin(), name.end());
+                put32(central, 0x02014b50), put16(central, 20), put16(central, 20), put16(central, 0), put16(central, 0), put16(central, 0), put16(central, 0x21);
+                put32(central, crc), put32(central, size), put32(central, size), put16(central, static_cast<std::uint16_t>(name.size())), put16(central, 0), put16(central, 0);
+                put16(central, 0), put16(central, 0), put32(central, 0), put32(central, static_cast<std::uint32_t>(at));
+                central.insert(central.end(), name.begin(), name.end());
+                out.write(reinterpret_cast<const char *>(local.data()), static_cast<std::streamsize>(local.size()));
+                out.write(reinterpret_cast<const char *>(data.data()), static_cast<std::streamsize>(data.size()));
+                at += local.size() + data.size(), ++files;
+            }
+            bool finish()
+            {
+                Bytes end;
+                put32(end, 0x06054b50), put16(end, 0), put16(end, 0), put16(end, static_cast<std::uint16_t>(files)), put16(end, static_cast<std::uint16_t>(files));
+                put32(end, static_cast<std::uint32_t>(central.size())), put32(end, static_cast<std::uint32_t>(at)), put16(end, 0);
+                out.write(reinterpret_cast<const char *>(central.data()), static_cast<std::streamsize>(central.size()));
+                out.write(reinterpret_cast<const char *>(end.data()), static_cast<std::streamsize>(end.size()));
+                out.flush();
+                return static_cast<bool>(out);
+            }
+        };
+        bool names_nitro(const Bytes &data)
+        {
+            static const std::string a = "Crash_Crate_Nitro", b = "crash_crate_nitro";
+            return std::search(data.begin(), data.end(), a.begin(), a.end()) != data.end() || std::search(data.begin(), data.end(), b.begin(), b.end()) != data.end();
+        }
+    }
+    std::vector<std::string> nitro_research_export(const std::filesystem::path &folder)
+    {
+        std::vector<std::string> lines;
+        std::error_code error;
+        std::filesystem::create_directories(folder, error);
+        const auto zip_path = folder / L"roo_nitro_files.zip";
+        ZipOut zip(zip_path);
+        if (!zip.out)
+            return {"Roo files: couldn't write " + zip_path.string()};
+        const std::vector<std::string> wanted{"b102_ripperroo.pak", "l101_nsanitybeach.pak", "crash_crates.pak"};
+        std::uint64_t total = 0;
+        for (const auto &path : archives())
+        {
+            const auto file = lower(path.filename().string());
+            if (std::find(wanted.begin(), wanted.end(), file) == wanted.end())
+                continue;
+            try
+            {
+                Archive a(path);
+                std::ostringstream listing;
+                std::map<std::string, std::pair<unsigned, std::uint64_t>> folders;
+                std::uint64_t taken = 0;
+                unsigned kept = 0, nitro = 0;
+                std::string nitro_names;
+                for (unsigned i = 0; i < a.count; ++i)
+                {
+                    const auto name = a.name(i);
+                    const auto info = a.read(56ull + a.count * 4ull + i * 16ull, 16);
+                    const auto length = word(info, 8), command = word(info, 12);
+                    listing << i << "\t" << name << "\t" << length << "\t" << (command == 0xffffffff ? "whole" : "lzma") << "\n";
+                    const auto l = lower(name);
+                    const auto top = l.substr(0, l.find_first_of("/\\"));
+                    folders[top].first++, folders[top].second += length;
+                    const bool asset = has_word(l, {"textures/", "sound_samples/", "sound_streams/", "models/", "anims/", "materialinstances/", "shaders/", "vfx/", "fonts/", "movies/"});
+                    if (asset && !has_word(l, {"nitro"}))
+                        continue;
+                    if (length > 16u * 1024 * 1024)
+                        continue;
+                    Bytes data;
+                    try
+                    {
+                        data = a.member(i);
+                    }
+                    catch (const std::exception &)
+                    {
+                        continue;
+                    }
+                    const bool names = !asset && names_nitro(data);
+                    const bool little = !asset && length <= 3u * 1024 * 1024 && taken + length <= 24u * 1024 * 1024;
+                    const bool nitro_file = has_word(l, {"nitro"}) && length <= 3u * 1024 * 1024;
+                    if (!names && !little && !nitro_file)
+                        continue;
+                    auto member = name;
+                    std::replace(member.begin(), member.end(), '\\', '/');
+                    zip.add(path.stem().string() + "/" + member, data);
+                    ++kept, total += data.size();
+                    if (!names)
+                        taken += data.size();
+                    else
+                        ++nitro, nitro_names += (nitro_names.empty() ? "" : ", ") + name;
+                }
+                const auto text = listing.str();
+                zip.add(path.stem().string() + ".txt", Bytes(text.begin(), text.end()));
+                std::ostringstream line;
+                line << "Roo files: " << path.filename().string() << ": " << a.count << " files; " << kept << " copied; " << nitro << " naming the Nitro crate"
+                     << (nitro_names.empty() ? std::string() : " (" + nitro_names + ")") << "; by folder:";
+                for (const auto &[top, counts] : folders)
+                    line << " " << top << " " << counts.first << " (" << counts.second / 1024 << " KB)";
+                lines.push_back(line.str());
+            }
+            catch (const std::exception &e)
+            {
+                lines.push_back("Roo files: " + path.filename().string() + " couldn't be read (" + e.what() + ")");
+            }
+        }
+        if (!zip.finish())
+            return {"Roo files: couldn't finish " + zip_path.string()};
+        lines.push_back("Roo files: done: " + zip_path.string() + " (" + std::to_string(zip.files) + " files, " + std::to_string((zip.at + 1023) / 1024) +
+                        " KB). Send it in the chat with your log.");
+        return lines;
     }
     std::vector<std::string> archive_census()
     {

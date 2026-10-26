@@ -185,6 +185,10 @@ class ClientRuntime
     int boss_window_test = -1;
     // (V1.3.66 test, /boss_lead) how far Papu Papu's slam aim leads Crash, in percent; -1: 55 (V1.3.67)
     int boss_lead_test = -1;
+    // (V1.4.3 research, /roo_files) what the background export of the Nitro's files has to say, for the console
+    std::mutex research_mutex;
+    std::vector<std::string> research_lines;
+    std::atomic_bool research_running{false};
     bool boss_bar_grow = true; // /boss_bar (test; V1.3.22: grow by default, asked for)
     unsigned routing_start_count = 0, routing_secret_return_count = 0;
     std::string routing_error;
