@@ -297,6 +297,8 @@ namespace
     }
     // last controller poll with no movement input, and the latest pad values for the Slow log
     std::atomic<std::uint64_t> neutral_at{0};
+    // (V1.3.74) last poll whose stick Papu Papu's wall changed (see ingame::wall_stick)
+    std::atomic<std::uint64_t> wall_cut_at{0};
     std::atomic<int> pad_in_x{0}, pad_in_y{0}, pad_in_buttons{0}, pad_out_x{0}, pad_out_y{0};
     void apply_pad_traps(DWORD index, XINPUT_STATE *state)
     {
@@ -329,6 +331,10 @@ namespace
             walk_stick(pad.sThumbLX, pad.sThumbLY, buttons, walk_tilt);
             pad.wButtons = buttons;
         }
+        // (V1.3.74: and Papu Papu's wall, last, on the stick the game gets; after the code review, like the traps, not in
+        // the pause menu; a poll it changed tells the Slow trap's tuner Crash wasn't standing still for lack of tilt)
+        if (active && !menu_open && ingame::wall_stick(index, pad.sThumbLX, pad.sThumbLY))
+            wall_cut_at = now;
         pad_out_x = pad.sThumbLX, pad_out_y = pad.sThumbLY;
     }
     template <DWORD(WINAPI *Self)(DWORD, XINPUT_STATE *)>
@@ -1561,6 +1567,29 @@ namespace
                                 if (!(i & bit))
                                     r.line(points[i][0], points[i][1], points[i | bit][0], points[i | bit][1], box.color ? box.color : 0xff20d8ff);
                 }
+                // V1.3.79: Papu Papu's invisible wall, drawn while it's up (Harder bosses): a see-through fence, red where
+                // Crash's physics is set back past it, yellow where only the stick is steered (V1.3.80: none; all red)
+                for (const auto &wall : ingame::wall_outline())
+                {
+                    const unsigned fill = wall.hard ? 0x302828ffu : 0x3020d0ffu, edge = wall.hard ? 0xd02828ffu : 0xd020d0ffu;
+                    for (std::size_t i = 0; i + 1 < wall.points.size(); ++i)
+                    {
+                        const auto &a = wall.points[i], &b = wall.points[i + 1];
+                        const std::array<float, 3> at{a[0], a[1], a[2] + wall.height}, bt{b[0], b[1], b[2] + wall.height};
+                        float ax = 0, ay = 0, bx = 0, by = 0, atx = 0, aty = 0, btx = 0, bty = 0;
+                        if (!project(scene.view_projection, a, ax, ay, r.width, r.height) || !project(scene.view_projection, b, bx, by, r.width, r.height) ||
+                            !project(scene.view_projection, at, atx, aty, r.width, r.height) || !project(scene.view_projection, bt, btx, bty, r.width, r.height))
+                            continue;
+                        if (r.draw.size() + 6 <= Renderer::max_vertices)
+                            for (const auto &[x, y] : {std::pair{ax, ay}, std::pair{bx, by}, std::pair{btx, bty}, std::pair{ax, ay}, std::pair{btx, bty}, std::pair{atx, aty}})
+                                r.draw.push_back(r.vertex(x, y, 0.00024f, 0.00024f, fill));
+                        r.line(ax, ay, bx, by, edge), r.line(atx, aty, btx, bty, edge);
+                        if (i % 4 == 0)
+                            r.line(ax, ay, atx, aty, edge);
+                        if (i + 2 == wall.points.size())
+                            r.line(bx, by, btx, bty, edge);
+                    }
+                }
                 const auto key = ingame::level_key(scene.zone);
                 if (const auto current = level(key))
                 {
@@ -2241,7 +2270,10 @@ namespace
             const bool pushing = neutral_at.load() < walk_window.at;
             const bool all_slow = walk_window.all_slow && slow_now, any_slow = walk_window.any_slow || slow_now;
             const float before = walk_tuner.tilt;
-            const int change = all_slow == any_slow ? walk_tuner.window(ground, climb, pushing, all_slow, walk_window.turned) : 0;
+            // (V1.3.74, after the code review: a window in which Papu Papu's wall took the push out of the stick is like a
+            // turn: it can't raise the tilt)
+            const bool walled = wall_cut_at.load() >= walk_window.at;
+            const int change = all_slow == any_slow ? walk_tuner.window(ground, climb, pushing, all_slow, walk_window.turned || walled) : 0;
             if (walk_tuner.run_speed > logged_run_speed * 1.2f)
             {
                 logged_run_speed = walk_tuner.run_speed;

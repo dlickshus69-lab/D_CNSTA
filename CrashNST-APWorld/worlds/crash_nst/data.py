@@ -737,6 +737,45 @@ def move_requirements(level, event, spin_shuffled, jump_only_levels, relaxed=Fal
     return BASIC_MOVES
 
 
+# Crashsanity (V1.3.44; Eric: "i only want to rely on F10 as a last resort"): the basic moves each game's controls have.
+# A level given Crash 1 controls has no Body Slam, Crouch Jump or Slide, found or not (the client blocks them there), and
+# only Crash 3's controls double jump. So a level only gets controls that can do its clear, crystal, gem and secret exit,
+# and the boxes its controls can't reach aren't box checks.
+STYLE_MOVES = {
+    1: frozenset({"Spin"}),
+    2: frozenset({"Spin", "Body Slam", "Crouch Jump", "Slide"}),
+    3: frozenset({"Spin", "Body Slam", "Crouch Jump", "Slide", "Crash 3 - Double Jump"}),
+}
+CRATES_BY_LEVEL = {}
+for _crate in CRATES:
+    CRATES_BY_LEVEL.setdefault(_crate["level"], []).append(_crate)
+
+
+def physical_moves(level, event):
+    """the moves a check takes in the game, whether or not they are items: the way through, and a box's bonus round,
+    obstacle and own moves (as relaxed Ability Logic asks for them). A gem takes every box in the level (white gems and
+    the route and death route gems alike), a relic only the way through."""
+    if level.key in GIMMICK_LEVELS:
+        return frozenset()
+    if event in ("gem", "extra_gem"):
+        needed = set(physical_moves(level, "clear"))
+        for crate in CRATES_BY_LEVEL.get(level.key, ()):
+            if breakable_crate(crate):
+                needed |= physical_moves(level, crate_event(crate))
+        return frozenset(needed)
+    if event == "relic":
+        event = "clear"
+    return frozenset(move_requirements(level, event, False, set(), True))
+
+
+def styles_for(level, events):
+    """the Crashsanity controls (1, 2, 3) that can do all these checks of the level"""
+    needed = set()
+    for event in events:
+        needed |= physical_moves(level, event)
+    return [style for style, moves in sorted(STYLE_MOVES.items()) if needed <= moves]
+
+
 def box_requirements(level, event="box:"):
     return requirements(level, event)
 

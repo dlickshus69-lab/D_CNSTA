@@ -43,5 +43,18 @@ namespace ingame
     bool nitro_trap_exempt();
     // Crash's position (x, y horizontal, z up) when he is loaded
     bool crash_position(std::array<float, 3> &at);
+    // a pad's left stick (x right, y up, -32767 to 32767) as the game is about to get it: the push into Papu Papu's wall in
+    // front of his throne taken out as Crash comes up to it (V1.3.74; nothing changes elsewhere); whether it changed
+    bool wall_stick(unsigned pad, short &x, short &y);
+    // V1.3.79: Papu Papu's wall as it's drawn in the game, while it's up: lines along the arena's floor in the game's
+    // units, each either where his physics is set back past it (hard) or where only the stick is steered, and how high
+    // it's drawn (V1.3.80: one hard line, with its curved ends)
+    struct WallLine
+    {
+        std::vector<std::array<float, 3>> points;
+        bool hard = false;
+        float height = 0;
+    };
+    std::vector<WallLine> wall_outline();
     std::uintptr_t crate_identity_owner(std::uintptr_t owner, const char **name);
 }

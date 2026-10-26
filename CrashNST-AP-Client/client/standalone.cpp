@@ -105,6 +105,131 @@ namespace
         }
     };
     DebugLog *log_file = nullptr;
+    // V1.3.75 (Eric's V1.3.74 run: "game crashed", and the log just stopped): a crash goes into the log. A handler last
+    // in Windows' list (the game's own and ours go first) writes each of the first 12 serious exceptions (an access
+    // violation, an illegal instruction, a stack overflow, heap corruption ...): which thread, where it happened (the
+    // module and how far into it, the address an access violation touched), the registers and the debug registers (the
+    // client's watches), and 16 frames of the stack, straight into the log file with Windows' own file calls (the C++
+    // stream might be what broke), from a buffer of its own (the stack might be what broke). It changes nothing else: a
+    // game that handles one itself goes on as before
+    wchar_t crash_log_path[1024]{};
+    std::atomic_uint crash_count{0};
+    std::atomic_flag crash_busy = ATOMIC_FLAG_INIT;
+    char crash_text[8192];
+    int crash_used = 0;
+    void crash_add(const char *format, ...)
+    {
+        if (crash_used >= static_cast<int>(sizeof crash_text) - 1)
+            return;
+        va_list args;
+        va_start(args, format);
+        const int wrote = std::vsnprintf(crash_text + crash_used, sizeof crash_text - static_cast<std::size_t>(crash_used), format, args);
+        va_end(args);
+        if (wrote > 0)
+            crash_used = std::min(crash_used + wrote, static_cast<int>(sizeof crash_text) - 1);
+    }
+    // (an address as its module and how far into it, the way the CI build's symbols can be looked up)
+    void crash_where(DWORD64 at)
+    {
+        HMODULE module = nullptr;
+        if (at && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(at), &module) &&
+            module)
+        {
+            wchar_t path[MAX_PATH]{};
+            const DWORD length = GetModuleFileNameW(module, path, MAX_PATH);
+            const wchar_t *name = path;
+            for (DWORD i = 0; i < length; ++i)
+                if (path[i] == L'\\' || path[i] == L'/')
+                    name = path + i + 1;
+            char narrow[MAX_PATH]{};
+            WideCharToMultiByte(CP_UTF8, 0, name, -1, narrow, sizeof narrow, nullptr, nullptr);
+            crash_add("%s+0x%llx", narrow, static_cast<unsigned long long>(at - reinterpret_cast<DWORD64>(module)));
+        }
+        else
+            crash_add("0x%llx", static_cast<unsigned long long>(at));
+    }
+    // (what's written so far, into the log file: before the stack is walked too, in case that's what fails)
+    void crash_flush()
+    {
+        const HANDLE file = CreateFileW(crash_log_path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            DWORD wrote = 0;
+            WriteFile(file, crash_text, static_cast<DWORD>(crash_used), &wrote, nullptr);
+            FlushFileBuffers(file);
+            CloseHandle(file);
+        }
+        crash_used = 0;
+    }
+    LONG CALLBACK crash_handler(EXCEPTION_POINTERS *e)
+    {
+        const auto *record = e->ExceptionRecord;
+        switch (record->ExceptionCode)
+        {
+        case EXCEPTION_ACCESS_VIOLATION:
+        case EXCEPTION_ILLEGAL_INSTRUCTION:
+        case EXCEPTION_PRIV_INSTRUCTION:
+        case EXCEPTION_STACK_OVERFLOW:
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:
+        case EXCEPTION_IN_PAGE_ERROR:
+        case EXCEPTION_DATATYPE_MISALIGNMENT:
+        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+        case EXCEPTION_NONCONTINUABLE_EXCEPTION:
+        case EXCEPTION_INVALID_DISPOSITION:
+        case 0xC0000374: // (heap corruption)
+            break;
+        default:
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        if (!crash_log_path[0] || crash_count.load() >= 12 || crash_busy.test_and_set())
+            return EXCEPTION_CONTINUE_SEARCH;
+        const unsigned which = crash_count.fetch_add(1) + 1;
+        crash_used = 0;
+        const CONTEXT &c = *e->ContextRecord;
+        crash_add("Crash report %u: exception 0x%08lx in thread %lu at ", which, static_cast<unsigned long>(record->ExceptionCode), GetCurrentThreadId());
+        crash_where(reinterpret_cast<DWORD64>(record->ExceptionAddress));
+        if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record->NumberParameters >= 2)
+        {
+            const auto kind = record->ExceptionInformation[0];
+            crash_add(" (%s 0x%llx)", kind == 0 ? "reading" : kind == 1 ? "writing" : kind == 8 ? "running" : "touching",
+                      static_cast<unsigned long long>(record->ExceptionInformation[1]));
+        }
+        crash_add("\n  rax %llx rbx %llx rcx %llx rdx %llx rsi %llx rdi %llx rbp %llx rsp %llx\n  r8 %llx r9 %llx r10 %llx r11 %llx r12 %llx r13 %llx r14 %llx r15 %llx",
+                  c.Rax, c.Rbx, c.Rcx, c.Rdx, c.Rsi, c.Rdi, c.Rbp, c.Rsp, c.R8, c.R9, c.R10, c.R11, c.R12, c.R13, c.R14, c.R15);
+        crash_add("\n  debug registers: dr0 %llx dr1 %llx dr2 %llx dr3 %llx dr6 %llx dr7 %llx\n", c.Dr0, c.Dr1, c.Dr2, c.Dr3, c.Dr6, c.Dr7);
+        crash_flush();
+        crash_add("  stack:");
+        // (the stack, frame by frame, as Windows unwinds it; a frame with no unwind data goes on from its return address)
+        if (record->ExceptionCode != EXCEPTION_STACK_OVERFLOW)
+        {
+            CONTEXT walk = c;
+            for (int frame = 0; frame < 16 && walk.Rip; ++frame)
+            {
+                crash_add(frame % 4 ? " " : "\n    ");
+                crash_where(walk.Rip);
+                DWORD64 image = 0;
+                if (const auto entry = RtlLookupFunctionEntry(walk.Rip, &image, nullptr))
+                {
+                    void *data = nullptr;
+                    DWORD64 establisher = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, walk.Rip, entry, &walk, &data, &establisher, nullptr);
+                }
+                else
+                {
+                    DWORD64 back = 0;
+                    SIZE_T got = 0;
+                    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(walk.Rsp), &back, sizeof back, &got) || got != sizeof back)
+                        break;
+                    walk.Rip = back, walk.Rsp += 8;
+                }
+            }
+        }
+        crash_add("\n");
+        crash_flush();
+        crash_busy.clear();
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     HANDLE debug_console()
     {
         if (!AllocConsole() && GetLastError() != ERROR_ACCESS_DENIED)
@@ -254,6 +379,16 @@ extern "C" __declspec(dllexport) DWORD WINAPI NST_Bootstrap(void *callback)
         log_file = output.release();
         std::cout.rdbuf(log_file);
         std::cerr.rdbuf(log_file);
+        // (V1.3.75: a crash goes into this log, see crash_handler)
+        {
+            const auto path = (state / L"logs" / stamp).wstring();
+            if (path.size() < std::size(crash_log_path))
+            {
+                std::copy(path.begin(), path.end(), crash_log_path);
+                crash_log_path[path.size()] = 0;
+                AddVectoredExceptionHandler(0, crash_handler);
+            }
+        }
         // only the newest 10 logs are kept (they are only ever written, never read back). Plain Windows calls: V1.2.74
         // went over the folder with std::filesystem before the log was open, and the game no longer started
         {

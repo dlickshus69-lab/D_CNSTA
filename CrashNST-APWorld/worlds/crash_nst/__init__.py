@@ -42,6 +42,9 @@ from .data import (
     AKU_LIT_LEVELS,
     TRAPS,
     move_requirements,
+    physical_moves,
+    styles_for,
+    STYLE_MOVES,
     easiest_start,
     HUB_ITEMS,
     lock_requirements,
@@ -490,10 +493,29 @@ class CrashWorld(World):
                 self.shuffled_collectibles.update(
                     (address, VANILLA_REWARDS[address]) for address in selected
                 )
+        # Crashsanity (V1.3.44): each level's controls must do its clear, crystal, gem and secret exit (a level whose
+        # drawn controls can't is given ones that can), and the boxes its controls can't reach aren't box checks, so
+        # F10 stays a last resort
+        for key, style in list(self.movement_styles.items()):
+            level = BY_KEY[key]
+            if key in GIMMICK_LEVELS:
+                continue
+            events = [event for event, _, address in checks(level) if address in self.active_checks and event != "relic"]
+            allowed = styles_for(level, events) or [3]
+            if style not in allowed:
+                pick = int.from_bytes(
+                    hashlib.sha256(f"{self.multiworld.seed}/{self.player}/crashsanity_fit/{key}".encode()).digest()[:4], "big"
+                )
+                self.movement_styles[key] = allowed[pick % len(allowed)]
+
+        def reachable(crate):
+            style = self.movement_styles.get(crate["level"])
+            return not style or physical_moves(BY_KEY[crate["level"]], crate_event(crate)) <= STYLE_MOVES[style]
+
         pool = {
             str(crate["id"]): crate
             for crate in CRATES
-            if crate["level"] in chosen and breakable_crate(crate)
+            if crate["level"] in chosen and breakable_crate(crate) and reachable(crate)
         }
         percentage = self.options.boxsanity.value
         sample = select_crates(
@@ -1100,5 +1122,11 @@ class CrashWorld(World):
         result["boss_rules"] = harder
         result["boss_health"] = self.options.boss_health.value if harder else 100
         result["boss_speed"] = self.options.boss_speed.value if harder else 100
+        # (V1.3.61) his slam's time after he stands (hundredths of a second) and the hit window (tenths), at any boss
+        # speed; 0: by the boss speed
+        result["boss_slam_time"] = self.options.boss_slam_time.value if harder else 0
+        result["boss_hit_window"] = self.options.boss_hit_window.value if harder else 0
+        # (V1.4) how far ahead of Crash his slam aims, in percent (0: where Crash is, 100: where he's heading)
+        result["boss_slam_aim"] = self.options.boss_slam_aim.value if harder else 55
         result["boss_aku_aku"] = bool(self.options.harder_bosses_aku_aku.value)
         return result

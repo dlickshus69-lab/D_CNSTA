@@ -27,11 +27,75 @@
 #include <cctype>
 #include <map>
 #include <functional>
+#include <limits>
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
 #include <tlhelp32.h>
 #include <cstdio>
+
+// V1.3.76, after the code review (see cplace_swap): a compare-and-swap of 8 or 4 bytes of the game's memory whose fault,
+// should that memory be let go between the check and the swap, is caught (see swap_guard): it returns 1 swapped, 0 not (the
+// memory held something else), 2 faulted
+extern "C" int crashnst_swap64(volatile void *at, long long was, long long now);
+extern "C" int crashnst_swap32(volatile void *at, int was, int now);
+#if defined(__GNUC__) || defined(__clang__)
+extern "C" char crashnst_swap64_at[], crashnst_swap32_at[], crashnst_swap_faulted[];
+__asm__(".text\n"
+        ".p2align 4\n"
+        ".globl crashnst_swap64\n"
+        "crashnst_swap64:\n"
+        "    movq %rdx, %rax\n"
+        ".globl crashnst_swap64_at\n"
+        "crashnst_swap64_at:\n"
+        "    lock cmpxchgq %r8, (%rcx)\n"
+        "    sete %al\n"
+        "    movzbl %al, %eax\n"
+        "    ret\n"
+        ".p2align 4\n"
+        ".globl crashnst_swap32\n"
+        "crashnst_swap32:\n"
+        "    movl %edx, %eax\n"
+        ".globl crashnst_swap32_at\n"
+        "crashnst_swap32_at:\n"
+        "    lock cmpxchgl %r8d, (%rcx)\n"
+        "    sete %al\n"
+        "    movzbl %al, %eax\n"
+        "    ret\n"
+        ".globl crashnst_swap_faulted\n"
+        "crashnst_swap_faulted:\n"
+        "    movl $2, %eax\n"
+        "    ret\n");
+// (put before the game's own handlers: a fault on one of the two swaps goes on as "faulted"; anything else is left to the
+// others)
+static LONG CALLBACK swap_guard(EXCEPTION_POINTERS *e)
+{
+    const auto code = e->ExceptionRecord->ExceptionCode;
+    const auto rip = e->ContextRecord->Rip;
+    if ((code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_IN_PAGE_ERROR) &&
+        (rip == reinterpret_cast<DWORD64>(crashnst_swap64_at) || rip == reinterpret_cast<DWORD64>(crashnst_swap32_at)))
+    {
+        e->ContextRecord->Rip = reinterpret_cast<DWORD64>(crashnst_swap_faulted);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static bool swap_guarded()
+{
+    static const PVOID handler = AddVectoredExceptionHandler(1, swap_guard);
+    return handler != nullptr;
+}
+#else
+extern "C" int crashnst_swap64(volatile void *at, long long was, long long now)
+{
+    return InterlockedCompareExchange64(static_cast<volatile LONG64 *>(at), now, was) == was ? 1 : 0;
+}
+extern "C" int crashnst_swap32(volatile void *at, int was, int now)
+{
+    return InterlockedCompareExchange(static_cast<volatile LONG *>(at), now, was) == was ? 1 : 0;
+}
+static bool swap_guarded() { return true; }
+#endif
 
 namespace ingame
 {
@@ -674,6 +738,9 @@ namespace ingame
         }
         // the Aku Aku lock's message filter (event_sent) is on while the lock is
         std::atomic_bool aku_messages_blocked{false};
+        // V1.3.82 (see boss_rule_hit): a harder boss fight, where Crash has no mask (the game's count is 0), whatever Aku's
+        // manager still shows
+        std::atomic_bool boss_masks_off{false};
         // set while the client itself hands Aku a mask (/aku_give, the Aku Aku filler): that message goes through
         std::atomic_bool own_aku_message{false};
         // after /aku_give: when to look at Aku Aku's manager again, to log whether a mask came out
@@ -5502,6 +5569,9 @@ namespace ingame
             // a mask taken for it: checked a second later (the count, and whether his mask is still on screen)
             std::uint64_t hit_check_at = 0;
             int hit_masks = 0;
+            // (V1.3.82: Aku's manager as it was at the hit, see boss_rule_hit)
+            int hit_aku_state = 0;
+            bool hit_aku_out = false;
             // V1.3.13: a landing while red makes him flinch (the game's hit reaction); he stays red through it, so it's
             // clear it didn't count
             bool forbidden = false;
@@ -5547,6 +5617,134 @@ namespace ingame
             // timer run again for the fight's start (since when, for how long, checked to run)
             bool start_red = false, red_spun = false, slam_wait = false, start_timer = false, start_timer_checked = false, start_timer_ticks = false;
             std::uint64_t slam_wait_since = 0, start_timer_at = 0;
+            // V1.3.58 (see papu_window): once his red ends, how long he can be hit (ms, /boss_window), until when, whether
+            // that's on, and a red begun in his spin waits for the next one's end (red_skip_spin)
+            unsigned window_ms = 2200, window_lines = 0, window_percent = 200;
+            std::uint64_t window_until = 0;
+            bool window_on = false, red_skip_spin = false, window_fixed = false;
+            // V1.3.59 (Eric's V1.3.58 run: after some hits the game's immunity timer didn't run, so his red ended as his next
+            // spin started and he could be hit at the slam after it): red after a hit is ours too, until the slam after his
+            // next spin (hit_red); once the game's immunity of that hit is over before then (or its timer doesn't count
+            // down as he gets up), red is held by us as at the fight's start (hit_hold: his health script's list emptied,
+            // his can-be-hit flag held clear). And whether the game's immunity timer counts down now (it's only run again,
+            // or cut, while it does: the run's timer wasn't run again after a write into one that had ended, nor after a
+            // cut that set it below 0), and its numbers as they were before a run again (put back if it doesn't count down)
+            bool hit_red = false, hit_hold = false;
+            std::uint64_t hit_red_at = 0, timer_tick_at = 0;
+            Address timer_seen = 0;
+            float timer_seen50 = 0, timer_kept48 = 0, timer_kept50 = 0;
+            bool timer_ticking = false, timer_kept = false;
+            unsigned hit_hold_lines = 0;
+            // V1.3.60 (see papu_reverse): his spin turned the other way once: the spin it's for (its start), when, whether it
+            // was and when; the game's own turn since his last lap (or the switch), to see his laps still count; and off for
+            // this visit if they don't
+            std::uint64_t rev_spin = 0, rev_at = 0, rev_done_at = 0;
+            bool rev_done = false, rev_off = false, rev_g_known = false;
+            float rev_g_last = 0, rev_g_turned = 0, rev_meant = 0;
+            int rev_laps = 0, rev_laps_at_switch = 0;
+            unsigned rev_lines = 0;
+            // V1.3.61: how often a spin was turned back the first way (with Crash alive), and whether Crash was dead last frame
+            unsigned rev_backs = 0;
+            bool rev_dead = false;
+            // V1.3.62: whether this spin started the other way
+            bool rev_started_other = false;
+            // V1.3.62 (see papu_multi_slam): his slams in this stand (how many, how many came; the stand's start they're for,
+            // and his slams seen then), his stand played again from its start for the next one (when), and his AI's wait after
+            // a slam held until then
+            int ms_total = 0, ms_done = 0;
+            std::uint64_t ms_stand = 0, ms_rewound_at = 0, ms_wait_tick_at = 0;
+            unsigned ms_slams_seen = 0, ms_lines = 0;
+            bool ms_holding = false;
+            // V1.3.63 (Eric: "once you hit him ... He'll do his series slams, and then he'll spin, and then he'll do one slam
+            // again"): his slams in a row only in his stand after a hit that counted (set at the hit, used as he stands)
+            bool ms_due = false;
+            // V1.3.64 (see papu_crash_motion): where Crash was on the floor these last frames (time, x, y), his movement from them,
+            // and how far this stand's aim led him (for the log)
+            std::array<std::array<double, 3>, 24> crash_hist{};
+            unsigned crash_hist_n = 0;
+            std::array<float, 2> crash_v{};
+            float aim_lead_last = 0, aim_speed_last = 0;
+            // V1.3.64 (see papu_chair): where he sits on his throne (his chair) and where he stands in the arena; Crash's farthest
+            // from that spot in 24 directions (0: toward the chair) and his height there, his nearest to the chair; the pushes
+            // off the chair (when, how many, which way of setting his place, how they went)
+            std::array<float, 3> chair_at{}, arena_at{};
+            bool chair_known = false, arena_known = false, chair_told = false;
+            std::array<float, 24> reach{}, reach_z{};
+            float chair_near = 1e9f, chair_near_z = 0;
+            std::uint64_t push_at = 0, reach_told_at = 0;
+            unsigned pushes = 0, push_held = 0, push_back = 0, push_lines = 0, reach_lines = 0;
+            int push_way = 1, push_check = 0;
+            std::array<float, 3> push_to{};
+            // V1.3.68 (see papu_wall): the wall in front of the chair: the arena's middle, the chair's way from it and how far
+            // the chair is (kept for the whole fight once known); where the game's physics keeps Crash (see crash_scan_run):
+            // the read's step (0 not yet, 1 reading, 2 read, 3 checked that they follow him), the reads for this Crash, where he
+            // was then, when the next may start; each place (floats or doubles, its height over his feet, and after it was
+            // set: whether the game went on from ours or put its own back); the wall's pushes, those in a row now and the
+            // deepest in it then. V1.3.71 (see papu_wall_watch): the watch's step (0 not tried yet, 1 trying a place, 2 one
+            // kept: what's drawn stays at the wall with it, 3 none did), the place tried, its frames with Crash pressing into the
+            // wall and those he was drawn in it (and before any watch, for the log), its frames in the wall with no store of
+            // the game's set out of it, re-armed or not, the watch's stops seen last frame, and the kind of place kept (tried
+            // first after a new read)
+            bool wall_known = false;
+            std::array<float, 2> wall_mid{}, wall_dir{};
+            float wall_span = 0;
+            struct CrashPlace
+            {
+                Address at = 0;
+                int kind = 0; // 0 floats, 1 doubles
+                float dz = 0;
+                std::array<double, 2> old{}, wrote{};
+                bool pending = false, tried = false;
+                unsigned ours = 0, theirs = 0;
+                // V1.3.76 (see cplace_read): the checks in a row it didn't follow him, and whether it's dropped (left alone from
+                // then on: that memory may be something else's now)
+                unsigned misses = 0;
+                bool stale = false;
+            };
+            std::vector<CrashPlace> cplaces;
+            int cplace_step = 0;
+            unsigned cplace_scans = 0;
+            std::array<float, 3> cplace_from{};
+            std::uint64_t cplace_scan_at = 0, cplace_lost_at = 0, cplace_check_at = 0;
+            Address wall_actor = 0;
+            unsigned wall_pushes = 0, wall_run = 0, wall_lines = 0;
+            float wall_run_max = 0;
+            bool wall_held_told = false;
+            int wall_watch = 0;
+            std::size_t wall_try = 0;
+            unsigned wall_pressed = 0, wall_rough = 0, wall_quiet = 0, wall_stops_seen = 0, base_pressed = 0, base_rough = 0;
+            bool wall_rearmed = false;
+            std::string wall_good;
+            // V1.3.72 (see crash_scan_read): the parts of the game's memory the places were in before (read first after a
+            // respawn), and whether the read under way is only those
+            std::vector<std::pair<Address, Address>> wall_regions;
+            bool cplace_regional = false;
+            // V1.3.73: a read of all of the game's memory found him this visit (later ones while he fights rest as they go,
+            // see crash_scan_read)
+            bool cplace_full_done = false;
+            // V1.3.74 (see papu_wall_stick): the stick checked against how Crash moves (does it move him the camera's way?),
+            // and whether it's trusted for the wall in the stick; the watch kept again in every thread (when, how often);
+            // a death seen, and when he came back (the watched place checked a second on)
+            unsigned stick_samples = 0, stick_agree = 0, wall_rearms = 0;
+            float stick_trust = 0;
+            // (V1.3.80, see papu_wall_stick: the stick's way, the camera's way, as held since when, and the last check)
+            float stick_wx = 0, stick_wy = 0;
+            std::uint64_t stick_held_at = 0, stick_check_at = 0;
+            bool stick_lost_told = false;
+            bool stick_trusted = false, stick_told = false, stick_doubt_told = false, stick_carried = false, wall_was_dead = false, wall_refresh = false;
+            std::uint64_t wall_rearm_at = 0, wall_respawn_at = 0;
+            // (V1.4) the arming asked for as the wall's watch and the steering's last went on, see arm_reached
+            std::uint64_t wall_ticket = 0, steer_ticket = 0;
+            // V1.3.76 (see cplace_read): the places dropped, and the settings left out as the place changed while it was set
+            unsigned wall_dropped = 0, wall_raced = 0;
+            // V1.3.79 (research, see papu_wall_research): Crash pushed by the stick but hardly moving by the wall (since
+            // when, when last told, how many told); the farthest toward the throne he got by side (20 a side's step, from
+            // -260 to 260), on the floor and above it (and how high then)
+            std::uint64_t stuck_since = 0, stuck_told_at = 0;
+            unsigned stuck_lines = 0;
+            std::array<float, 26> side_floor{}, side_above{}, side_above_z{};
+            Address ms_wait_seen = 0;
+            float ms_wait_last = 0;
             unsigned slams_seen = 0;
             float start_timer_set = 0;
             // V1.3.29 (see bar_count): the bar's own count of notches left (two copies), found at the fight's start and
@@ -5784,6 +5982,64 @@ namespace ingame
             int watch_step = 0;
             std::uint64_t watch_at = 0;
             bool watch_due = false;
+            // V1.3.42 (see papu_body_record and papu_body_set): where the game keeps his turn for real, in his physics (a place
+            // and a turn: x, y, z, then a quaternion x, y, z, w): its address this stand, the way its turn goes against his facing
+            // (1 or -1, 0: it doesn't hold his facing, left alone), what it held as he stood, what was set last frame, and how
+            // often it was set, held, or put back by the game; the stands it was told about in the log
+            Address body_at = 0;
+            float body_sign = 0;
+            std::array<float, 2> body_from{}, body_wrote{};
+            bool body_written = false;
+            unsigned body_set = 0, body_held = 0, body_reset = 0, body_told = 0;
+            // V1.3.51 (Eric's V1.3.50 run: the game kept turning him for about half a second after he stood, on from his spin,
+            // and his next spin started from where that left him): the game's own facing (from his facing as he stood) the last
+            // frame it had him somewhere else than what was set, this stand
+            float aim_game = 0;
+            bool aim_game_seen = false;
+            // V1.3.52 (see papu_steer): his turn steered as the game copies it into his physics: on for this stand, the way
+            // his physics' turn goes against his facing (kept from the last stand when this one's couldn't be told: he may
+            // still be turning fast as he stands), the copies turned and noted before it, and whether the log was told
+            bool steer_on = false, steer_told = false;
+            float steer_sign = 0;
+            unsigned steer_from = 0, steer_seen = 0;
+            std::uint64_t steer_seen_at = 0; // (V1.3.73: when the copies were noted, see papu_steer_start)
+            // V1.3.53 (see slam_step): his stand and slam played faster: the stand it was set up for, his steps seen by then
+            // (none since the last stand: the breakpoint goes into every thread again), the rate this stand, the log told
+            std::uint64_t slam_stand = 0;
+            unsigned slam_seen_steps = 0;
+            float slam_rate_used = 1;
+            bool slam_told = false;
+            // V1.3.54 (Eric's V1.3.53 run: his slam still came 0.9 s after he stood): what his stand's steps were, for the log
+            // (the stand told about, how many were, the counts as it started)
+            std::uint64_t slam_stand_told = 0;
+            unsigned slam_reports = 0, slam_from_steps = 0, slam_from_faster = 0, slam_from_hits = 0;
+            // V1.3.56 (see papu_stand_clock): his stand's clocks: the stand they were looked for in, the step (0 not yet, 1
+            // checking, 2 moved on faster, 3 his slam came, 8 watched, 9 none found), what was found and checked, when, what
+            // the first was set to last frame, and how often the game kept that or put it back; the watch on one of them
+            std::uint64_t sc_stand = 0, sc_t0 = 0, sc_last = 0;
+            int sc_step = 0;
+            std::vector<std::pair<Address, std::string>> sc_cands, sc_clocks;
+            std::vector<float> sc_from;
+            float sc_wrote = 0, sc_extra = 0, sc_lead = 0;
+            bool sc_written = false;
+            unsigned sc_frames = 0, sc_held = 0, sc_back = 0, sc_told = 0;
+            // V1.3.59 (see papu_stand_clock): the tries in this stand, the next one when, and the failed tries told about
+            unsigned sc_tries = 0, sc_fail_told = 0;
+            std::uint64_t sc_retry_at = 0;
+            // V1.3.61 (see papu_stand_clock): the numbers found in this stand that went past his slam's time with no slam (not
+            // what his slam goes by), and how often that was
+            std::vector<Address> sc_bad;
+            unsigned sc_late_tries = 0;
+            // V1.3.66: the first one's number as it began to be moved on, and when (to see that the game keeps what's added)
+            float sc_drive_from = 0;
+            std::uint64_t sc_drive_at = 0;
+            // V1.3.57 (Eric: "find the right scale for each speed"; 200% at 0.45 s to try, 0.5 if that's too fast): the boss
+            // speed and the slam time at 200% (ms, /boss_slam), his stand clock's time at his slam as the game plays it (the
+            // least seen, 0 until one is), and when this stand's slam was meant to come
+            unsigned sc_percent = 100, sc_slam_ms = 450;
+            // V1.3.61: his slam's time after he stands at any boss speed (ms, the YAML's boss_slam_time; 0: by the speed)
+            unsigned sc_slam_fixed = 0;
+            float sc_slam_clock = 0, sc_target = 0;
             // V1.3.36 (see papu_slam_rate): his slam's time from when he stands, as the game plays it (the shortest seen while
             // nothing of ours is set), and the stand a try was set in
             std::uint64_t slam_normal = 0, try_stand = 0;
@@ -7044,11 +7300,20 @@ namespace ingame
                 texts += (texts.empty() ? "" : ", ") + text;
             return static_cast<unsigned>(red_constants.size());
         }
-        void boss_rule_hit(BossTuning &t, std::ostream &out)
+        // V1.3.82 (Eric's V1.3.81 run: "he was a little bugged out when I jumped on him, and I wasn't dying"; the log: Crash
+        // came into the fight with a mask out, the Aku Aku lock set the game's count to 0 and its no-masks switch on, but
+        // Aku's manager still showed it (state 1), so each landing on him while red sent Aku Aku the game's hit, which did
+        // nothing with no mask to take: Crash flinched and lived, three times; Papu Papu's spin killed him all the same):
+        // in a harder boss fight (boss_masks_off) he has no mask, as the game counts it, whatever Aku's manager shows, and
+        // `no_mask` (a mask's hit that didn't take, see the check a second on) goes straight to his death
+        int boss_rule_masks()
         {
-            const auto crash = player();
-            const auto [state, mask_out] = aku_manager_state(crash);
-            const int masks = mask_out ? std::clamp(state, 1, 3) : 0;
+            const auto [state, mask_out] = aku_manager_state(player());
+            return boss_masks_off.load() ? 0 : mask_out ? std::clamp(state, 1, 3) : 0;
+        }
+        void boss_rule_hit(BossTuning &t, std::ostream &out, bool no_mask = false)
+        {
+            const int masks = no_mask ? 0 : boss_rule_masks();
             if (masks >= 3)
             {
                 out << "; Crash is invincible (three masks): no hit";
@@ -7216,7 +7481,7 @@ namespace ingame
             // isn't that message at all (Crash's damage script takes his life, "Death_Common_Spin"). So the game's rule,
             // done directly: a mask less, nothing while invincible, a life without a mask
             const auto [state, mask_out] = aku_manager_state(player());
-            t.hit_masks = mask_out ? std::clamp(state, 1, 3) : 0;
+            t.hit_masks = boss_rule_masks(), t.hit_aku_state = state, t.hit_aku_out = mask_out;
             boss_rule_hit(t, line);
             if (t.hit_masks == 1 || t.hit_masks == 2)
                 t.hit_check_at = now + 1000;
@@ -7927,6 +8192,14 @@ namespace ingame
                     write(rc.at, 1.0f);
                 t.rate_written = false;
             };
+            // (V1.3.53: his slam is faster another way, see papu_slam_speed: nothing tried here, and what was set put back)
+            if (t.slam_rate_used > 1)
+            {
+                if (t.rate_written)
+                    put_back();
+                t.rate_trying = false;
+                return;
+            }
             if (s != 1 || percent <= 100)
             {
                 if (t.rate_written)
@@ -8634,6 +8907,301 @@ namespace ingame
                     p.wrote = to, p.written = true, p.set += !same;
             }
         }
+        // V1.3.42 (Eric: "the spin doesn't start exactly where he slammed... it jumps to a different location"): V1.3.41's watch
+        // caught what puts his facing back every frame: the game's code at +0x546662 (a step run for his physics shape each
+        // frame) reads his turn from his physics, a place and a quaternion at (his physics +0x30, then the record that points to,
+        // plus the 16-bit number at its +0x14), makes angles of it (his physics shape's _gimbalAngles) and puts his transform
+        // there. So his physics holds his real facing, and his spin starts from it. Found from his physics shape (an object of
+        // type +0x181a628 it points to), or from his behavior's character (+0x38, then +0x30)
+        Address papu_body_object(Address papu)
+        {
+            Address shape = 0, behavior = 0;
+            for (const auto part : list(value<Address>(papu + 24), 128))
+            {
+                if (typed(part, 0x150ee50))
+                    shape = part;
+                else if (typed(part, 0x150c710))
+                    behavior = part;
+            }
+            Address body = 0;
+            for (unsigned off = 8; shape && !body && off + 8 <= 0x98; off += 8)
+                if (const auto p = value<Address>(shape + off); p >= 0x10000 && !(p & 7) && typed(p, 0x181a628))
+                    body = p;
+            if (!body && behavior)
+                if (const auto character = value<Address>(behavior + 0x38); character >= 0x10000 && typed(character, 0x1509a38))
+                    if (const auto p = value<Address>(character + 0x30); p >= 0x10000 && typed(p, 0x181a628))
+                        body = p;
+            return body;
+        }
+        // (the record his place and turn are in: his physics' body +0x30, then the record that points to, plus its 16-bit +0x14)
+        Address papu_body_record(Address papu)
+        {
+            const auto body = papu_body_object(papu);
+            const auto holder = body ? value<Address>(body + 0x30) : 0;
+            const auto record = holder >= 0x10000 ? value<Address>(holder) : 0;
+            if (record < 0x10000)
+                return 0;
+            const auto at = record + value<std::int16_t>(record + 0x14);
+            return at >= 0x10000 && !(at & 15) ? at : 0;
+        }
+        // V1.3.52 (Eric's V1.3.51 run: what the game copies his turn from each frame is a different piece of memory every
+        // frame, the animation's own for that frame, used for other things in between: nothing there to set; and his spin
+        // started exactly where the game's own turn was, every time): his turn is changed as the game copies it into his
+        // physics (see papu_steer), by a hardware write watch on his physics' turn in every thread (debug register 1, see
+        // who_handler). The watch stops just after the copy's store (+0xf8fa38: movaps [rax+rcx+0x10], xmm1, his turn), the
+        // turn in xmm1 is changed and the store done again (steer_rewound: the second stop is let through). Turns are his
+        // physics' (2 atan2(z, w) of its quaternion): as he stands, set to his aim (steer_target); from his spin on, turned by
+        // as much as the aim turned him from the game's own (steer_delta), so his spin starts where he slammed and goes on
+        // from there. Every copy notes the game's own turn (steer_game)
+        constexpr std::uint64_t steer_copy = 0xf8fa38, steer_after = 0xf8fa3d;
+        std::atomic<std::uint64_t> steer_body{0}, steer_arm_address{0}; // (his physics' data: the copy's rax + rcx)
+        std::atomic_int steer_mode{0}; // 0: only noted, 1: to steer_target, 2: by steer_delta, 3: the other way from steer_pivot
+        std::atomic<float> steer_target{0}, steer_delta{0}, steer_game{0};
+        // V1.3.60 (see papu_reverse): his spin turned the other way from where the game's own turn was at the switch
+        // (steer_pivot): as the game turns him on, he turns back by as much (his turn is the game's + steer_delta + 2 (steer_pivot
+        // - the game's)), so he goes on from where he was, the other way
+        std::atomic<float> steer_pivot{0};
+        std::atomic_uint steer_copies{0}, steer_turned{0};
+        std::atomic_bool steer_rewound{false};
+        constexpr DWORD steer_arm_code = 0xE0C0FFEF; // raised by us: sets this thread's debug registers 1 and 2
+        // V1.3.53 (Eric: "is it possible to speed up his slam"): his slam comes with his animation (at the same time into his
+        // stand at any /boss_speed: none of his AI's waits hold it back). Each character's animation is stepped by the time
+        // handed to its update at +0xf7e790 (movss [rsp+0x20], xmm0: the step, the update's 5th argument, see +0xf7e799),
+        // with rdx then the character's body slot ([rdx]: his physics' body, an object of type +0x181a628, see
+        // papu_body_object). A hardware breakpoint there (debug register 2, in every thread, see slam_apply) makes that store
+        // itself, with Papu Papu's step longer while he stands (slam_rate: /boss_speed), so his stand and slam play faster
+        // V1.3.54 (Eric's V1.3.53 run: his slam still came 0.9 s after he stood, and nothing said whether his steps were seen):
+        // his steps known by where they lead, as the game's copy does (the body slot's body +0x30, then the record, plus its
+        // 16-bit +0x14: his physics' data, slam_body, as steer_body), not by his parts' body (V1.3.53's, maybe another object);
+        // the body found that way is compared first after that (slam_seen); and what the steps were, for the log: all of
+        // them, his, his made longer, his last step and the frame's, and the layers they were for
+        constexpr std::uint64_t slam_step = 0xf7e790;
+        std::atomic<std::uint64_t> slam_body{0}, slam_arm_address{0}, slam_seen{0};
+        std::atomic<float> slam_rate{1.0f}, slam_dt{0}, slam_frame_dt{0};
+        std::atomic_uint slam_steps{0}, slam_faster{0}, slam_hits{0}, slam_layers{0};
+        void code_dump_tree(Address begin, Address end, std::set<Address> &done);
+        // V1.3.55 (Eric's V1.3.54 run: his steps were seen there, about 600 a stand over up to 14 layers, but each was handed no
+        // time at all, 0 s, the job's own too: his animation keeps its time somewhere else): each layer's node and item as his
+        // steps go by (the step's rcx, see +0xf7e782, and its item, kept at [rsp+0x70], see +0xf7e10b), for the search for
+        // what counts up in his animation as he stands (see papu_anim_scan)
+        std::array<std::atomic<std::uint64_t>, 16> slam_nodes{}, slam_items{};
+        unsigned steer_debug_register(std::uint64_t at, std::uint64_t step_at, bool all = false);
+        std::uint64_t arm_ticket();
+        bool arm_reached(std::uint64_t ticket);
+        // (V1.3.52) debug register 1 as a write watch on 8 bytes at `at`; (V1.3.53) debug register 2 as an execute breakpoint at
+        // `step_at`; 0 for off; the others kept (debug register 0 is the research watch's, see who_debug_registers)
+        void steer_dr7(DWORD64 &dr1, DWORD64 &dr2, DWORD64 &dr7, std::uint64_t at, std::uint64_t step_at)
+        {
+            dr7 &= ~0xFF0003CULL, dr1 = at, dr2 = step_at;
+            if (at)
+                dr7 |= (1ULL << 2) | (1ULL << 20) | (2ULL << 22);
+            if (step_at)
+                dr7 |= 1ULL << 4; // (its kind and length stay 0: execute)
+        }
+        // (V1.3.53) the game's code where a breakpoint goes is what it was made for
+        bool code_is(std::uint64_t rva, std::initializer_list<unsigned char> bytes)
+        {
+            std::array<unsigned char, 16> at{};
+            return bytes.size() <= at.size() && read(base() + rva, at) && std::equal(bytes.begin(), bytes.end(), at.begin());
+        }
+        // (V1.3.42) his physics' turn as he stands: found and checked against his facing (a turn about his up axis that is his
+        // facing, one way or the other), or left alone
+        void papu_body_start(BossTuning &t, float yaw)
+        {
+            t.body_at = papu_body_record(t.papu), t.body_sign = 0, t.body_written = false, t.body_set = t.body_held = t.body_reset = 0;
+            std::array<float, 8> rec{};
+            if (!t.body_at || !read(t.body_at, rec) || !std::all_of(rec.begin(), rec.end(), [](float f) { return std::isfinite(f); }))
+                return;
+            const float x = rec[4], y = rec[5], z = rec[6], w = rec[7];
+            const float turn = 2 * std::atan2(z, w);
+            if (std::abs(x) < 0.02f && std::abs(y) < 0.02f && std::abs(x * x + y * y + z * z + w * w - 1) < 0.02f)
+            {
+                if (std::abs(wrap_angle(turn - yaw)) < 0.05f)
+                    t.body_sign = 1;
+                else if (std::abs(wrap_angle(-turn - yaw)) < 0.05f)
+                    t.body_sign = -1;
+            }
+            t.body_from = {z, w};
+            if (t.body_told < 2)
+            {
+                ++t.body_told;
+                std::cout << "Boss rule research: his physics keeps his place and turn at 0x" << std::hex << t.body_at << std::dec << ": place (" << rec[0] << ", " << rec[1] << ", "
+                          << rec[2] << "), turn (" << x << ", " << y << ", " << z << ", " << w << "), " << static_cast<int>(std::lround(turn * 57.29578f)) << " degrees against his facing's "
+                          << static_cast<int>(std::lround(yaw * 57.29578f))
+                          << (t.body_sign ? std::string(t.body_sign > 0 ? " (the same way)" : " (the other way)") + ": turned with the aim" : std::string(": not his facing, left alone"))
+                          << "\n" << std::flush;
+            }
+        }
+        // (V1.3.42) his physics' turn set to his aim: what it held as he stood, turned about his up axis by as much as the aim
+        // turned him (d), the way it goes; the log says how often the game left it, or put it back
+        void papu_body_set(BossTuning &t, float d)
+        {
+            // (V1.3.52: not while it's steered as the game copies it, see papu_steer; V1.4: once the steering's watch is in
+            // the game's threads, see arm_reached)
+            if (!t.body_at || !t.body_sign || (t.steer_on && arm_reached(t.steer_ticket)) || papu_body_record(t.papu) != t.body_at)
+                return;
+            std::array<float, 2> now{};
+            if (!read(t.body_at + 0x18, now) || !std::isfinite(now[0]) || !std::isfinite(now[1]))
+                return;
+            if (t.body_written)
+                ++(std::abs(now[0] - t.body_wrote[0]) <= 1e-4f && std::abs(now[1] - t.body_wrote[1]) <= 1e-4f ? t.body_held : t.body_reset);
+            const float h = t.body_sign * d / 2;
+            const std::array<float, 2> to{t.body_from[0] * std::cos(h) + t.body_from[1] * std::sin(h), t.body_from[1] * std::cos(h) - t.body_from[0] * std::sin(h)};
+            if (to == now || write(t.body_at + 0x18, to))
+                t.body_set += to != now, t.body_wrote = to, t.body_written = true;
+        }
+        // (V1.3.52) his turn steered as the game copies it into his physics (see steer_copy): on at every aimed stand once his
+        // physics holds his facing (the watch goes into threads made since, too); off as the fight is left, the harder rules
+        // are turned off, or his objects are made again (see update_boss_tuning)
+        void papu_steer_off()
+        {
+            if (!steer_body.load() && !steer_arm_address.load())
+                return;
+            steer_mode = 0, steer_body = 0;
+            steer_debug_register(0, slam_arm_address.load());
+            steer_rewound = false;
+        }
+        // (V1.3.53) his stand and slam back to the game's own pace, see slam_step
+        void papu_slam_off()
+        {
+            slam_rate = 1.0f;
+            if (!slam_body.load() && !slam_arm_address.load())
+                return;
+            slam_body = 0, slam_seen = 0;
+            steer_debug_register(steer_arm_address.load(), 0);
+        }
+        void papu_steer_start(BossTuning &t, std::uint64_t now)
+        {
+            t.steer_on = false;
+            const bool same = t.body_at && steer_body.load() == t.body_at;
+            const float sign = t.body_sign ? t.body_sign : same ? t.steer_sign : 0.0f;
+            // (V1.3.53: and only where the game's copy is the store it was made for, see steer_copy)
+            if (!t.body_at || !sign || IsDebuggerPresent() || !code_is(steer_copy, {0x0f, 0x29, 0x4c, 0x08, 0x10}))
+                return;
+            if (!same)
+                steer_mode = 0, steer_rewound = false, steer_body = t.body_at;
+            // (the watch into every thread when it's new, or no copy was seen since the last stand: one made since may be
+            // the one copying; not every stand, the game stops a moment for it. V1.3.73: or fewer than 10 a second since the
+            // last aimed stand (one a frame when it's all there; his slams in a row, see papu_multi_slam, are 0.45 s apart):
+            // Eric's V1.3.72 run had 6, then none, over 3 s each, after the wall's watch was set in every thread, see
+            // debug_registers_now)
+            // (V1.4: it's set off the game's thread, see arm_others: new, into the threads that don't have it; the same one
+            // again, as it looked lost, into every thread again, in case one kept its old ones)
+            const auto copies = steer_copies.load();
+            const bool kept = same && steer_arm_address.load() == t.body_at + 0x18;
+            unsigned threads = 2;
+            if (!kept || static_cast<std::uint64_t>(copies - t.steer_seen) * 100 < now - t.steer_seen_at)
+                threads = steer_debug_register(t.body_at + 0x18, slam_arm_address.load(), kept), t.steer_ticket = arm_ticket();
+            t.steer_on = threads > 1, t.steer_sign = sign;
+            t.steer_from = steer_turned.load(), t.steer_seen = copies, t.steer_seen_at = now;
+            if (!t.steer_told)
+            {
+                t.steer_told = true;
+                std::cout << "Boss rule: his turn is steered as the game copies it into his physics (a watch on it in " << threads << " threads)\n" << std::flush;
+            }
+        }
+        // (V1.3.53, see slam_step) as he stands, his animation stepped faster by /boss_speed (his own pace as he spins, is hit
+        // or comes into the arena); the breakpoint set up at each stand (into every thread again when none of his steps was
+        // seen since the last one), off at /boss_speed 100%
+        // (V1.3.57) his pace at a boss speed: even steps from the game's own (100%) to his slam `slam_ms` after he stands at 200%
+        // (the game's own about 0.9 s: his pace at 200% then is 0.9 over that)
+        float papu_slam_pace(unsigned percent, unsigned slam_ms, float game)
+        {
+            const float at = static_cast<float>(std::clamp(slam_ms, 250u, 900u)) / 1000.0f, top = std::max(1.0f, game / at);
+            return 1.0f + static_cast<float>(std::clamp(percent, 100u, 200u) - 100) / 100.0f * (top - 1.0f);
+        }
+        // (V1.3.61, the YAML's boss_slam_time: fixed_ms) or at that time after he stands, at any boss speed. (V1.3.62: his
+        // stand's clocks are looked for at any speed with the harder rules on, `clocks`: his slams in a row play his stand
+        // again from them, see papu_multi_slam)
+        void papu_slam_speed(BossTuning &t, int s, unsigned percent, unsigned slam_ms, unsigned fixed_ms, bool clocks)
+        {
+            const unsigned speed = std::clamp(percent, 100u, 200u);
+            t.sc_percent = speed, t.sc_slam_ms = slam_ms, t.sc_slam_fixed = fixed_ms ? std::clamp(fixed_ms, 250u, 900u) : 0u;
+            const bool faster = speed > 100 || (t.sc_slam_fixed && t.sc_slam_fixed < 900) || clocks;
+            slam_rate = s == 1 && faster && slam_body.load() ? static_cast<float>(speed) / 100.0f : 1.0f;
+            // (V1.3.54: as his stand ends, what its steps were, his first stands of a visit)
+            if (s != 1 && t.slam_stand && t.slam_stand_told != t.slam_stand && slam_body.load() && t.slam_reports < 4)
+            {
+                t.slam_stand_told = t.slam_stand, ++t.slam_reports;
+                std::ostringstream layers;
+                for (unsigned i = 0, l = slam_layers.load(); i < 32; ++i)
+                    if (l & (1u << i))
+                        layers << (layers.tellp() > 0 ? ", " : "") << i;
+                std::cout << "Boss speed research: his animation as he stood: " << slam_steps.load() - t.slam_from_steps << " of his steps seen ("
+                          << slam_faster.load() - t.slam_from_faster << " made longer; his last " << slam_dt.load() << " s, the frame's " << slam_frame_dt.load() << " s; layers "
+                          << (layers.tellp() > 0 ? layers.str() : std::string("none")) << "), " << slam_hits.load() - t.slam_from_hits << " steps of every character; his body there 0x"
+                          << std::hex << slam_seen.load() << " (his parts': 0x" << papu_body_object(t.papu) << ")" << std::dec << "\n" << std::flush;
+            }
+            if (s != 1 || !t.stand_seen || t.slam_stand == t.stand_seen)
+                return;
+            t.slam_stand = t.stand_seen;
+            // (V1.3.54: his physics' data, see slam_body)
+            const auto data = faster && t.papu && !IsDebuggerPresent() && code_is(slam_step, {0xf3, 0x0f, 0x11, 0x44, 0x24, 0x20}) ? papu_body_record(t.papu) : 0;
+            if (!data)
+            {
+                t.slam_rate_used = 1;
+                papu_slam_off();
+                return;
+            }
+            const auto steps = slam_steps.load();
+            t.slam_from_steps = steps, t.slam_from_faster = slam_faster.load(), t.slam_from_hits = slam_hits.load(), slam_layers = 0;
+            unsigned threads = 2;
+            const bool kept = slam_body.load() == data && slam_arm_address.load() == base() + slam_step;
+            if (!kept || steps == t.slam_seen_steps) // (V1.4: none seen since the last stand: into every thread again, see arm_others)
+                slam_body = data, slam_seen = 0, threads = steer_debug_register(steer_arm_address.load(), base() + slam_step, kept);
+            t.slam_seen_steps = steps;
+            const float game = t.sc_slam_clock > 0 ? t.sc_slam_clock - t.sc_lead : 0.9f;
+            t.slam_rate_used = threads <= 1        ? 1.0f
+                               : t.sc_slam_fixed ? std::max(1.0f, game / (static_cast<float>(t.sc_slam_fixed) / 1000.0f))
+                                                 : papu_slam_pace(speed, slam_ms, game);
+            slam_rate = t.slam_rate_used;
+            if (!t.slam_told)
+            {
+                t.slam_told = true;
+                std::cout << "Boss speed: his stand and slam play at " << speed << "% (his animation stepped faster as he stands; a breakpoint in " << threads << " threads)\n"
+                          << std::flush;
+                // (V1.3.54, once: the code around the step, for the log: what hands each character's animation its step and
+                // what steps it, in case the slam's own time is kept somewhere else)
+                static bool dumped = false;
+                if (!dumped)
+                {
+                    dumped = true;
+                    std::set<Address> done;
+                    for (const auto rva : {0xf7c2a0ULL, 0xf7dfa0ULL, 0xf7bb80ULL})
+                    {
+                        DWORD64 image = 0;
+                        if (const auto entry = RtlLookupFunctionEntry(base() + rva, &image, nullptr); entry && image == base())
+                            code_dump_tree(image + entry->BeginAddress, std::min<Address>(image + entry->EndAddress, image + entry->BeginAddress + 0x1000), done);
+                    }
+                }
+            }
+        }
+        // (V1.3.55, see slam_nodes) his animation's objects: his layers' nodes and items as his steps go by, and the objects they
+        // point to (one level down, those of the game's types); V1.3.55's run found his stand's clocks among them
+        std::vector<std::pair<Address, std::string>> papu_anim_objects()
+        {
+            std::vector<std::pair<Address, std::string>> objects;
+            std::set<Address> seen;
+            ReadableRegions ok;
+            const auto add = [&](Address a, const std::string &what) {
+                if (a >= 0x10000 && a < 0x7fffffff0000ULL && !(a & 7) && objects.size() < 240 && ok(a, 8) && seen.insert(a).second)
+                    objects.push_back({a, what});
+            };
+            for (std::size_t i = 0; i < slam_nodes.size(); ++i)
+                add(slam_nodes[i].load(), "layer " + std::to_string(i) + "'s node"), add(slam_items[i].load(), "layer " + std::to_string(i) + "'s item");
+            const auto first = objects.size();
+            for (std::size_t k = 0; k < first; ++k)
+            {
+                std::array<Address, 0x40> words{};
+                if (!read(objects[k].first, words))
+                    continue;
+                for (std::size_t w = 1; w < words.size(); ++w)
+                    if (const auto q = words[w]; q >= 0x10000 && q < 0x7fffffff0000ULL && !(q & 7) && ok(q, 8))
+                        if (const auto vt = value<Address>(q); vt >= base() && vt < module_end())
+                            add(q, objects[k].second + " +" + hex(static_cast<unsigned>(w * 8)) + " ->");
+            }
+            return objects;
+        }
         // V1.3.37 research, in case the game still turns him back: the places on him holding his facing (as an angle, in radians
         // or degrees) as he stands, and those of the last stand holding the new one too (they follow his facing)
         void papu_yaw_research(BossTuning &t, float yaw)
@@ -8703,8 +9271,1331 @@ namespace ingame
             yaw = std::atan2(fy, fx);
             return true;
         }
+        // V1.3.60 (Eric: "move on to the pattern"; on his list: turning the other way in the middle of a spin): with the harder
+        // rules on and his turn steered (see papu_steer), each spin of his turns the other way once, at a time picked at random
+        // as it starts: 30% to 70% of the way through it as the game would have it (its laps, spinPlayerLapCount, times a lap's
+        // time, 1.3 s over his spin speed), 0.25 s in at the least. He goes on from where he was (see steer_pivot), no jump.
+        // His laps are watched after it: if none is counted while the game's own turn goes on by two whole turns, his laps may
+        // count his turn's way (and his spin wouldn't end), so he turns back the first way and the switch is off for this
+        // visit (the log says so)
+        // V1.3.61 (Eric's V1.3.60 run: "it was working for a bit and then it stopped working"; Crash died in a spin, his laps
+        // stopped counting then (they count against Crash), and the check took that for laps that don't count his way and
+        // turned the switch off for the visit): nothing turns while Crash is dead, the check doesn't count then, and when it
+        // does turn him back it's for that spin only (off for the visit only after three such spins); and the log says when
+        // Crash dies in a spin that turned the other way (does it still hit him?)
+        bool crash_dead_now()
+        {
+            const auto died = bound_player_died();
+            return died && reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60)(died);
+        }
+        void papu_reverse(BossTuning &t, const Shared &state, int s, std::uint64_t now)
+        {
+            const bool dead = crash_dead_now(), died = dead && !t.rev_dead;
+            t.rev_dead = dead;
+            if (s != 2 || !state.boss_rules || !t.steer_on || !t.spin_start_at)
+            {
+                t.rev_spin = 0;
+                return;
+            }
+            if (died && (t.rev_done || t.rev_started_other) && t.rev_lines < 30)
+                ++t.rev_lines, std::cout << "Boss pattern: Crash died in his spin, "
+                                         << (t.rev_done ? seconds(now - t.rev_done_at) + " after it turned around" : std::string("which started the other way")) << "\n" << std::flush;
+            const float g = steer_game.load();
+            const int laps = t.laps_at ? value<int>(t.papu_ai + t.laps_at) : 0;
+            // (V1.3.62: turned around from where he is, either way: the other way from the game's (steering mode 3), or back
+            // to its way (2, by as much further as he went the other way); no jump)
+            const auto flip = [&] {
+                if (steer_mode.load() == 2)
+                    steer_pivot = g, steer_mode = 3;
+                else
+                    steer_delta = wrap_angle(steer_delta.load() + 2 * wrap_angle(steer_pivot.load() - g)), steer_mode = 2;
+            };
+            if (t.rev_spin != t.spin_start_at)
+            {
+                // (a new spin: when it turns around)
+                t.rev_spin = t.spin_start_at, t.rev_done = false, t.rev_at = 0, t.rev_g_known = false, t.rev_g_turned = 0, t.rev_laps = laps, t.rev_started_other = false;
+                const int length = t.laps_total_at ? value<int>(t.papu_ai + t.laps_total_at) : 0;
+                const float spin = t.spin_at ? value<float>(t.papu_ai + t.spin_at) : 1.0f;
+                if (t.rev_off || length < 1 || length > 30 || !std::isfinite(spin))
+                    return;
+                static std::mt19937 rng{std::random_device{}()};
+                const float expected = static_cast<float>(length) * 1.3f / std::clamp(spin, 0.5f, 4.0f);
+                t.rev_meant = std::max(0.25f, std::uniform_real_distribution<float>(0.3f, 0.7f)(rng) * expected);
+                t.rev_at = t.spin_start_at + static_cast<std::uint64_t>(t.rev_meant * 1000);
+                // V1.3.62 (Eric: "when he starts spinning, it should either be counterclockwise in the beginning ... or
+                // clockwise, one or the other"): half his spins start the other way (and still turn around in the middle)
+                if (!dead && steer_mode.load() == 2 && std::bernoulli_distribution(0.5)(rng))
+                {
+                    flip();
+                    t.rev_started_other = true;
+                    if (t.rev_lines < 30)
+                        ++t.rev_lines, std::cout << "Boss pattern: his spin starts the other way\n" << std::flush;
+                }
+            }
+            // (the game's own turn since his last lap or the switch, while Crash is alive)
+            if (t.rev_g_known && !dead)
+                t.rev_g_turned += std::abs(wrap_angle(g - t.rev_g_last));
+            t.rev_g_last = g, t.rev_g_known = true;
+            if (laps != t.rev_laps)
+                t.rev_laps = laps, t.rev_g_turned = 0;
+            const int mode = steer_mode.load();
+            if (!t.rev_done && t.rev_at && now >= t.rev_at && (mode == 2 || mode == 3) && !dead)
+            {
+                flip();
+                t.rev_done = true, t.rev_done_at = now, t.rev_g_turned = 0, t.rev_laps_at_switch = laps;
+                if (t.rev_lines < 30)
+                    ++t.rev_lines, std::cout << "Boss pattern: his spin turns around" << (mode == 3 ? " (back to the game's way)" : "") << ", " << seconds(now - t.spin_start_at)
+                                             << " in (lap " << laps + 1 << " of " << (t.laps_total_at ? value<int>(t.papu_ai + t.laps_total_at) : 0) << ")\n" << std::flush;
+            }
+            else if (mode == 3 && t.rev_g_turned > 4 * 3.14159265f)
+            {
+                // (turned back to the game's way from where he is, and no more turning around in this spin)
+                flip();
+                t.rev_done = true, t.rev_off = ++t.rev_backs >= 3;
+                std::cout << "Boss pattern: no lap of his counted while the game turned him two whole turns with his spin the other way ("
+                          << seconds(now - (t.rev_done_at > t.spin_start_at ? t.rev_done_at : t.spin_start_at))
+                          << ", Crash alive): his laps may count his turn's way; this spin turned back to the game's way"
+                          << (t.rev_off ? " (the third time: no more turning around in this visit)" : "") << "\n" << std::flush;
+            }
+        }
+        // V1.3.64 (for the aim's lead, see papu_aim): Crash's movement along the floor, from where he was 0.1 s or more ago (a
+        // jump of more than 3 m between frames is a respawn or a teleport: started over)
+        void papu_crash_motion(BossTuning &t)
+        {
+            Matrix c{};
+            const auto crash = player();
+            if (!crash || !entity_matrix(crash, c) || !std::isfinite(c[12]) || !std::isfinite(c[13]))
+            {
+                t.crash_hist_n = 0, t.crash_v = {0, 0};
+                return;
+            }
+            const double now_s = precise_seconds();
+            auto &h = t.crash_hist;
+            if (t.crash_hist_n)
+            {
+                const auto &last = h[(t.crash_hist_n - 1) % h.size()];
+                if (now_s - last[0] < 0.004)
+                    return; // (the same frame)
+                if (std::hypot(c[12] - last[1], c[13] - last[2]) > 300 || now_s - last[0] > 0.3)
+                    t.crash_hist_n = 0;
+            }
+            h[t.crash_hist_n % h.size()] = {now_s, c[12], c[13]}, ++t.crash_hist_n;
+            // (from the newest one at least 0.1 s back, or the oldest kept)
+            const unsigned kept = std::min<unsigned>(t.crash_hist_n, static_cast<unsigned>(h.size()));
+            const auto &newest = h[(t.crash_hist_n - 1) % h.size()];
+            const std::array<double, 3> *from = nullptr;
+            for (unsigned k = 1; k < kept; ++k)
+            {
+                const auto &o = h[(t.crash_hist_n - 1 - k) % h.size()];
+                from = &o;
+                if (newest[0] - o[0] >= 0.1)
+                    break;
+            }
+            if (!from || newest[0] - (*from)[0] < 0.03)
+            {
+                t.crash_v = {0, 0};
+                return;
+            }
+            const double span = newest[0] - (*from)[0];
+            t.crash_v = {static_cast<float>((newest[1] - (*from)[1]) / span), static_cast<float>((newest[2] - (*from)[2]) / span)};
+        }
+        // V1.3.68 (see papu_wall): where the game's physics keeps Crash. V1.3.66's read of all the game's memory looked for
+        // his place in hundredths, but the physics works in metres (0.0254 of the game's units, as the Nitro's body does, see
+        // body_meters), so his physics' own place was never among those found, and setting the 54 that followed him didn't
+        // hold. Now all of the game's own memory (not thread stacks: V1.3.66 wrote into one) is read on a thread of its own
+        // for three numbers in a row that are where Crash stands in metres (his x and y within 3 cm, his height within 2.5 m:
+        // the physics may keep the middle of his body), as floats or doubles, with that height over his feet
+        struct CrashScan
+        {
+            std::atomic<int> state{0}; // 0: not running, 1: running, 2: done
+            std::array<float, 3> at{};
+            std::mutex mutex;
+            struct Found
+            {
+                Address at;
+                int kind; // 0 floats, 1 doubles
+                float dz;
+            };
+            std::vector<Found> found;
+            std::size_t bytes = 0;
+            double seconds = 0;
+            // (where Crash is now and how fast he goes, from the game's thread each frame: each part of the memory is read
+            // against where he is as it's read, as he may move while it runs)
+            std::atomic<float> now_x{0}, now_y{0}, now_z{0}, now_speed{0};
+            // (V1.3.72: only these parts of the memory, when given: where the places were before a respawn, see papu_wall)
+            std::vector<std::pair<Address, Address>> ranges;
+            // (V1.3.73: with rests, see crash_scan_read: only a read of all of it while he fights, after the visit's first that
+            // found him)
+            bool gentle = false;
+        } crash_scan;
+        // (three numbers at `p` hold Crash's place `at` (the game's units) in metres: x and y within `tolerance` metres, his
+        // height within `height`; their height over his, to `dz`)
+        bool crash_metres_at(const unsigned char *p, int kind, const std::array<float, 3> &at, double tolerance, double height, float *dz)
+        {
+            double v[3]{};
+            if (kind == 1)
+                std::memcpy(v, p, sizeof v);
+            else
+            {
+                float f[3];
+                std::memcpy(f, p, sizeof f);
+                v[0] = f[0], v[1] = f[1], v[2] = f[2];
+            }
+            const double x = at[0] * double(body_meters), y = at[1] * double(body_meters), z = at[2] * double(body_meters);
+            if (!(std::abs(v[0] - x) <= tolerance && std::abs(v[1] - y) <= tolerance && std::abs(v[2] - z) <= height))
+                return false;
+            if (dz)
+                *dz = static_cast<float>(v[2] - z);
+            return true;
+        }
+        // V1.3.72 (a friend of Eric's on V1.3.70: "Crash was like stuck for a couple of frames ... his walk animation just got
+        // like was stuck for a second"; his log: after each respawn all of the game's memory was read again, 2.7 GB in 2.6 s):
+        // the read runs at the lowest priority, rests a moment every 16 MB, and after a respawn reads first only where the
+        // places were before (`ranges`), all of it only when nothing follows him there. V1.3.73 (Eric's V1.3.72 run: "Seems
+        // like sometimes it does it", his clip: on top of the throne; the log: the visit's first read, as the fight's intro
+        // played, took 5.3 s with those rests (Windows' Sleep(1) is a 16 ms rest), so the wall wasn't up until he was on the
+        // throne): the rests (one every 64 MB) only for a read of all of it while Papu Papu fights, after the visit's first
+        // that found him (`gentle`); the others, the first as the intro plays, go on without them (still at the lowest
+        // priority: with a core free that's full speed, V1.3.71's 4 GB in 1.1 s)
+        void crash_scan_read(std::vector<CrashScan::Found> &found, std::size_t &bytes, const std::vector<std::pair<Address, Address>> &ranges, bool gentle)
+        {
+            std::vector<unsigned char> buffer(1 << 20);
+            const Address own_lo = reinterpret_cast<Address>(buffer.data()), own_hi = own_lo + buffer.size();
+            std::set<Address> stacks; // (allocations with a guard page: thread stacks)
+            MEMORY_BASIC_INFORMATION info{};
+            std::size_t range = 0, chunks = 0;
+            const auto inside = [&](Address a) { return ranges.empty() || (range < ranges.size() && a < ranges[range].second); };
+            for (Address a = ranges.empty() ? 0x10000 : ranges[0].first;
+                 a < 0x7fffffff0000ULL && VirtualQuery(reinterpret_cast<void *>(a), &info, sizeof info) == sizeof info;)
+            {
+                const auto from = reinterpret_cast<Address>(info.BaseAddress), size = static_cast<Address>(info.RegionSize);
+                const auto allocation = reinterpret_cast<Address>(info.AllocationBase);
+                a = from + size;
+                if (!ranges.empty())
+                {
+                    // (the next part given, once past this one)
+                    if (!inside(from))
+                    {
+                        if (++range >= ranges.size())
+                            break;
+                        a = ranges[range].first;
+                        continue;
+                    }
+                }
+                if (info.State == MEM_COMMIT && (info.Protect & PAGE_GUARD))
+                    stacks.insert(allocation);
+                // (nor the graphics driver's uncached or write-combined memory, see heap_page)
+                if (info.State != MEM_COMMIT || info.Type != MEM_PRIVATE || !(info.Protect & PAGE_READWRITE) ||
+                    (info.Protect & (PAGE_GUARD | PAGE_NOCACHE | PAGE_WRITECOMBINE)) || stacks.count(allocation))
+                    continue;
+                for (Address chunk = from; chunk < from + size && found.size() < 20000; chunk += buffer.size() - 32)
+                {
+                    const auto n = static_cast<std::size_t>(std::min<Address>(buffer.size(), from + size - chunk));
+                    SIZE_T got = 0;
+                    if (n < 12 || (chunk < own_hi && chunk + n > own_lo) ||
+                        !ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(chunk), buffer.data(), n, &got) || got < 12)
+                        continue;
+                    bytes += got;
+                    if (gentle && ++chunks % 64 == 0)
+                        Sleep(1);
+                    // (against where he is now: within 3 cm, and as far as he goes in 40 ms more, 15 cm at most: V1.3.69, after
+                    // the code review, so a run doesn't fill the read with numbers that only happen to be near)
+                    const std::array<float, 3> at{crash_scan.now_x.load(), crash_scan.now_y.load(), crash_scan.now_z.load()};
+                    const float mx = at[0] * body_meters, tolerance = std::min(0.15f, 0.03f + crash_scan.now_speed.load() * body_meters * 0.04f);
+                    for (std::size_t i = 0; i + 12 <= got; i += 4)
+                    {
+                        float x = 0, dz = 0;
+                        std::memcpy(&x, &buffer[i], 4);
+                        // (a quick first look at the first number: his x in metres)
+                        if (std::abs(x - mx) <= tolerance && crash_metres_at(&buffer[i], 0, at, tolerance, 2.5, &dz))
+                            found.push_back({chunk + i, 0, dz});
+                        if (!(i & 7) && i + 24 <= got)
+                        {
+                            double dx = 0;
+                            std::memcpy(&dx, &buffer[i], 8);
+                            if (std::abs(dx - mx) <= tolerance && crash_metres_at(&buffer[i], 1, at, tolerance, 2.5, &dz))
+                                found.push_back({chunk + i, 1, dz});
+                        }
+                    }
+                }
+                if (found.size() >= 20000)
+                    break;
+            }
+        }
+        // (V1.3.69, after the code review: nothing thrown on its thread ends the game; it just finds nothing)
+        void crash_scan_run()
+        {
+            const auto started = precise_seconds();
+            std::vector<CrashScan::Found> found;
+            std::size_t bytes = 0;
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+            try
+            {
+                crash_scan_read(found, bytes, crash_scan.ranges, crash_scan.gentle);
+            }
+            catch (...)
+            {
+                found.clear();
+            }
+            std::lock_guard lock(crash_scan.mutex);
+            crash_scan.found = std::move(found), crash_scan.bytes = bytes, crash_scan.seconds = precise_seconds() - started;
+            crash_scan.state = 2;
+        }
+        void crash_scan_start(const std::array<float, 3> &at, const std::vector<std::pair<Address, Address>> &ranges, bool gentle)
+        {
+            int idle = 0;
+            if (!crash_scan.state.compare_exchange_strong(idle, 1))
+                return;
+            crash_scan.at = at, crash_scan.now_x = at[0], crash_scan.now_y = at[1], crash_scan.now_z = at[2], crash_scan.ranges = ranges, crash_scan.gentle = gentle;
+            try
+            {
+                std::thread(crash_scan_run).detach();
+            }
+            catch (...)
+            {
+                crash_scan.state = 0; // (no thread: tried again later)
+            }
+        }
+        // (V1.3.68, for the log) what a place is in: the object around it, by the nearest function table at or before it (up
+        // to 0x800 bytes back), with the field there (see engine_type_text)
+        std::string place_owner(Address at)
+        {
+            for (const Address back : {Address(0x800), (at & 0xfff) & ~Address(7)})
+            {
+                const Address from = (at & ~Address(7)) - back;
+                std::vector<std::uint64_t> words(back / 8 + 1);
+                if (back > (at & ~Address(7)) || !read(from, words))
+                    continue;
+                for (std::size_t i = words.size(); i-- > 0;)
+                {
+                    const auto v = static_cast<Address>(words[i]);
+                    if (v < base() + 0x1000 || v >= module_end() || (v & 7))
+                        continue;
+                    // (a function table: its first entry is the game's code)
+                    if (const auto f = value<Address>(v); f >= base() + 0x1000 && f < module_end())
+                        return engine_type_text(v - base(), static_cast<unsigned>(at - (from + i * 8)));
+                }
+                return "no object of the game's found around it";
+            }
+            return "not readable around it";
+        }
+        // V1.3.68: the wall's watch (debug register 3, see papu_wall and wall_apply): the 8 bytes it's on (V1.3.69, after the
+        // code review: those with his y, so a store of his y alone is seen too), the place watched (where the game's physics
+        // may keep Crash: his x and y in metres) and its kind (0 floats, 1 doubles); whether the wall is on now; the wall (the
+        // arena's middle, the chair's way, how far it is from the middle), in the game's units; the thread setting the place
+        // right now (V1.3.69, after the code review: that setting stops the watch again, and is let through); and for the
+        // tries: the game's stores there, those set out of the wall, how far a
+        // store went from the last one set (small if that place is where the physics goes on from; the gap to where the
+        // physics really has him if it's only a copy), and the last store, in the game's units (one more than 300 from it is
+        // a teleport, or that memory is something else's now: left alone)
+        constexpr DWORD wall_arm_code = 0xE0C0FFF0; // raised by us: sets this thread's debug register 3
+        std::atomic<std::uint64_t> wall_arm_address{0}, wall_place{0};
+        std::atomic_int wall_kind{0};
+        std::atomic_bool wall_live{false}, wall_last_known{false}, wall_last_set{false};
+        std::atomic<float> wall_mx{0}, wall_my{0}, wall_ux{1}, wall_uy{0}, wall_front{0}, wall_far{0}, wall_lx{0}, wall_ly{0};
+        // V1.3.76 (see wall_apply): where Crash is drawn, each frame the wall is on
+        std::atomic<float> wall_cx{0}, wall_cy{0};
+        // V1.3.79 (see wall_outline): the wall drawn in the game while it's up, at the arena's floor's height
+        std::atomic_bool wall_shown{false};
+        std::atomic<float> wall_floor{0};
+        std::atomic<DWORD> wall_setting_thread{0};
+        std::atomic_uint wall_stores{0}, wall_stops{0};
+        // V1.3.69 (Eric's V1.3.68 run: "it blocks, but ... when you try to approach it to the side of the chair, he like gets
+        // pushed back into the middle ... it shouldn't be teleporting you ... the wall should be the shape of the whole
+        // arena"; the log: past 30 degrees the wall went out steeply and he was set onto it straight toward the middle, so a
+        // step sideways moved him up to 90 inward): a point inside the wall goes to the nearest point out of it. V1.3.70
+        // (Eric's V1.3.69 run: "I'm like stuck in a corner ... Is there a way we can smooth that out where it's just not a
+        // corner, but it's basically just a straight line"; V1.3.69's wall followed the arena's circle across the throne with
+        // straight sides out from 32 degrees, and beside the throne a side met the curved benches square, a corner to be
+        // stuck in): one straight wall across the whole hut, square to the chair's way, as far from the arena's middle as
+        // V1.3.69's was in front of the throne (7.5% farther than where Papu Papu sits; his throne's seat starts 66 to 72
+        // behind that: V1.3.64's run), at any height. It meets the benches at a wide angle (150 degrees, open toward the
+        // arena), so there's no corner to be caught in (V1.3.77: there was, at 140 degrees; its ends rounded, see wall_shape,
+        // V1.3.78: in the stick only); a point past it goes straight back, half a unit in front of it
+        constexpr float wall_front_share = 1.075f;
+        // V1.3.74 (Eric's V1.3.73 run: "when I'm running towards the wall, it seems like Crash is doing his falling
+        // animation, like he's falling down"; his clip: at the wall he flips between his run and his fall every few frames;
+        // the log: with the watched place set back as it's stored, the behaviour's own places (Havok's character controller
+        // driver and docking driver) were still a frame's run past the wall each frame, about 12, and set back after it,
+        // 80 times 10 or more in his first fight): the wall in the stick too. As Crash comes within wall_stick_zone of the
+        // wall, the part of the left stick's push that goes into it is taken out (all of it 2 in front of it), so the game
+        // moves him along it or stops him there with its own movement and animations, and his physics is set back only
+        // when something else (a jump's speed, the d-pad or keys) still takes him past it. The stick is the camera's way:
+        // its x along the camera's right, its y along where it looks, both flat (from its view and projection), checked
+        // against how he moves before it's trusted (papu_wall_stick)
+        constexpr float wall_stick_zone = 48.0f;
+        std::atomic_bool wall_stick_on{false};
+        // (V1.3.77: how far in front of the wall he is, and its way out there, from where he's nearest it: the wall's ends are
+        // rounded, see wall_shape)
+        std::atomic<float> wall_stick_gap{1e9f}, wall_stick_nx{1}, wall_stick_ny{0};
+        std::atomic<float> wall_stick_rx{1}, wall_stick_ry{0}, wall_stick_fx{0}, wall_stick_fy{1};
+        std::atomic<float> wall_stick_in_x{0}, wall_stick_in_y{0}; // (the stick the game was about to get, -1 to 1)
+        std::atomic_uint wall_stick_cut{0};                         // (polls with some of the push into the wall taken out)
+        // (V1.3.81: the stick found not to move Crash the camera's way this session: the next visits start without the wall
+        // in the stick; V1.3.74 to V1.3.80 started each session without it until the checks trusted it)
+        bool wall_stick_wrong = false;
+        // (after the code review: when the game's thread last set it, so nothing is taken out if that stops, and which pad
+        // the stick recorded for the check was from: the one being pushed, not an idle second pad)
+        std::atomic<std::uint64_t> wall_stick_at{0};
+        std::atomic_int wall_stick_pad{-1};
+        // V1.3.77 (Eric's V1.3.76 run: "It works and is a lot better. just needs to smooth out the corner and he is done",
+        // "the invisible corner. it shows in the clip"; his clips: running along the bench toward the throne, Crash stops
+        // dead where the wall meets it, beside the throne, left and right, runs in place there, and Papu Papu's spin gets
+        // him, three of his five deaths; the wall met the benches at 140 degrees (they're 334 to 345 from the arena's middle
+        // there, in the runs' farthest reaches)): the wall's two ends rounded into the benches. Straight across the middle
+        // as before; toward each end it curves back toward the arena (wall_round_share of the chair's distance from the
+        // middle, 150) until it runs along the benches (taken as wall_bench_share, 342 from the middle), so from the wall
+        // to the bench there's no corner: what's left of it where it crosses the bench is 7 to 12 degrees (was 40). V1.3.78
+        // (Eric's V1.3.77 run: "still needs fixinig"; his clips: at both ends, landing beside the throne after a bounce off
+        // Papu Papu, Crash was set back in his physics by the rounded ends, flailed where he stood (his teeter and his
+        // fall, a third of a second), on the floor and on the bench, and Papu Papu's spin got him; the log: each of the 10
+        // times his physics was set back, logged, was at the rounded ends (311 to 334 from the middle, at heights 0 to 181),
+        // none at the straight part): the rounded ends are in the stick only (papu_wall_stick): coming up to a corner,
+        // he's turned along them, so he slides around it instead of stopping dead in it; his physics is set back only past
+        // the straight wall, as in V1.3.76 (wall_push), so landing in a corner or on the bench beside the throne, he isn't
+        // moved there. V1.3.80 (Eric's V1.3.79 run, the wall drawn: "The red part, it looked like it was working fine ... if
+        // you can like kind of blend it in ... Not where the yellow is, but kind of like where the red starts ... little
+        // curves that you can kind of blend in with the whole bench around the arena ... make sure there's no like invisible
+        // wall where we get stuck"; the log: each time Crash was pushed by the stick but hardly moved, he was where the
+        // straight wall meets the bench, 202 to 222 to its side, in the corner they make): the wall is the straight wall,
+        // and at each end a little curve (wall_round_share of the chair's distance from the middle, 100) that turns it
+        // into the bench, so it meets the bench along it, with no corner, in his physics and in the stick alike (the
+        // yellow ends are gone). The bench is where Crash can go on the floor in all the runs (the farthest by direction,
+        // away from the throne: 325.6 around a point 23.7 toward the throne from the arena's middle, every way within 8:
+        // wall_ring_share and wall_ring_mid_share); the curve takes 9 at most off the floor, in the corner. Over the
+        // benches (out of that ring) the wall is straight, as before
+        constexpr float wall_ring_mid_share = 0.098f, wall_ring_share = 1.347f, wall_round_share = 0.414f;
+        // how far a point (f toward the chair from the arena's middle, l to the side) is past the wall (less than 0: how
+        // far in front of it), where it goes back to (tf, tl: the nearest point of the wall, half a unit in front of it) and
+        // the wall's way into it there (nf, nl, of length 1); -1e9 where the bench is nearer than the wall (on the floor,
+        // past a curve's end)
+        float wall_shape(float f, float l, float front, float &tf, float &tl, float &nf, float &nl)
+        {
+            const float span = front / wall_front_share, rc = wall_ring_mid_share * span, ring = wall_ring_share * span, round = wall_round_share * span;
+            // (the curve's middle, at either end: round in front of the wall and round inside the bench's ring)
+            const float cf = front - round, q = (ring - round) * (ring - round) - (cf - rc) * (cf - rc);
+            const float cl = q > 0 ? std::sqrt(q) : 0.0f, s = l < 0 ? -1.0f : 1.0f, a = std::abs(l);
+            const float df = f - cf, da = a - cl, d = std::hypot(df, da);
+            // (straight: between the curves, over the benches, or if the layout leaves no room for them)
+            if (!(q > 0) || !(a > cl) || !(std::hypot(f - rc, l) <= ring) || !(d > 1e-3f))
+            {
+                tf = front - 0.5f, tl = l, nf = 1, nl = 0;
+                return f - front;
+            }
+            // (the curve runs from straight ahead of its middle round to the ring's way through it: farther round than that,
+            // the bench is nearer)
+            if ((cf - rc) * da - cl * df > 0)
+                return -1e9f;
+            nf = df / d, nl = s * da / d;
+            tf = cf + (round - 0.5f) * nf, tl = s * (cl + (round - 0.5f) * da / d);
+            return d - round;
+        }
+        // how far a point is past the wall (0: not), and where it goes back to (tf, tl), see wall_shape (V1.3.78: the
+        // straight wall alone; V1.3.80: its curved ends too, again)
+        float wall_push(float f, float l, float front, float &tf, float &tl)
+        {
+            float nf = 0, nl = 0;
+            const float past = wall_shape(f, l, front, tf, tl, nf, nl);
+            return past > 0 ? past : 0.0f;
+        }
+        unsigned wall_debug_register(std::uint64_t at, bool all = false);
+        // (V1.3.68) the wall's watch off: nothing set by it from here on, and debug register 3 cleared in every thread
+        void papu_wall_off()
+        {
+            wall_live = false;
+            const bool armed = wall_arm_address.load() || wall_place.load();
+            wall_place = 0;
+            if (armed)
+                wall_debug_register(0);
+        }
+        // V1.3.73 (Eric's V1.3.72 run: "Seems like sometimes it does it", his clip: on top of the throne early in the fight):
+        // the arena's middle is where Papu Papu stands in it, so the wall waited for him to land there (state 1), a second
+        // after the fight starts. It's the same every time (his throne at (-0.34, 218.31) and the middle at (0, -23.38) in
+        // every run of Eric's and his friend's), so with his throne where it always is (or where it was earlier this session,
+        // with its middle as found then) the wall is up from the intro on; where he lands sets it as before
+        struct WallLayout
+        {
+            std::array<float, 2> chair{}, mid{};
+            bool known = false;
+        } wall_layout;
+        void papu_wall_early(BossTuning &t)
+        {
+            std::array<float, 2> mid{};
+            const char *from = nullptr;
+            if (wall_layout.known && std::hypot(t.chair_at[0] - wall_layout.chair[0], t.chair_at[1] - wall_layout.chair[1]) < 2)
+                mid = wall_layout.mid, from = "as found earlier this session";
+            else if (std::hypot(t.chair_at[0] + 0.344268f, t.chair_at[1] - 218.312f) < 2)
+                mid = {0.0f, -23.3755f}, from = "where it always is";
+            if (!from)
+                return;
+            const float cx = t.chair_at[0] - mid[0], cy = t.chair_at[1] - mid[1], span = std::hypot(cx, cy);
+            if (span < 50)
+                return;
+            t.wall_mid = mid, t.wall_dir = {cx / span, cy / span}, t.wall_span = span, t.wall_known = true;
+            std::cout << "Boss chair: the wall is up from the intro (the arena's middle " << from << ", (" << mid[0] << ", " << mid[1] << "), " << span
+                      << " from his throne)\n" << std::flush;
+        }
+        // V1.3.64 (Eric: "let's start working on blocking the chair. So maybe we just put an invisible wall ... by the chair
+        // too. So it basically is just a circle"): the chair is where he sits before the fight (state 6), the arena's middle
+        // where he stands in it. Research for the wall: Crash's farthest from the arena's middle in 24 directions (0: toward the
+        // chair) and his height there, his nearest to the chair, to the log as each fight goes back to his throne or over
+        // (and every 30 s). And a first push: with the harder rules on, while Crash is within 30% of the way from the chair to
+        // the middle of it, he's set 15% of the way toward the middle (every 0.4 s), first by his place (+32), then by his
+        // transform's matrix if that doesn't hold; the log says which held
+        void papu_chair(BossTuning &t, const Shared &state, int s, std::uint64_t now)
+        {
+            Matrix m{};
+            if (!entity_matrix(t.papu, m) || !std::isfinite(m[12]) || !std::isfinite(m[13]) || !std::isfinite(m[14]))
+                return;
+            if (s == 6 && t.speed < 10)
+                t.chair_at = {m[12], m[13], m[14]}, t.chair_known = true;
+            if (s == 5)
+                t.arena_known = false; // (looked for again as he lands)
+            if (s == 1 && !t.arena_known)
+                t.arena_at = {m[12], m[13], m[14]}, t.arena_known = true;
+            // (V1.3.73: the wall from the intro on, before he first stands in the arena, see papu_wall_early)
+            if (t.chair_known && !t.wall_known)
+                papu_wall_early(t);
+            const auto told = [&](bool force) {
+                if (t.reach_lines >= 8 || (!force && now - t.reach_told_at < 30000))
+                    return;
+                ++t.reach_lines, t.reach_told_at = now;
+                std::ostringstream out;
+                out << "Boss chair research: Crash's farthest from the arena's middle by direction (degrees from the chair: distance, height):";
+                for (std::size_t b = 0; b < t.reach.size(); ++b)
+                    if (t.reach[b] > 0)
+                        out << " " << static_cast<int>(b * 15) - 180 << ": " << static_cast<int>(t.reach[b]) << " " << static_cast<int>(t.reach_z[b]);
+                out << "; nearest the chair " << static_cast<int>(t.chair_near) << " (height " << static_cast<int>(t.chair_near_z) << ")";
+                // (V1.3.68: the wall, see papu_wall)
+                if (t.wall_pushes)
+                {
+                    // (V1.3.71: and the watch, see papu_wall)
+                    static const char *const ways[] = {"no watch yet", "a place being tried with the watch", "a watched place keeps what's drawn at it",
+                                                       "no watched place kept"};
+                    out << "; the wall: " << t.wall_pushes << " frames with Crash in it, his physics set each frame, " << ways[std::clamp(t.wall_watch, 0, 3)];
+                    if (t.base_pressed)
+                        out << " (unwatched, drawn in it " << t.base_rough << " of " << t.base_pressed << " frames)";
+                    unsigned listed = 0;
+                    for (const auto &p : t.cplaces)
+                        if ((p.ours || p.theirs) && listed < 6)
+                            out << (listed++ ? ", 0x" : " (places set: the game went on from ours / put its own back: 0x") << std::hex << p.at << std::dec << " " << p.ours << "/"
+                                << p.theirs;
+                    if (listed)
+                        out << ")";
+                    if (t.wall_rearms)
+                        out << "; the watch went into every thread again " << t.wall_rearms << " times";
+                }
+                // (V1.3.76, see cplace_read)
+                if (t.wall_dropped)
+                    out << "; " << t.wall_dropped << " of his physics' places dropped (they didn't hold where he is any more)";
+                if (t.wall_raced)
+                    out << "; " << t.wall_raced << " settings of them left out (the place changed as it was set)";
+                // (V1.3.74: the wall in the stick, see papu_wall_stick)
+                if (const auto cut = wall_stick_cut.load())
+                    out << "; the stick's push into the wall taken out in " << cut << " polls (it moved him the camera's way in " << t.stick_agree << " of " << t.stick_samples
+                        << " checks)";
+                // (V1.3.79, see papu_wall_research: by side, 20 a step, the farthest toward the throne on the floor / above it)
+                {
+                    std::ostringstream sides;
+                    for (std::size_t b = 0; b < t.side_floor.size(); ++b)
+                        if (t.side_floor[b] > 0 || t.side_above[b] > 0)
+                            sides << " " << static_cast<int>(b * 20) - 250 << ": " << static_cast<int>(t.side_floor[b]) << "/" << static_cast<int>(t.side_above[b]) << "@"
+                                  << static_cast<int>(t.side_above_z[b]);
+                    if (!sides.str().empty())
+                        out << "; the farthest toward the throne by side (on the floor / above it, at height):" << sides.str();
+                }
+                std::cout << out.str() << "\n" << std::flush;
+            };
+            // (as the fight goes back to his throne or he comes into the arena again: the research and the wall so far.
+            // V1.3.73: told before the arena's middle is looked for again; V1.3.64 to V1.3.72 went back for that first, so
+            // after a death it never was)
+            if (s == 5 || s == 6)
+            {
+                if (t.reach_told_at != 1 && std::any_of(t.reach.begin(), t.reach.end(), [](float r) { return r > 0; }))
+                    told(true), t.reach_told_at = 1;
+                return;
+            }
+            if (!t.chair_known || !t.arena_known)
+                return;
+            const float cx = t.chair_at[0] - t.arena_at[0], cy = t.chair_at[1] - t.arena_at[1], span = std::hypot(cx, cy);
+            if (span < 50)
+                return;
+            // (V1.3.68: the wall's, kept for the fight, see papu_wall; V1.3.73: and for the next visits this session)
+            t.wall_mid = {t.arena_at[0], t.arena_at[1]}, t.wall_dir = {cx / span, cy / span}, t.wall_span = span, t.wall_known = true;
+            wall_layout.chair = {t.chair_at[0], t.chair_at[1]}, wall_layout.mid = t.wall_mid, wall_layout.known = true;
+            if (!t.chair_told)
+            {
+                t.chair_told = true;
+                std::cout << "Boss chair research: his chair at (" << t.chair_at[0] << ", " << t.chair_at[1] << ", " << t.chair_at[2] << "), the arena's middle at ("
+                          << t.arena_at[0] << ", " << t.arena_at[1] << ", " << t.arena_at[2] << "): " << span << " apart, the chair " << t.chair_at[2] - t.arena_at[2]
+                          << " higher\n" << std::flush;
+            }
+            const auto crash = player();
+            std::array<float, 3> at{};
+            if (!crash || !read(crash + 32, at) || !std::isfinite(at[0]) || !std::isfinite(at[1]) || !std::isfinite(at[2]))
+                return;
+            if (s != 1 && s != 2 && s != 3)
+                return;
+            if (t.reach_told_at == 1)
+                t.reach_told_at = now;
+            // (his farthest by direction, his nearest to the chair)
+            const float ax = at[0] - t.arena_at[0], ay = at[1] - t.arena_at[1], d = std::hypot(ax, ay), h = at[2] - t.arena_at[2];
+            const float angle = wrap_angle(std::atan2(ay, ax) - std::atan2(cy, cx));
+            const auto bin = std::min<std::size_t>(23, static_cast<std::size_t>((angle + 3.14159265f) / (2 * 3.14159265f) * 24));
+            if (d > t.reach[bin])
+                t.reach[bin] = d, t.reach_z[bin] = h;
+            const float to_chair = std::hypot(at[0] - t.chair_at[0], at[1] - t.chair_at[1]);
+            if (to_chair < t.chair_near)
+                t.chair_near = to_chair, t.chair_near_z = h;
+            told(false);
+            // (V1.3.65 and V1.3.66's wall set the places holding where Crash is in the game's units, around him (V1.3.65) and
+            // anywhere in the game's memory (V1.3.66: 54 that followed him); none moved him, the game's physics put him back each
+            // frame, and what's drawn jumped between the two (Eric's V1.3.66 run: "it was stuttering a lot"). V1.3.68's wall is
+            // in his physics itself, see papu_wall)
+        }
+        // V1.3.76 (Eric's V1.3.75 run: "game crashed", 10 s after his respawn, the first time after it that Crash went past
+        // the wall low down, with his physics set out of it at 11 places (9 every time before it, up high); the crash
+        // report: in Havok's step, the game took the x and y the wall had just set, (1.97, 6.00) m, for an address: one of
+        // the places held an address by then, which read as floats is about (0, 0), within 300 of Crash at the wall, and
+        // a third float near the ground passed the height check): from a float's or a double's bits, is it a number (not
+        // infinite or NaN), and is it one too small for its kind to hold whole (as an address's top half or a count read as
+        // a float is; so is most else that isn't a place)? After the code review: from the bits, not the number, as a thread
+        // that takes such numbers as 0 (physics code often has that on) would read one as 0
+        constexpr bool finite_bits(std::uint32_t b) { return ((b >> 23) & 0xff) != 0xff; }
+        constexpr bool finite_bits(std::uint64_t b) { return ((b >> 52) & 0x7ff) != 0x7ff; }
+        constexpr bool too_small_bits(std::uint32_t b) { return ((b >> 23) & 0xff) == 0 && (b & 0x7fffff) != 0; }
+        constexpr bool too_small_bits(std::uint64_t b) { return ((b >> 52) & 0x7ff) == 0 && (b & 0xfffffffffffffULL) != 0; }
+        // (V1.3.68) a place of Crash's physics, in metres: read (x, y and height) and set (x and y). V1.3.76: `sane` says
+        // whether what it holds can be where Crash is: none of its numbers too small for its kind (see finite_bits), none
+        // past 10 km; read without it, a place that can't is as one that can't be read
+        bool cplace_read(const BossTuning::CrashPlace &p, std::array<double, 3> &v, bool &sane)
+        {
+            bool finite = true, small = false;
+            sane = false;
+            if (p.kind == 1)
+            {
+                std::array<std::uint64_t, 3> b{};
+                if (!read(p.at, b))
+                    return false;
+                for (std::size_t i = 0; i < 3; ++i)
+                    finite = finite && finite_bits(b[i]), small = small || too_small_bits(b[i]), std::memcpy(&v[i], &b[i], sizeof b[i]);
+            }
+            else
+            {
+                std::array<std::uint32_t, 3> b{};
+                if (!read(p.at, b))
+                    return false;
+                for (std::size_t i = 0; i < 3; ++i)
+                {
+                    float f = 0;
+                    std::memcpy(&f, &b[i], sizeof f);
+                    finite = finite && finite_bits(b[i]), small = small || too_small_bits(b[i]), v[i] = f;
+                }
+            }
+            sane = finite && !small && std::abs(v[0]) <= 1e4 && std::abs(v[1]) <= 1e4 && std::abs(v[2]) <= 1e4;
+            return finite;
+        }
+        bool cplace_read(const BossTuning::CrashPlace &p, std::array<double, 3> &v)
+        {
+            bool sane = false;
+            return cplace_read(p, v, sane) && sane;
+        }
+        // V1.3.76: a place set (x and y) only if it still holds what was just read (read sane, so its numbers come back
+        // exactly as they were): the game's own threads go on meanwhile, and that memory could be something else's by the
+        // time it's set (V1.3.68 to V1.3.75 set it outright); only in memory that can be written, and (after the code review)
+        // with a fault there caught, should that memory be let go in between (see crashnst_swap64); counted as set only if x
+        // and y both were (one at a time for doubles, or floats not on 8 bytes: y may have changed after x was set, as the
+        // game moved him on)
+        bool cplace_swap(const BossTuning::CrashPlace &p, const std::array<double, 3> &was, const std::array<double, 2> &xy)
+        {
+            const Address size = p.kind == 1 ? 16 : 8;
+            MEMORY_BASIC_INFORMATION info{};
+            constexpr DWORD writable = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+            if (!swap_guarded() || (p.at & 3) || VirtualQuery(reinterpret_cast<void *>(p.at), &info, sizeof info) != sizeof info || info.State != MEM_COMMIT ||
+                (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) || !(info.Protect & writable) ||
+                p.at + size > reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize)
+                return false;
+            auto *at = reinterpret_cast<volatile char *>(p.at);
+            if (p.kind == 1)
+            {
+                if (p.at & 7)
+                    return false;
+                long long old[2]{}, now[2]{};
+                std::memcpy(old, was.data(), sizeof old), std::memcpy(now, xy.data(), sizeof now);
+                return crashnst_swap64(at, old[0], now[0]) == 1 && crashnst_swap64(at + 8, old[1], now[1]) == 1;
+            }
+            const float of[2]{static_cast<float>(was[0]), static_cast<float>(was[1])}, nf[2]{static_cast<float>(xy[0]), static_cast<float>(xy[1])};
+            if (!(p.at & 7))
+            {
+                long long old = 0, now = 0;
+                std::memcpy(&old, of, sizeof old), std::memcpy(&now, nf, sizeof now);
+                return crashnst_swap64(at, old, now) == 1;
+            }
+            int old[2]{}, now[2]{};
+            std::memcpy(old, of, sizeof old), std::memcpy(now, nf, sizeof now);
+            return crashnst_swap32(at, old[0], now[0]) == 1 && crashnst_swap32(at + 4, old[1], now[1]) == 1;
+        }
+        // (it holds where Crash is now, `at` in the game's units: his x and y within `tolerance` metres, its height over his
+        // feet as it was when found, within 0.3 m more)
+        bool cplace_tracks(const BossTuning::CrashPlace &p, const std::array<double, 3> &v, const std::array<float, 3> &at, double tolerance)
+        {
+            const double m = body_meters;
+            return std::abs(v[0] - at[0] * m) <= tolerance && std::abs(v[1] - at[1] * m) <= tolerance && std::abs(v[2] - (at[2] * m + p.dz)) <= tolerance + 0.3;
+        }
+        // V1.3.71 (Eric's V1.3.70 run: "It does work, but there is a little bit of like stutter"; the log: setting his physics
+        // each frame held him, at most 19 into the wall, but the game put back most of the bigger settings before its next
+        // frame, so he was drawn a little in the wall, then out, then in again): the watch (debug register 3, see wall_apply)
+        // on the places that follow Crash, one at a time (the kind kept before first, then the character controller's), sets
+        // the place back in front of the wall the moment the game stores it, before anything reads it. Kept is one with which
+        // Crash is drawn in the wall (more than 4) in at most 1 of 10 frames he presses into it (out of 40); one the game
+        // doesn't store while he's in the wall is passed over after 60 such frames (watched once more first, in threads made
+        // since). His physics is set each frame all the while, so the wall holds whichever place is being tried; a kept one
+        // that stops keeping him out of it (3 in 10 of 120 frames) has the others tried again. V1.3.72 (Eric's V1.3.71 run:
+        // Crash went through the wall and out of the arena; the log: the watch kept a copy of where he's drawn, with which
+        // he was never drawn in the wall, while his physics went on): a frame counts as in the wall when most of the other
+        // places that follow him are more than 4 past it, not where he's drawn: with the place the physics goes on from
+        // watched, its copies are at the wall too; with a copy watched, the others aren't
+        // (the wall's watch on a place: on the 8 bytes with his y, a double's second 8, or a float's y and height when x isn't
+        // at the start of 8; returns how many threads took it. V1.3.74, after the code review: also for the kept place's
+        // arming again, with the place set again too: the rules turned off and on in between clear both)
+        unsigned papu_wall_arm(const BossTuning::CrashPlace &p, bool all = false)
+        {
+            const Address watched = p.kind == 1 ? p.at + 8 : (p.at & 7) ? p.at + 4 : p.at;
+            wall_place = 0;
+            wall_kind = p.kind, wall_far = 0, wall_last_known = false, wall_last_set = false;
+            wall_place = p.at;
+            return wall_debug_register(watched, all);
+        }
+        template <class Told, class Where>
+        void papu_wall_watch(BossTuning &t, bool past, unsigned others, unsigned others_in, std::uint64_t now, const Told &told, const Where &where)
+        {
+            const unsigned stops = wall_stops.load(), fresh = stops - t.wall_stops_seen;
+            t.wall_stops_seen = stops;
+            const bool pressed = past || fresh > 0, rough = others && others_in * 2 > others;
+            // (unwatched, for the log)
+            if (pressed && (t.wall_watch == 0 || t.wall_watch == 3))
+                ++t.base_pressed, t.base_rough += rough ? 1 : 0;
+            if (t.cplace_step != 3 || t.cplaces.empty() || t.wall_watch == 3 || IsDebuggerPresent())
+                return;
+            if (t.wall_watch == 0)
+            {
+                const auto next = std::find_if(t.cplaces.begin(), t.cplaces.end(), [](const BossTuning::CrashPlace &c) { return !c.tried && !c.stale; });
+                if (next == t.cplaces.end())
+                {
+                    t.wall_watch = 3;
+                    told("the watch kept none of the " + std::to_string(t.cplaces.size()) + " places (his physics is still set each frame)");
+                    papu_wall_off();
+                    return;
+                }
+                auto &p = *next;
+                p.tried = true, t.wall_try = static_cast<std::size_t>(next - t.cplaces.begin());
+                const auto threads = papu_wall_arm(p);
+                t.wall_ticket = arm_ticket();
+                wall_live = true;
+                t.wall_watch = 1, t.wall_pressed = t.wall_rough = t.wall_quiet = 0, t.wall_rearmed = false;
+                told("the watch tries " + where(p.at) + " (place " + std::to_string(t.wall_try + 1) + " of " + std::to_string(t.cplaces.size()) + ", " + place_owner(p.at) +
+                     "), in " + std::to_string(threads) + " threads");
+                return;
+            }
+            // (V1.4: judged only once the watch is in the game's threads, see arm_reached)
+            if (!arm_reached(t.wall_ticket))
+                return;
+            const auto &p = t.cplaces[std::min(t.wall_try, t.cplaces.size() - 1)];
+            if (pressed)
+                ++t.wall_pressed, t.wall_rough += rough ? 1 : 0;
+            const std::string counts = std::to_string(t.wall_rough) + " of " + std::to_string(t.wall_pressed) + " frames he pressed into it";
+            if (t.wall_watch == 1)
+            {
+                t.wall_quiet = fresh ? 0 : past ? t.wall_quiet + 1 : t.wall_quiet;
+                std::string why;
+                if (t.wall_quiet >= 60)
+                {
+                    if (!t.wall_rearmed)
+                    {
+                        t.wall_rearmed = true, t.wall_quiet = 0;
+                        wall_debug_register(wall_arm_address.load(), true); // (once more, into every thread: V1.4, see arm_others)
+                        t.wall_ticket = arm_ticket();
+                        return;
+                    }
+                    why = "the game didn't store it while Crash was in the wall";
+                }
+                else if (t.wall_pressed >= 40 && t.wall_rough * 10 <= t.wall_pressed)
+                {
+                    t.wall_watch = 2, t.wall_good = place_owner(p.at), t.wall_pressed = t.wall_rough = 0, t.wall_quiet = 0;
+                    told("the watch keeps " + where(p.at) + " (" + t.wall_good + "): the other places in the wall in " + counts + " (unwatched: " + std::to_string(t.base_rough) +
+                         " of " + std::to_string(t.base_pressed) + ")");
+                    return;
+                }
+                else if (t.wall_pressed >= 40)
+                    why = "the other places were still in the wall in " + counts;
+                if (!why.empty())
+                    told(where(p.at) + " isn't it: " + why), t.wall_watch = 0, wall_place = 0;
+                return;
+            }
+            // V1.3.74 (Eric's V1.3.73 run: the watch went on in 100 threads at the start and 102 later, and after his second
+            // respawn the kept place stopped keeping him out of the wall): kept, but no store of the game's seen while he's in
+            // the wall for 20 frames: the watch goes into every thread again (threads made since may be the ones storing it),
+            // once a second at most
+            t.wall_quiet = fresh ? 0 : past ? t.wall_quiet + 1 : t.wall_quiet;
+            if (t.wall_quiet >= 20 && now - t.wall_rearm_at >= 1000)
+            {
+                const auto threads = papu_wall_arm(p, true); // (V1.4: every thread, see arm_others)
+                t.wall_ticket = arm_ticket();
+                t.wall_quiet = 0, t.wall_rearm_at = now, ++t.wall_rearms;
+                if (t.wall_rearms <= 3)
+                    told("no store of the kept place seen while Crash was in the wall for 20 frames: the watch goes into every thread again (" + std::to_string(threads) +
+                         ")");
+            }
+            // (kept: still keeping him out of it?)
+            if (t.wall_pressed >= 120)
+            {
+                if (t.wall_rough * 10 > 3 * t.wall_pressed)
+                {
+                    told("the watch's place stopped keeping Crash out of the wall (the other places in it in " + counts + "): the others are tried again");
+                    for (auto &c : t.cplaces)
+                        c.tried = &c == &p;
+                    t.wall_watch = 0, wall_place = 0;
+                }
+                t.wall_pressed = t.wall_rough = 0;
+            }
+        }
+        // V1.3.74 (see wall_stick_zone): the wall in the stick, each frame: the camera's right and where it looks, flat on
+        // the ground (from its view and projection: clip x and w), where Crash is against the wall, and whether the stick is
+        // trusted: while he runs freely, away from the wall, with the stick pushed well over, does he go where the stick
+        // points the camera's way (within 30 degrees)? Trusted from 30 such checks on with 3 in 4 of them right, as they
+        // go (a moving average); not trusted (the wall is in his physics only) while that's under 3 in 5
+        template <class Told>
+        void papu_wall_stick(BossTuning &t, bool on, bool paused, const std::array<float, 3> &at, const Told &told)
+        {
+            const auto view = scene();
+            const auto &vp = view.view_projection;
+            float rx = vp[0], ry = vp[4], fx = vp[3], fy = vp[7];
+            const float rl = std::hypot(rx, ry), fl = std::hypot(fx, fy);
+            const bool camera = view.camera_active && std::isfinite(rl) && std::isfinite(fl) && rl > 1e-6f && fl > 1e-6f;
+            // (after the code review: not in the pause menu either)
+            if (!on || paused || !camera || !t.wall_known)
+            {
+                wall_stick_on = false;
+                return;
+            }
+            rx /= rl, ry /= rl, fx /= fl, fy /= fl;
+            // V1.3.81 (Eric's V1.3.80 run: "he's falling, he's doing the falling animation again"; the log: the stick's checks
+            // trusted it only 18 s in, in his third life, so his first two lives had the wall in his physics alone): the wall
+            // is in the stick from the start of each visit (it has moved him the camera's way in every run: 29 of 30, 210 of
+            // 216, 275 of 282, 186 of 188, 16 of 20 ...), and the checks only take it out if they find it doesn't, as before
+            if (!t.stick_carried)
+            {
+                t.stick_carried = true, t.stick_trusted = !wall_stick_wrong, t.stick_trust = t.stick_trusted ? 1.0f : 0.0f;
+                if (t.stick_trusted && !t.stick_told)
+                    t.stick_told = true, told("the wall is in the stick from the start: within " + std::to_string(static_cast<int>(wall_stick_zone)) +
+                                              " of it, the stick's push into it is turned along it");
+            }
+            // (V1.3.77: how far in front of the wall he is and its way into it, where he's nearest it, curved ends and all: see
+            // wall_shape)
+            const float ux = t.wall_dir[0], uy = t.wall_dir[1], front = wall_front_share * t.wall_span;
+            const float ax = at[0] - t.wall_mid[0], ay = at[1] - t.wall_mid[1];
+            float tf = 0, tl = 0, nf = 1, nl = 0;
+            const float past = wall_shape(ax * ux + ay * uy, ay * ux - ax * uy, front, tf, tl, nf, nl);
+            wall_stick_rx = rx, wall_stick_ry = ry, wall_stick_fx = fx, wall_stick_fy = fy;
+            wall_stick_nx = nf * ux - nl * uy, wall_stick_ny = nf * uy + nl * ux, wall_stick_gap = -past, wall_stick_at = GetTickCount64();
+            // (the check, while he runs freely away from the wall. V1.3.80 (Eric's V1.3.79 run: the stick's steering was off
+            // 1.4 s after it was trusted, and in each of his stuck spots; every frame was a check, so a turn's or a bounce's
+            // or a landing's 9 frames in a row undid 30 right ones): only with the stick held the same way (within 15
+            // degrees) for 0.25 s, at most 10 a second, and him running on the floor (150 to 700 a second); from 20 checks on,
+            // the wall is taken out of the stick under 2 in 5 right (as they go: a moving average), and put back from 3 in 4)
+            const auto now = GetTickCount64();
+            const float sx = wall_stick_in_x.load(), sy = wall_stick_in_y.load(), vx = t.crash_v[0], vy = t.crash_v[1], v = std::hypot(vx, vy);
+            const float wx = rx * sx + fx * sy, wy = ry * sx + fy * sy, w = std::hypot(wx, wy);
+            const bool pushed = std::hypot(sx, sy) > 0.6f && w > 1e-3f;
+            const bool held = pushed && t.stick_held_at && wx * t.stick_wx + wy * t.stick_wy > 0.966f * w;
+            if (!held)
+                t.stick_held_at = pushed ? now : 0;
+            if (pushed)
+                t.stick_wx = wx / w, t.stick_wy = wy / w;
+            const float h = at[2] - (t.arena_known ? t.arena_at[2] : wall_floor.load());
+            // (V1.3.81, Eric's V1.3.80 run: the checks took the wall out of the stick at 68 of 84 right, after 9 or more wrong
+            // in a row: running around the arena along its bench, the stick pushed into the bench and he went along it.
+            // Only well inside the bench's ring, 40 from it, see wall_shape)
+            const float ring_f = ax * ux + ay * uy - wall_ring_mid_share * t.wall_span, ring_l = ay * ux - ax * uy;
+            const bool clear = std::hypot(ring_f, ring_l) < wall_ring_share * t.wall_span - 40;
+            if (held && now - t.stick_held_at >= 250 && now - t.stick_check_at >= 100 && v > 150 && v < 700 && h < 10 && clear && -past > 2 * wall_stick_zone)
+            {
+                t.stick_check_at = now;
+                const bool agrees = (wx * vx + wy * vy) / (w * v) > 0.866f;
+                ++t.stick_samples, t.stick_agree += agrees ? 1 : 0;
+                t.stick_trust = t.stick_trust * 0.9f + (agrees ? 0.1f : 0.0f);
+                if (t.stick_samples >= 20)
+                {
+                    const bool was = t.stick_trusted;
+                    t.stick_trusted = t.stick_trust >= (was ? 0.4f : 0.75f);
+                    wall_stick_wrong = !t.stick_trusted;
+                    if (t.stick_trusted && !was)
+                        told("the wall is in the stick again: the stick moves Crash the camera's way (" + std::to_string(t.stick_agree) + " of " +
+                             std::to_string(t.stick_samples) + " checks)");
+                    if (was && !t.stick_trusted && !t.stick_lost_told)
+                        t.stick_lost_told = true, told("the stick stopped moving Crash the camera's way (" + std::to_string(t.stick_agree) + " of " +
+                                                       std::to_string(t.stick_samples) + " checks in all): the wall is in his physics only until it does again");
+                    if (!t.stick_trusted && !t.stick_doubt_told && t.stick_samples >= 80)
+                        t.stick_doubt_told = true, told("the stick doesn't move Crash the camera's way here (" + std::to_string(t.stick_agree) + " of " +
+                                                        std::to_string(t.stick_samples) + " checks): the wall stays in his physics only");
+                }
+            }
+            wall_stick_on = t.stick_trusted;
+        }
+        // V1.3.79 (research: Eric's V1.3.78 run, "still happening"; his clip: by the bench beside the throne, right of it,
+        // Crash ran on the spot for a second, the stick pushed toward the wall, and Papu Papu's spin got him; nothing of
+        // his went past the wall that visit, so the stick's steering or the room itself held him there, and where the
+        // wall is against the throne and the benches can't be seen): the farthest toward the throne he gets by side, on the
+        // floor and above it (for the summary, see papu_chair), and each time the stick pushes him (over half way) but he
+        // hardly moves (under 80 a second) for 0.4 s within 120 of the wall: where he is against the wall (V1.3.80: with its
+        // curved ends), where the stick sends him and how much of that its steering took out, and how he moves (12 at most a
+        // visit, 1.5 s apart; the first with the camera's view and projection too)
+        template <class Told>
+        void papu_wall_research(BossTuning &t, bool on, bool paused, const std::array<float, 3> &at, std::uint64_t now, const Told &told)
+        {
+            if (!on || paused || !t.wall_known)
+            {
+                t.stuck_since = 0;
+                return;
+            }
+            const float ux = t.wall_dir[0], uy = t.wall_dir[1], front = wall_front_share * t.wall_span;
+            const float ax = at[0] - t.wall_mid[0], ay = at[1] - t.wall_mid[1], f = ax * ux + ay * uy, l = ay * ux - ax * uy;
+            const float h = at[2] - (t.arena_known ? t.arena_at[2] : wall_floor.load());
+            if (f > 100)
+            {
+                const auto b = static_cast<std::size_t>(std::clamp((l + 260) / 20, 0.0f, 25.0f));
+                if (h < 15)
+                    t.side_floor[b] = std::max(t.side_floor[b], f);
+                else if (h < 150 && f > t.side_above[b])
+                    t.side_above[b] = f, t.side_above_z[b] = h;
+            }
+            float tf = 0, tl = 0, nf = 1, nl = 0;
+            const float past = wall_shape(f, l, front, tf, tl, nf, nl); // (V1.3.80: the wall with its curved ends)
+            const float sx = wall_stick_in_x.load(), sy = wall_stick_in_y.load(), stick = std::hypot(sx, sy);
+            const float vx = t.crash_v[0], vy = t.crash_v[1], v = std::hypot(vx, vy);
+            if (!(stick > 0.5f && v < 80 && past > -120))
+            {
+                t.stuck_since = 0;
+                return;
+            }
+            if (!t.stuck_since)
+                t.stuck_since = now;
+            if (now - t.stuck_since < 400 || now - t.stuck_told_at < 1500 || t.stuck_lines >= 12)
+                return;
+            t.stuck_told_at = now, ++t.stuck_lines;
+            // (the stick the camera's way, flat; in the wall's terms: toward the throne, and to the side, where + is the
+            // side with l above 0)
+            const float rx = wall_stick_rx.load(), ry = wall_stick_ry.load(), fx = wall_stick_fx.load(), fy = wall_stick_fy.load();
+            const float wx = rx * sx + fx * sy, wy = ry * sx + fy * sy, w = std::hypot(wx, wy);
+            const auto way = [&](float x, float y) {
+                const float along = x * ux + y * uy, side = y * ux - x * uy;
+                return std::to_string(static_cast<int>(std::lround(std::atan2(side, along) * 57.2958f)));
+            };
+            const float nx = nf * ux - nl * uy, ny = nf * uy + nl * ux, into = w > 1e-3f ? (wx * nx + wy * ny) : 0;
+            const float keep = std::clamp((-past - 2) / wall_stick_zone, 0.0f, 1.0f);
+            const float taken = into > 0 && wall_stick_on.load() ? (1 - keep) * into / std::max(w, 1e-3f) : 0.0f;
+            std::ostringstream line;
+            line << std::fixed << std::setprecision(0) << "Crash pushed by the stick but hardly moving, " << seconds(now - t.entered) << " into the level, at " << f
+                 << " toward the throne and " << l << " to the side (height " << h << "; the wall " << -past << " ahead, its way into it at "
+                 << std::lround(std::atan2(nl, nf) * 57.2958f) << " degrees";
+            line << "): the stick " << std::setprecision(2) << stick << std::setprecision(0) << " toward " << way(wx, wy)
+                 << " degrees (0: toward the throne, 90: to the side above 0), its steering " << (wall_stick_on.load() ? "took out " : "off, took out ")
+                 << std::lround(taken * 100) << "% of it; he moves " << v << " a second toward " << way(vx, vy) << " degrees; at (" << at[0] << ", " << at[1] << ")";
+            if (t.stuck_lines == 1)
+            {
+                const auto view = scene();
+                line << std::setprecision(4) << "; the camera's view and projection:";
+                for (const float c : view.view_projection)
+                    line << " " << c;
+            }
+            told(line.str());
+        }
+        // V1.3.68 (Eric: "put the invisible wall basically in front of the chair, not so ... we're trying to reposition crash.
+        // It's just an invisible wall where it still makes a circle shape around the arena"): with the harder rules on, an
+        // invisible wall in front of Papu Papu's throne (V1.3.70: one straight line across the hut, see wall_push), at any
+        // height, through the whole fight (not once he's beaten). It's in the game's physics, where it keeps Crash (in metres,
+        // see crash_scan_run): past it, his physics is set back in front of it each frame (V1.3.68's and V1.3.69's runs: it
+        // held him), straight back, so he goes no farther and can go along it. If that doesn't hold him, each place is watched as the
+        // game sets it instead (debug register 3, see wall_apply), and one that holds him is kept. The log says how it went
+        void papu_wall(BossTuning &t, const Shared &state, int s, std::uint64_t now)
+        {
+            const auto crash = player();
+            std::array<float, 3> at{};
+            const bool here = crash && read(crash + 32, at) && std::isfinite(at[0]) && std::isfinite(at[1]) && std::isfinite(at[2]);
+            const bool alive = here && !crash_dead_now();
+            const bool on = state.boss_rules && t.wall_known && alive && s >= 1 && s <= 6 && s != 4;
+            const float front = wall_front_share * t.wall_span, ux = t.wall_dir[0], uy = t.wall_dir[1];
+            wall_mx = t.wall_mid[0], wall_my = t.wall_mid[1], wall_ux = ux, wall_uy = uy, wall_front = front;
+            if (here)
+                wall_cx = at[0], wall_cy = at[1]; // (V1.3.76, see wall_apply)
+            wall_live = on && (t.wall_watch == 1 || t.wall_watch == 2);
+            // (V1.3.79: drawn in the game while it's up, see wall_outline; V1.3.80: and Crash is alive, so not on the dark
+            // screen of a death)
+            wall_shown = on;
+            if (t.arena_known)
+                wall_floor = t.arena_at[2];
+            if (!state.boss_rules || !here)
+            {
+                wall_stick_on = false; // (V1.3.74)
+                if (!state.boss_rules && (wall_arm_address.load() || wall_place.load()))
+                {
+                    papu_wall_off();
+                    // (V1.3.74, after the code review: with the rules back on, the places are tried again from the first)
+                    t.wall_watch = 0;
+                    for (auto &c : t.cplaces)
+                        c.tried = false;
+                }
+                return;
+            }
+            const auto told = [&](const std::string &line) {
+                if (t.wall_lines < 60)
+                    ++t.wall_lines, std::cout << "Boss chair: " << line << "\n" << std::flush;
+            };
+            const auto where = [](Address a) {
+                std::ostringstream out;
+                out << "0x" << std::hex << a;
+                return out.str();
+            };
+            // V1.3.76 (see cplace_read): a place that holds what can't be where Crash is, or hasn't followed him for 3 checks
+            // in a row, is dropped: never read for the wall or set again (a new read of the game's memory finds his places
+            // anew); the watch on it, if it's the watched one, is off, and the next is tried
+            const auto drop = [&](BossTuning::CrashPlace &p, const std::string &why) {
+                const auto i = static_cast<std::size_t>(&p - t.cplaces.data());
+                const bool watched = (t.wall_watch == 1 || t.wall_watch == 2) && i == t.wall_try;
+                p.stale = true, p.pending = false, ++t.wall_dropped;
+                if (t.wall_dropped <= 8)
+                    told(where(p.at) + " (place " + std::to_string(i + 1) + " of " + std::to_string(t.cplaces.size()) + ") " + why + ": it's left alone from now on" +
+                         (watched ? ", and the watch on it is off" : ""));
+                if (watched)
+                    p.tried = true, t.wall_watch = 0, papu_wall_off();
+            };
+            // (V1.3.74: the wall in the stick, see papu_wall_stick: it needs none of his physics' places)
+            papu_wall_stick(t, on, state.menu_paused != 0, at, told);
+            papu_wall_research(t, on, state.menu_paused != 0, at, now, told); // (V1.3.79)
+            // (V1.3.71: the watch tried again after a new read, the kind of place kept before first; V1.3.72: the parts of the
+            // game's memory the places were in, read first)
+            const auto start_over = [&] {
+                std::vector<std::pair<Address, Address>> regions;
+                for (const auto &p : t.cplaces)
+                {
+                    MEMORY_BASIC_INFORMATION info{};
+                    if (VirtualQuery(reinterpret_cast<void *>(p.at), &info, sizeof info) == sizeof info && info.State == MEM_COMMIT)
+                        regions.emplace_back(reinterpret_cast<Address>(info.BaseAddress), reinterpret_cast<Address>(info.BaseAddress) + info.RegionSize);
+                }
+                std::sort(regions.begin(), regions.end());
+                t.wall_regions.clear();
+                for (const auto &r : regions)
+                    if (!t.wall_regions.empty() && r.first <= t.wall_regions.back().second)
+                        t.wall_regions.back().second = std::max(t.wall_regions.back().second, r.second);
+                    else
+                        t.wall_regions.push_back(r);
+                t.cplace_step = 0, t.cplaces.clear(), t.wall_try = 0, t.wall_watch = 0;
+                papu_wall_off();
+            };
+            // (a new Crash, after a respawn: where his physics keeps him is looked for again)
+            if (crash != t.wall_actor)
+            {
+                if (t.wall_actor && !t.cplaces.empty())
+                    told("Crash is new (a respawn): where his physics keeps him is looked for again");
+                t.wall_actor = crash, t.cplace_scan_at = 0, t.cplace_scans = 0;
+                start_over();
+            }
+            const float speed = std::hypot(t.crash_v[0], t.crash_v[1]);
+            const double m = body_meters;
+            crash_scan.now_x = at[0], crash_scan.now_y = at[1], crash_scan.now_z = at[2], crash_scan.now_speed = speed;
+            // (the read of all the game's memory, as Crash stands still)
+            if (t.cplace_step == 0)
+            {
+                if (crash_scan.state.load() == 2)
+                {
+                    std::lock_guard lock(crash_scan.mutex);
+                    crash_scan.found.clear(), crash_scan.state = 0; // (one from before)
+                }
+                if (alive && speed < 5 && crash_scan.state.load() == 0 && t.cplace_scans < 8 && now >= t.cplace_scan_at)
+                {
+                    t.cplace_regional = !t.wall_regions.empty();
+                    // (V1.3.73: resting as it goes only for a read of all of it while he fights, after this visit's first that
+                    // found him: the first, as the intro plays, has to be done before Crash can get to the throne)
+                    const bool gentle = !t.cplace_regional && t.cplace_full_done && (s == 1 || s == 2 || s == 3);
+                    crash_scan_start(at, t.wall_regions, gentle), t.cplace_step = 1, t.cplace_from = at, ++t.cplace_scans;
+                }
+            }
+            else if (t.cplace_step == 1 && crash_scan.state.load() == 0)
+                t.cplace_step = 0, t.cplace_scan_at = now + 3000; // (its thread couldn't start)
+            else if (t.cplace_step == 1 && crash_scan.state.load() == 2)
+            {
+                std::lock_guard lock(crash_scan.mutex);
+                t.cplaces.clear();
+                std::set<Address> once;
+                for (const auto &f : crash_scan.found)
+                    if (once.insert(f.at).second && t.cplaces.size() < 4000)
+                    {
+                        BossTuning::CrashPlace p;
+                        p.at = f.at, p.kind = f.kind, p.dz = f.dz;
+                        t.cplaces.push_back(p);
+                    }
+                const float moved = std::hypot(at[0] - crash_scan.at[0], at[1] - crash_scan.at[1]);
+                std::ostringstream line;
+                line << (t.cplace_regional ? "where the places were before" : "all the game's memory") << " read for where its physics keeps Crash, in metres ("
+                     << crash_scan.bytes / (1024 * 1024) << " MB in " << crash_scan.seconds << " s" << (crash_scan.gentle ? ", resting as it went" : "")
+                     << (moved > 1 ? ", Crash " + std::to_string(static_cast<int>(moved)) + " from where it started" : std::string()) << ", " << seconds(now - t.entered)
+                     << " into the level): " << t.cplaces.size() << " places hold where he was";
+                told(line.str());
+                crash_scan.found.clear(), crash_scan.state = 0;
+                t.cplace_step = t.cplaces.empty() ? 0 : 2;
+                if (t.cplaces.empty())
+                    t.cplace_scan_at = now + (t.cplace_regional ? 0 : 3000), t.wall_regions.clear(); // (all of it next)
+            }
+            else if (t.cplace_step == 2 && std::hypot(at[0] - t.cplace_from[0], at[1] - t.cplace_from[1]) >= 40)
+            {
+                // (kept: those that followed him, within 5 cm and as far as he goes in 50 ms; V1.3.69: not Papu Papu's head's
+                // target, which looks at Crash)
+                std::vector<BossTuning::CrashPlace> kept;
+                std::vector<std::string> owners;
+                const double tolerance = 0.05 + speed * m * 0.05;
+                for (const auto &p : t.cplaces)
+                {
+                    std::array<double, 3> v{};
+                    if (!cplace_read(p, v) || !cplace_tracks(p, v, at, tolerance))
+                        continue;
+                    auto owner = place_owner(p.at);
+                    if (owner.find("HeadTracking") != std::string::npos)
+                        continue;
+                    kept.push_back(p), owners.push_back(std::move(owner));
+                }
+                // (V1.3.69, for the watch's tries: the kind of place that held him before first, then the character
+                // controller's (V1.3.68's run: Havok's hkbCharacterControllerDriver followed him in every read). V1.3.73 (Eric's
+                // V1.3.71 and V1.3.72 runs: the watch kept the same kind both times, a place at his feet with no object of the
+                // game's around it, the 7th tried, and a try's start could throw off Papu Papu's aim, see
+                // debug_registers_now): that kind first)
+                std::vector<std::size_t> order(kept.size());
+                for (std::size_t i = 0; i < order.size(); ++i)
+                    order[i] = i;
+                const auto rank = [&](std::size_t i) {
+                    if (owners[i] == "no object of the game's found around it" && std::abs(kept[i].dz) < 0.05f)
+                        return 0;
+                    if (!t.wall_good.empty() && owners[i] == t.wall_good)
+                        return 1;
+                    return owners[i].find("CharacterController") != std::string::npos ? 2 : 3;
+                };
+                std::stable_sort(order.begin(), order.end(), [&](std::size_t x, std::size_t y) { return rank(x) < rank(y); });
+                std::vector<BossTuning::CrashPlace> sorted;
+                std::ostringstream line;
+                line << t.cplaces.size() << " places held where Crash stood, " << kept.size() << " followed him (" << seconds(now - t.entered) << " into the level)";
+                for (const auto i : order)
+                {
+                    if (sorted.size() < 10)
+                        line << "\n  " << where(kept[i].at) << " (" << (kept[i].kind ? "doubles" : "floats") << ", " << std::lround(kept[i].dz * 100) << " cm over his feet): "
+                             << owners[i];
+                    sorted.push_back(kept[i]);
+                }
+                told(line.str());
+                t.cplaces = std::move(sorted);
+                for (auto &p : t.cplaces)
+                    p.ours = p.theirs = p.misses = 0, p.pending = p.tried = p.stale = false;
+                t.cplace_step = t.cplaces.empty() ? 0 : 3, t.cplace_lost_at = 0, t.cplace_check_at = now + 500;
+                if (!t.cplaces.empty() && !t.cplace_regional)
+                    t.cplace_full_done = true; // (V1.3.73: a read of all of it that found him; later ones while he fights rest)
+                if (t.cplaces.empty())
+                    t.cplace_scan_at = now + (t.cplace_regional ? 0 : 2000), t.wall_regions.clear(); // (all of it next)
+                else
+                    t.cplace_scans = 0; // (a read that worked: the count is of those in a row that didn't)
+                t.wall_try = 0, t.wall_watch = 0;
+                papu_wall_off();
+            }
+            // (none of them follows him any more, for a second: looked for again. V1.3.76: and each that holds what can't be
+            // where he is, or isn't within 1 m of him (and as far as he goes in 100 ms) for 3 checks in a row, is dropped: after
+            // his respawn in Eric's V1.3.75 run, places that weren't his any more were still set)
+            if (t.cplace_step == 3 && now >= t.cplace_check_at && alive)
+            {
+                t.cplace_check_at = now + 500;
+                const double tolerance = 0.25 + speed * m * 0.1, loose = 1.0 + speed * m * 0.1;
+                bool any = false;
+                for (auto &p : t.cplaces)
+                {
+                    std::array<double, 3> v{};
+                    bool sane = false;
+                    if (p.stale)
+                        continue;
+                    const bool got = cplace_read(p, v, sane);
+                    if (got && !sane)
+                    {
+                        drop(p, "holds what can't be where Crash is");
+                        continue;
+                    }
+                    any = any || (got && cplace_tracks(p, v, at, tolerance));
+                    if (got && cplace_tracks(p, v, at, loose))
+                        p.misses = 0;
+                    else if (++p.misses >= 3)
+                        drop(p, "hasn't followed Crash for 3 checks in a row");
+                }
+                if (any)
+                    t.cplace_lost_at = 0;
+                else if (!t.cplace_lost_at)
+                    t.cplace_lost_at = now;
+                else if (now - t.cplace_lost_at >= 1000)
+                {
+                    told("none of the places follows Crash any more: looked for again");
+                    t.cplace_scan_at = now;
+                    start_over();
+                }
+            }
+            // V1.3.74 (Eric's V1.3.73 run: after his second respawn the kept place stopped keeping him out of the wall, and
+            // the others were tried until he died again): a second after each respawn, the watched place has to follow him
+            // still; if it doesn't, the places are looked for again, where they were first
+            if (here && !alive)
+                t.wall_was_dead = true;
+            else if (alive && t.wall_was_dead)
+                t.wall_was_dead = false, t.wall_respawn_at = now;
+            if (t.wall_respawn_at && now - t.wall_respawn_at >= 1000 && alive)
+            {
+                t.wall_respawn_at = 0;
+                if (t.cplace_step == 3 && !t.cplaces.empty() && (t.wall_watch == 1 || t.wall_watch == 2))
+                {
+                    auto &p = t.cplaces[std::min(t.wall_try, t.cplaces.size() - 1)];
+                    std::array<double, 3> v{};
+                    if (!cplace_read(p, v) || !cplace_tracks(p, v, at, 0.25 + speed * m * 0.1))
+                    {
+                        // (after the code review: the others that follow him still hold the wall meanwhile; the places
+                        // are looked for again only as he stands still, so the read is quick and done before he runs on)
+                        told("a second after his respawn the watched place doesn't follow Crash: the next is tried, and the places are looked for again as he stands still");
+                        p.tried = true, t.wall_watch = 0, t.wall_refresh = true;
+                        papu_wall_off();
+                    }
+                }
+            }
+            if (t.wall_refresh && t.cplace_step == 3 && alive && speed < 5 && crash_scan.state.load() == 0)
+            {
+                t.wall_refresh = false;
+                t.cplace_scan_at = now;
+                start_over();
+            }
+            if (!on || t.cplace_step < 2)
+            {
+                t.wall_run = 0, t.wall_run_max = 0;
+                return;
+            }
+            // (where he's drawn against the wall: f toward the chair from the arena's middle, l to the side; how far past it, see
+            // wall_push. V1.3.76: each place is set back from where it is itself, below)
+            const float ax = at[0] - t.wall_mid[0], ay = at[1] - t.wall_mid[1], al = ay * ux - ax * uy;
+            float tf = 0, tl = 0;
+            const float drawn = wall_push(ax * ux + ay * uy, al, front, tf, tl);
+            // V1.3.72 (Eric's V1.3.71 run: "it shows me clipping through the invisible wall and out of the whole arena"; the log:
+            // the watch kept a copy of where he's drawn (his place +32 came from it), so he was never drawn past the wall and
+            // nothing set his physics back, which went on through it): how far past the wall the deepest of the places that
+            // follow him is (each that's his: within 300 of where he's drawn and at his height, within 2 m), and how many of
+            // them, the watched one aside, are more than 4 past it (for the watch's tries, see papu_wall_watch)
+            // (V1.3.76: not those dropped, and one that holds what can't be where he is is dropped now, see cplace_read; after
+            // the code review, within 120 of where he's drawn, as for their setting below, so one that isn't set doesn't keep him
+            // "in the wall" with nothing set; within 300 still for the deepest of them, for the safety below)
+            float over = drawn, deep = drawn;
+            unsigned others = 0, others_in = 0;
+            if (t.cplace_step == 3)
+                for (std::size_t i = 0; i < t.cplaces.size() && i < 64; ++i)
+                {
+                    auto &p = t.cplaces[i];
+                    std::array<double, 3> v{};
+                    bool sane = false;
+                    if (p.stale || !cplace_read(p, v, sane))
+                        continue;
+                    if (!sane)
+                    {
+                        drop(p, "holds what can't be where Crash is");
+                        continue;
+                    }
+                    const float px = static_cast<float>(v[0] / m), py = static_cast<float>(v[1] / m), away = std::hypot(px - at[0], py - at[1]);
+                    if (away > 300 || std::abs(v[2] - (at[2] * m + p.dz)) > 2.0)
+                        continue;
+                    // (V1.3.80: against the wall with its curved ends, as it's set, see wall_shape)
+                    float pf = 0, pl = 0, nf = 0, nl = 0;
+                    const float pa = px - t.wall_mid[0], pb = py - t.wall_mid[1], in = wall_shape(pa * ux + pb * uy, pb * ux - pa * uy, front, pf, pl, nf, nl);
+                    deep = std::max(deep, in);
+                    if (away > 120)
+                        continue;
+                    over = std::max(over, in);
+                    if (!(t.wall_watch == 1 || t.wall_watch == 2) || i != t.wall_try)
+                        ++others, others_in += in > 4 ? 1 : 0;
+                }
+            const bool past = over > 0;
+            // (each place set at the last push: did the game go on from ours, or put its own back?)
+            for (auto &p : t.cplaces)
+                if (p.pending)
+                {
+                    p.pending = false;
+                    std::array<double, 3> v{};
+                    if (cplace_read(p, v) && std::hypot(p.wrote[0] - p.old[0], p.wrote[1] - p.old[1]) >= 0.25)
+                        ++(std::hypot(v[0] - p.wrote[0], v[1] - p.wrote[1]) < std::hypot(v[0] - p.old[0], v[1] - p.old[1]) ? p.ours : p.theirs);
+                }
+            if (past)
+                ++t.wall_pushes, ++t.wall_run, t.wall_run_max = std::max(t.wall_run_max, over);
+            else
+                t.wall_run = 0, t.wall_run_max = 0;
+            // (past it: his physics set back in front of it, each frame: once checked, every place that follows him (V1.3.72: not
+            // only those at where he's drawn); before that, only those holding where he is right now, within 5 cm and as far as
+            // he goes in 50 ms, and 256 of them looked at at most. V1.3.76 (see cplace_read): only a place that is past the
+            // wall itself, within 120 of where he's drawn (was: any within 300, wherever it was, set onto the wall where he's
+            // drawn), straight back from where it is (as the watch does, see wall_apply), and only if it still holds what was
+            // read as it's set, see cplace_swap)
+            if (past)
+            {
+                const double tolerance = 0.05 + speed * m * 0.05;
+                unsigned set = 0, looked = 0;
+                for (auto &p : t.cplaces)
+                {
+                    std::array<double, 3> v{};
+                    bool sane = false;
+                    if (set >= 64 || ++looked > 256)
+                        break;
+                    if (p.stale || !cplace_read(p, v, sane))
+                        continue;
+                    if (!sane)
+                    {
+                        if (t.cplace_step == 3)
+                            drop(p, "holds what can't be where Crash is");
+                        continue;
+                    }
+                    const float px = static_cast<float>(v[0] / m), py = static_cast<float>(v[1] / m), pa = px - t.wall_mid[0], pb = py - t.wall_mid[1];
+                    float pf = 0, pl = 0;
+                    if (!(wall_push(pa * ux + pb * uy, pb * ux - pa * uy, front, pf, pl) > 0))
+                        continue;
+                    if (t.cplace_step == 3 ? std::hypot(px - at[0], py - at[1]) > 120 || std::abs(v[2] - (at[2] * m + p.dz)) > 2.0 : !cplace_tracks(p, v, at, tolerance))
+                        continue;
+                    const std::array<double, 2> to{(t.wall_mid[0] + pf * ux - pl * uy) * m, (t.wall_mid[1] + pf * uy + pl * ux) * m};
+                    if (!cplace_swap(p, v, to))
+                    {
+                        ++t.wall_raced;
+                        continue;
+                    }
+                    p.old = {v[0], v[1]}, p.wrote = to, p.pending = true;
+                    ++set;
+                }
+                if (t.wall_run == 1 && t.wall_lines < 16)
+                    told("Crash went into the wall in front of the chair (" + std::to_string(static_cast<int>(over)) + " into it, " +
+                         std::to_string(static_cast<int>(std::hypot(ax, ay))) + " from the middle, height " + std::to_string(static_cast<int>(at[2] - t.arena_at[2])) +
+                         "): his physics set out of it at " + std::to_string(set) + " places");
+                if (!t.wall_held_told && t.wall_run >= 20 && t.wall_run_max <= 30)
+                    t.wall_held_told = true, told("the wall holds: Crash stayed at it (at most " + std::to_string(static_cast<int>(t.wall_run_max)) + " into it) for " +
+                                                  std::to_string(t.wall_run) + " frames in a row");
+            }
+            // (V1.3.72: a safety: with the watch on, deep past the wall is the watch's doing; it's off for this fight. V1.3.76,
+            // after the code review: from the deepest of his places within 300, whether or not one within 120 is past it)
+            if ((t.wall_watch == 1 || t.wall_watch == 2) && deep > 120)
+            {
+                told("Crash got " + std::to_string(static_cast<int>(deep)) + " past the wall with the watch on: the watch is off for this fight");
+                t.wall_watch = 3;
+                papu_wall_off();
+            }
+            papu_wall_watch(t, past, others, others_in, now, told, where);
+        }
         void papu_aim(BossTuning &t, const Shared &state, int s, std::uint64_t now)
         {
+            // (V1.3.52: the steering only with the harder rules on: off, he goes back to the game's own turn)
+            if (!state.boss_rules)
+                t.steer_on = false, papu_steer_off();
+            // (and only while he fights: as he stands, spins or is hit; going back to his throne or coming into the arena,
+            // he has the game's own turn again)
+            if (s != 1 && s != 2 && s != 3 && steer_mode.load() >= 2)
+                steer_mode = 0;
             // (V1.3.41: his spin's first frames after an aimed stand, from where his aim was held: does it start there?)
             if (t.spin_frames)
             {
@@ -8717,7 +10608,7 @@ namespace ingame
                     ++t.spin_lines, std::cout << "Boss rule: his spin's first frames, his facing from where his aim was held (degrees): " << t.spin_trace << "\n" << std::flush;
             }
             // (half the time to his slam: the game's own, or shorter once his slam plays faster, see papu_slam_rate)
-            const double factor = t.rate_found ? std::clamp(state.boss_speed, 100u, 200u) / 100.0 : 1.0;
+            const double factor = t.slam_rate_used > 1 ? t.slam_rate_used : t.rate_found ? std::clamp(state.boss_speed, 100u, 200u) / 100.0 : 1.0;
             const auto window = static_cast<std::uint64_t>(static_cast<double>(t.slam_normal ? t.slam_normal : 900) / factor / 2);
             const bool stand = state.boss_rules && t.papu && s == 1 && t.stand_seen && !t.aim_skip;
             const auto since = now - t.stand_seen;
@@ -8730,14 +10621,26 @@ namespace ingame
                 if (t.aim_wrote)
                 {
                     t.aim_wrote = false;
+                    // (V1.3.52: from his spin on, his turn as the game copies it is turned by as much as the aim turned him from
+                    // the game's own, so his spin starts where he slammed and goes on from there; how far the game's own was,
+                    // and the copies steered this stand)
+                    float steer_apart = 0;
+                    unsigned steered = 0;
+                    if (t.steer_on)
+                    {
+                        const float game = steer_game.load();
+                        steer_delta = wrap_angle(t.steer_sign * t.aim_lock - game), steer_mode = 2;
+                        steer_apart = wrap_angle(t.steer_sign * game - t.aim_lock), steered = steer_turned.load() - t.steer_from;
+                    }
                     // (his spin started: where from, against where his aim was held)
                     float yaw = 0;
                     const bool spun = s == 2 && papu_yaw_now(t, yaw);
                     const int jump = spun ? static_cast<int>(std::lround(wrap_angle(yaw - t.aim_lock) * 57.29578f)) : 0;
                     if (spun)
                         t.spin_from = t.aim_lock, t.spin_trace = std::to_string(jump), t.spin_frames = 5;
-                    // (V1.3.41: a jump once what turns with him has been looked for in two spins: the watch, see papu_who)
-                    if (spun && std::abs(jump) > 25 && t.turn_spins >= 2 && !t.watch_step)
+                    // (V1.3.41: a jump once what turns with him has been looked for in two spins: the watch, see papu_who. V1.3.52:
+                    // not while he's steered, see papu_steer)
+                    if (spun && std::abs(jump) > 25 && t.turn_spins >= 2 && !t.watch_step && !t.steer_on)
                         t.watch_due = true;
                     if (t.aim_lines < 14)
                     {
@@ -8756,14 +10659,29 @@ namespace ingame
                                     each << "\n  " << p.where << ": set " << p.set << ", held " << p.held << ", put back " << p.reset;
                             }
                         std::cout << "Boss rule: he aimed his slam at Crash: turned " << static_cast<int>(wrap_angle(t.aim_lock - t.aim_from) * 57.29578f)
-                                  << " degrees from his own facing and held it " << (spun ? "until his spin started" : slammed ? "after his slam until he stopped standing" : "until he stopped standing")
+                                  << " degrees from his own facing (led him by " << static_cast<int>(t.aim_lead_last) << " at " << static_cast<int>(t.aim_speed_last)
+                                  << " a second) and held it " << (spun ? "until his spin started" : slammed ? "after his slam until he stopped standing" : "until he stopped standing")
                                   << " (" << t.aim_kept << " frames it stayed, " << t.aim_overridden << " the game moved him; "
                                   << (t.aim_modes & 4 ? "the game kept putting him back: let be after " + std::to_string(t.aim_kept + t.aim_overridden) + " frames"
                                       : t.aim_modes & 2 ? std::string("what was set didn't hold him: then only his matrix")
                                                         : std::string("what turns with him and his matrix"))
                                   << ")" << (spun ? "; his spin started " + std::to_string(std::abs(jump)) + " degrees from his aim" + (std::abs(jump) <= 25 ? " (where he slammed)" : " (a jump)") : std::string())
+                                  << (t.aim_game_seen ? "; the game itself last had him at " + std::to_string(static_cast<int>(std::lround(t.aim_game * 57.29578f))) +
+                                                            " degrees from his facing as he stood" +
+                                                            (spun ? ", his spin started " +
+                                                                        std::to_string(static_cast<int>(std::lround(wrap_angle(yaw - t.aim_from - t.aim_game) * 57.29578f))) +
+                                                                        " degrees from there"
+                                                                  : std::string())
+                                                      : std::string())
                                   << (turned ? "; " + std::to_string(turned) + " places that turn with him set (held " + std::to_string(held) + " frames, put back " + std::to_string(reset) + ")" : std::string("; nothing found yet that turns with him"))
                                   << (apart ? "; " + std::to_string(apart) + " out of step with his facing as he stood, left alone" : std::string())
+                                  << (t.steer_on    ? std::string()
+                                      : t.body_sign ? "; his physics' turn set " + std::to_string(t.body_set) + " times (held " + std::to_string(t.body_held) + " frames, put back " + std::to_string(t.body_reset) + ")"
+                                                    : std::string(t.body_at ? "; his physics' turn didn't hold his facing, left alone" : "; his physics' turn not found"))
+                                  << (t.steer_on ? "; steered as the game copies it into his physics (" + std::to_string(steered) + " copies turned; the game's own turn was " +
+                                                       std::to_string(static_cast<int>(std::lround(steer_apart * 57.29578f))) + " degrees from his aim" +
+                                                       (spun ? " as his spin started, carried through his spin)" : ", carried on from here)")
+                                                 : std::string())
                                   << places.str() << each.str() << (t.aim_trace.empty() ? std::string() : "\n  frame by frame, his facing as the game had it / what was set (degrees from his own): " + t.aim_trace)
                                   << "\n" << std::flush;
                     }
@@ -8790,6 +10708,7 @@ namespace ingame
                 // (this stand's start: his facing as the game has it, and his facing's places on him)
                 // (nothing set yet: the first frame's look compares only with what this one sets)
                 t.aim_lock = t.aim_from = yaw, t.aim_yaw = std::nanf(""), t.aim_mode = 0, t.aim_mode_frames = t.aim_mode_kept = 0, t.aim_modes = 1;
+                t.aim_game_seen = false;
                 t.facing_places = papu_facing_places(t.papu);
                 // (V1.3.41: what turns with him, from its own reading as he stands; his facing's places it has already left out)
                 for (auto &p : t.turn_places)
@@ -8807,6 +10726,8 @@ namespace ingame
                 }
                 t.aim_trace.clear(), tracing = t.aim_traces < 2;
                 t.aim_traces += tracing;
+                papu_body_start(t, yaw); // (V1.3.42: his physics' turn)
+                papu_steer_start(t, now); // (V1.3.52: steered as the game copies it)
                 // (the first stands of a visit: what each of them holds, and what they are, from the game's own names)
                 if (t.facing_told < 2)
                 {
@@ -8827,6 +10748,8 @@ namespace ingame
                 const auto faces = [&](float a) { return std::abs(wrap_angle(yaw - a)) <= 0.03f; }; // (false for nothing set yet)
                 const bool back = !faces(t.aim_yaw) && !faces(t.aim_prev);
                 ++(back ? t.aim_overridden : t.aim_kept);
+                if (back) // (V1.3.51: where the game itself had him)
+                    t.aim_game = wrap_angle(yaw - t.aim_from), t.aim_game_seen = true;
                 ++t.aim_mode_frames, t.aim_mode_kept += !back;
                 // (the next way, see above: after 10 frames where none stayed and the game had him back at his own facing, or
                 // 30 where none stayed, while he's still turned away from his aim. V1.3.40: a game that follows a frame late, or
@@ -8838,7 +10761,7 @@ namespace ingame
                     // (his facing's places and what turns with him back as the game had them, so they can't be what puts him
                     // back now)
                     if (t.aim_mode == 0)
-                        papu_facing_set(t, yaw, t.aim_from), papu_turn_set(t, 0);
+                        papu_facing_set(t, yaw, t.aim_from), papu_turn_set(t, 0), papu_body_set(t, 0);
                     ++t.aim_mode, t.aim_mode_frames = t.aim_mode_kept = 0, t.aim_modes |= 1u << t.aim_mode;
                 }
             }
@@ -8847,7 +10770,28 @@ namespace ingame
             t.aim_prev = t.aim_yaw, t.aim_last = now, t.aim_wrote = true, t.aim_yaw = yaw;
             if (aiming)
             {
-                const float dx = c[12] - m[12], dy = c[13] - m[13];
+                // V1.3.64 (Eric: "he'll kind of predict where you're going to be based on the movement ... But at the same time,
+                // you still have enough time to react"): aimed at where Crash will be as his slam lands if he keeps going as he
+                // is now (see papu_crash_motion): keep running the same way and it lands on him, turn or stop and it doesn't (his
+                // aim is held from half the time to his slam, as before). V1.3.65 (Eric: V1.3.64's 80% was "like a 50-50 ... I
+                // just want to make it where it's ... just possible still"): all the way. V1.3.66 (Eric: "still pretty hard to
+                // dodge ... maybe we could turn down the accuracy"): /boss_lead (test) sets it. V1.3.67 (Eric: "I think the best
+                // accuracy is 55%"): 55% of the way by default
+                const float slam_s = t.sc_target > 0.1f ? t.sc_target : static_cast<float>(t.slam_normal ? t.slam_normal : 900) / 1000.0f / static_cast<float>(factor);
+                const float lead = static_cast<float>(std::min(state.boss_lead_pct, 120u)) / 100.0f * std::clamp(slam_s - static_cast<float>(since) / 1000.0f, 0.0f, 0.6f);
+                // (V1.3.72, Eric's V1.3.71 run: testing the wall "kind of messes with his face direction": at the wall in front of
+                // the chair Crash can't go on into it, so what of his movement goes that way is left out of the lead; it jitters
+                // there as his physics is set back each frame)
+                float vx = t.crash_v[0], vy = t.crash_v[1];
+                if (state.boss_rules && t.wall_known)
+                {
+                    const float wx = t.wall_dir[0], wy = t.wall_dir[1];
+                    const float f = (c[12] - t.wall_mid[0]) * wx + (c[13] - t.wall_mid[1]) * wy, into = vx * wx + vy * wy;
+                    if (into > 0 && f > wall_front_share * t.wall_span - 30)
+                        vx -= into * wx, vy -= into * wy;
+                }
+                const float dx = c[12] + vx * lead - m[12], dy = c[13] + vy * lead - m[13];
+                t.aim_lead_last = std::hypot(vx, vy) * lead, t.aim_speed_last = std::hypot(vx, vy);
                 const float most = 15.708f * dt;
                 if (std::hypot(dx, dy) >= 1)
                     t.aim_lock = wrap_angle(t.aim_lock + std::clamp(wrap_angle(std::atan2(dy, dx) - t.aim_lock), -most, most));
@@ -8856,11 +10800,14 @@ namespace ingame
             if (tracing && t.aim_trace.size() < 1400)
                 t.aim_trace += (t.aim_trace.empty() ? "" : " ") + std::to_string(static_cast<int>(std::lround(wrap_angle(yaw - t.aim_from) * 57.29578f))) + "/" +
                                std::to_string(static_cast<int>(std::lround(wrap_angle(target - t.aim_from) * 57.29578f)));
+            // (V1.3.52: his turn as the game copies it into his physics, to his aim: his physics' turn goes his facing's way)
+            if (t.steer_on)
+                steer_target = t.steer_sign * target, steer_mode = 1;
             if (t.aim_mode >= 2)
                 return;
             // (nothing set in his places while the watch is on, see papu_who: only the game's own writes are caught)
             if (t.aim_mode == 0 && t.watch_step != 1)
-                papu_facing_set(t, yaw, target), papu_turn_set(t, wrap_angle(target - t.aim_from));
+                papu_facing_set(t, yaw, target), papu_turn_set(t, wrap_angle(target - t.aim_from)), papu_body_set(t, wrap_angle(target - t.aim_from));
             if (std::abs(wrap_angle(target - yaw)) >= 0.0005f && papu_turn_matrix(transform, m, yaw, target))
                 t.aim_yaw = target;
         }
@@ -8872,8 +10819,10 @@ namespace ingame
             if (const auto n = papu_slams.load(); n != t.slams_cycle)
             {
                 t.slams_cycle = n, t.slam_seen_at = now;
-                if (s == 1 && t.stand_seen && !t.rate_written && now - t.stand_seen > 500 && now - t.stand_seen < 3000)
-                    t.slam_normal = t.slam_normal ? std::min(t.slam_normal, now - t.stand_seen) : now - t.stand_seen;
+                // (V1.3.53: as the game plays it: with his stand stepped faster, the time it took times that rate)
+                const auto took = static_cast<std::uint64_t>(static_cast<double>(now - t.stand_seen) * std::max(1.0f, t.slam_rate_used));
+                if (s == 1 && t.stand_seen && !t.rate_written && took > 500 && took < 3000)
+                    t.slam_normal = t.slam_normal ? std::min(t.slam_normal, took) : took;
             }
             if (s == 2 && t.laps_at)
             {
@@ -8902,7 +10851,8 @@ namespace ingame
                 }
             }
             else if (!immune && t.immune_flag && t.timer_lines < 60)
-                ++t.timer_lines, std::cout << "Boss rule: his immunity is over (his can-be-hit flag is back), " << seconds(now - t.immune_since) << " after it started (state " << s
+                ++t.timer_lines, std::cout << "Boss rule: " << (t.flag_held ? "his can-be-hit flag is held by us from here, " : "his immunity is over (his can-be-hit flag is back), ")
+                                           << seconds(now - t.immune_since) << " after it started (state " << s
                                            << (t.cut_done ? ", " + seconds(now - t.cut_at) + " after the cut" : std::string()) << ")\n" << std::flush;
             if (immune && t.timer_start_at && !t.timer_sampled && now - t.timer_start_at >= 300)
             {
@@ -8957,15 +10907,17 @@ namespace ingame
             const auto timer = papu_timer(t);
             if (!timer)
                 line << "its timer isn't there (it runs to its end)", t.cut_checked = true;
+            else if (!t.timer_ticking)
+                // (V1.3.59: nothing written into a timer that doesn't count down: V1.3.58's run, after the cut that set one
+                // below 0 (V1.3.33) the game's next hit didn't run it)
+                line << "its timer doesn't count down (left as the game has it)", t.cut_checked = true;
             else if (!t.timer_down.empty() || t.timer_up.empty())
             {
-                // (V1.3.31's log: its countdown is +0x50. V1.3.33: one run again at the fight's start that doesn't count down
-                // is put below 0, as it wouldn't run out by itself)
+                // (V1.3.31's log: its countdown is +0x50)
                 const auto down = t.timer_down.empty() ? std::vector<unsigned>{0x50} : t.timer_down;
-                const bool still = t.start_timer && t.start_timer_checked && !t.start_timer_ticks;
                 for (const auto off : down)
-                    write(timer + off, still ? -1.0f : 0.02f);
-                line << "its timer's countdown (" << offsets_text(down) << ") set to its end" << (still ? " (below 0: it doesn't count down)" : "");
+                    write(timer + off, 0.02f);
+                line << "its timer's countdown (" << offsets_text(down) << ") set to its end";
             }
             else if (!t.timer_up.empty() && t.timer_length > 0)
             {
@@ -8982,18 +10934,30 @@ namespace ingame
         // after his first hit in this visit) it's run again for that long, and a landing on him is the game's own bounce.
         // Before that (V1.3.33: a landing then was a hit for the game, taken back, with his flinch) his health script's list
         // of the attacks that hurt him is emptied for that red instead (V1.3.34, see papu_list_block)
-        void papu_start_red(BossTuning &t, std::uint64_t now)
+        // V1.3.58: and again (why) once his time to be hit is over, see papu_window
+        // V1.3.59: his immunity's timer run again only while it counts down (the game's immunity of a hit still on, as the
+        // fight starts over after Crash died); one that had ended is left as the game has it (writing into it didn't run it,
+        // and the game's next hit then didn't either), and his health script's list is emptied instead (see papu_rule)
+        void papu_start_red(BossTuning &t, std::uint64_t now, const char *why = nullptr)
         {
-            t.start_red = true, t.red_spun = false, t.slam_wait = false, t.start_timer = false, t.start_timer_ticks = false;
+            t.start_red = true, t.red_spun = false, t.slam_wait = false, t.start_timer = false, t.start_timer_ticks = false, t.window_on = false;
+            t.hit_red = t.hit_hold = false;
             std::ostringstream line;
-            line << "Boss rule: the fight starts; he's red until the slam after his first spin";
-            if (const auto timer = papu_timer(t))
+            if (why)
+                line << "Boss rule: " << why << "; he's red again until the slam after his next spin";
+            else
+                line << "Boss rule: the fight starts; he's red until the slam after his first spin";
+            const auto timer = papu_timer(t);
+            if (timer && t.timer_ticking)
             {
                 const float length = papu_red_time(t);
+                t.timer_kept48 = value<float>(timer + 0x48), t.timer_kept50 = value<float>(timer + 0x50), t.timer_kept = true;
                 write(timer + 0x48, length), write(timer + 0x50, length);
                 t.start_timer = true, t.start_timer_at = now, t.start_timer_set = length, t.start_timer_checked = false;
                 line << "; his immunity's timer runs again for " << length << " s";
             }
+            else if (timer)
+                line << " (his immunity is over and its timer is left as the game has it: his health script's list is emptied instead)";
             else
                 line << " (his immunity's timer isn't made yet, at his first hit: V1.3.34 empties his health script's list instead)";
             std::cout << line.str() << "\n" << std::flush;
@@ -9005,17 +10969,171 @@ namespace ingame
         {
             if (t.cut_lines < 40)
                 ++t.cut_lines, std::cout << "Boss rule: his red ends: " << why << " (" << seconds(now - t.slam_wait_since) << " after his spin)\n" << std::flush;
-            t.slam_wait = false, t.start_red = false;
-            if (immune || t.start_timer)
+            t.slam_wait = false, t.start_red = false, t.hit_red = t.hit_hold = false;
+            // (V1.3.59: also a timer of his that counts down under red held by us; papu_cut writes only into one that does)
+            if (immune || t.start_timer || t.timer_ticking)
                 papu_cut(t, now);
             t.start_timer = false;
+            // (V1.3.58: he can be hit for a while now, see papu_window)
+            t.window_on = true, t.window_until = now + t.window_ms, t.red_skip_spin = false;
+            if (t.window_lines < 40)
+                ++t.window_lines, std::cout << "Boss rule: he can be hit for " << seconds(t.window_ms)
+                                            << (t.window_fixed ? std::string(" (the seed's time)") : " (at " + std::to_string(t.window_percent) + "%)") << ", then he's red again\n" << std::flush;
         }
-        void papu_who(BossTuning &t, int s, std::uint64_t now); // (V1.3.41, below the write watch it uses)
+        // V1.3.58 (Eric: "after his first spin, he's vulnerable maybe for like 5 seconds, and then he's ... red, and then you have
+        // to wait for the other spin cycle"; 5 s to start, less if that's too long): with the boss rules on, once his red ends
+        // he can be hit for /boss_window's time (5 s), then he's red again as at the fight's start (see papu_start_red), until
+        // the slam after his next spin (a spin he's in then doesn't count: red_skip_spin). A hit in that time starts the game's
+        // own immunity as always; the fight starting over, or the rule off, ends it
+        // V1.3.59 (Eric: "the two second is good for 200% speed ... scale it based on the speed"): /boss_window's time is his
+        // time at 200%, and it's longer by the same pace at lower speeds. V1.3.61 (Eric: "make the hit window for 200% speed to
+        // 1.5 seconds"); V1.3.64 (1 s); V1.3.65 (1.3 s); V1.3.66 (1.5 s); V1.3.67 (1.8 s); V1.3.68 (2 s); V1.3.71 (Eric: "make his
+        // hit window to 2.2 instead"): 2.2 s at 200%, 2.51 s at 175%, 2.93 s at 150%, 3.52 s at 125%, 4.4 s at 100%; or the
+        // seed's own time at any speed (its YAML's boss_hit_window).
+        // V1.3.64 (Eric's V1.3.63 clips: after his slam he could be hit into his next spin, turned red in it, and that spin didn't
+        // count, so he stayed red at the slam after it): his time to be hit also ends as his next spin starts, and that spin counts
+        void papu_window(BossTuning &t, const Shared &state, int s, std::uint64_t now)
+        {
+            t.window_percent = std::clamp(state.boss_speed, 100u, 200u), t.window_fixed = state.boss_window_fixed_ms != 0;
+            t.window_ms = t.window_fixed ? std::clamp(state.boss_window_fixed_ms, 500u, 10000u) : std::clamp(state.boss_window_ms, 500u, 10000u) * 200u / t.window_percent;
+            if (!t.window_on)
+                return;
+            if (!state.boss_rules || t.start_red || s == 3 || s == 4 || s == 5 || s == 6)
+            {
+                t.window_on = false;
+                if ((s == 3 || s == 4) && t.window_lines < 40)
+                    ++t.window_lines, std::cout << "Boss rule: hit with " << seconds(t.window_until > now ? t.window_until - now : 0) << " of his time to be hit left\n" << std::flush;
+                return;
+            }
+            if (s != 1 && s != 2)
+                return;
+            if (s == 2)
+            {
+                papu_start_red(t, now, "his spin started, so his time to be hit is over");
+                t.red_skip_spin = false; // (this spin counts: his red ends at the slam after it)
+                return;
+            }
+            if (now < t.window_until)
+                return;
+            papu_start_red(t, now, "his time to be hit is over");
+            t.red_skip_spin = false;
+        }
+        // V1.3.59 (see hit_red): his red after a hit held by us from here (his health script's list emptied and his can-be-hit
+        // flag held clear, see papu_rule), until the slam after his next spin
+        void papu_hit_hold(BossTuning &t, std::uint64_t now, const char *why)
+        {
+            t.hit_hold = true;
+            if (t.hit_hold_lines < 40)
+                ++t.hit_hold_lines, std::cout << "Boss rule: " << why << " (" << seconds(now - t.hit_red_at) << " after his hit): his red goes on, held by us until the slam after his "
+                                              << (t.red_spun ? "spin" : "next spin") << "\n" << std::flush;
+        }
+        // V1.3.62 (Eric: "he can slam maybe 1 to 5 times and then start spinning ... it'll be random"): with the harder rules
+        // on, each stand of his has 1 to 5 slams (at random) before his spin. V1.3.63 (Eric: "at the start of the battle arena,
+        // he'll do one slam, and then he'll spin, he'll do one slam again, and then once you hit him ... He'll do his series
+        // slams, and then he'll spin, and then he'll do one slam again"): only his stand after a hit that counted has them (he's
+        // red through them, his spin and up to the slam after it, as after any hit); every other stand has one slam. After each slam but the last, his stand plays
+        // again from its start: his stand's clocks (see papu_stand_clock) set back by as far as they went, so the game plays
+        // his stand and slam again, aimed and paced again as a new stand; his AI's wait after a slam (iftes1je, which ends in
+        // his spin) is held while it runs, until his last slam, and then it runs as the game has it (cut by his speed). If no
+        // slam comes 2.5 s after his stand was played again, or he stops standing (a hit), the wait is let go the same way.
+        // (Eric: "make sure the red invincibility glow doesn't get affected": only the first slam after a spin ends his red, as
+        // before, see papu_red_end; the others don't count)
+        void papu_multi_slam(BossTuning &t, const Shared &state, int s, std::uint64_t now)
+        {
+            // (his AI's wait after a slam, and whether it counts down now: only one that does is held or set, as writing into
+            // one that had ended kept the game from running it again, see papu_start_red)
+            Address wait = 0;
+            for (const auto &a : t.ai_timers)
+                if (a.id == "iftes1je")
+                    if (const auto timer = value<Address>(t.papu_ai + a.at); timer && typed(timer, 0x17610b8))
+                        wait = timer;
+            const float left = wait ? value<float>(wait + 0x50) : 0.0f, length = wait ? value<float>(wait + 0x48) : 0.0f;
+            if (wait != t.ms_wait_seen)
+                t.ms_wait_tick_at = 0;
+            else if (std::isfinite(left) && left < t.ms_wait_last - 0.0005f)
+                t.ms_wait_tick_at = now;
+            t.ms_wait_seen = wait, t.ms_wait_last = left;
+            const bool ticking = wait && t.ms_wait_tick_at && now - t.ms_wait_tick_at < 150 && std::isfinite(left) && left > 0.02f;
+            const unsigned percent = std::clamp(state.boss_speed, 100u, 200u);
+            const auto let_go = [&](const std::string &why) {
+                if (t.ms_holding && ticking && std::isfinite(length) && length > 0 && length < 60)
+                    write(wait + 0x50, std::min(left, length * 100.0f / static_cast<float>(percent)));
+                t.ms_holding = false;
+                if (!why.empty() && t.ms_lines < 40)
+                    ++t.ms_lines, std::cout << "Boss pattern: " << why << "\n" << std::flush;
+            };
+            if (s == 5 || s == 6 || !state.boss_rules)
+                t.ms_due = false; // (the fight starts over, or the rule is off)
+            if (s != 1 || !state.boss_rules || !t.papu_ai)
+            {
+                if (t.ms_holding)
+                    let_go(s == 1 ? "the harder rules are off: his wait after his slam let go" : "he stopped standing (state " + std::to_string(s) + "): his wait after his slam let go");
+                t.ms_stand = 0;
+                return;
+            }
+            if (t.ms_stand != t.state_since)
+            {
+                // (a stand of his: how many slams; 1 to 5 after a hit that counted, one otherwise)
+                static std::mt19937 rng{std::random_device{}()};
+                t.ms_stand = t.state_since, t.ms_done = 0, t.ms_holding = false, t.ms_slams_seen = papu_slams.load();
+                t.ms_total = t.ms_due && wait ? std::uniform_int_distribution<int>(2, 5)(rng) : 1; // (V1.3.64, Eric: "2 to 5")
+                if (t.ms_due && t.ms_lines < 40)
+                    ++t.ms_lines, std::cout << "Boss pattern: after his hit, " << t.ms_total << (t.ms_total == 1 ? " slam" : " slams") << " in this stand"
+                                            << (wait ? "" : " (his AI's wait after a slam isn't found yet: one)") << "\n" << std::flush;
+                t.ms_due = false;
+            }
+            if (const auto slams = papu_slams.load(); slams != t.ms_slams_seen)
+            {
+                t.ms_slams_seen = slams, ++t.ms_done;
+                if (t.ms_done >= t.ms_total)
+                {
+                    // (his last: his wait runs as the game has it)
+                    let_go(t.ms_total > 1 ? "his slam " + std::to_string(t.ms_done) + " of " + std::to_string(t.ms_total) + ": his spin next" : std::string());
+                    return;
+                }
+                // (his stand from its start again: his clocks set back by as far as the first went, to 0.02 s)
+                const float first = t.sc_clocks.empty() ? 0.0f : value<float>(t.sc_clocks[0].first);
+                if (!std::isfinite(first) || first < 0.3f || first > 5)
+                {
+                    t.ms_total = t.ms_done;
+                    let_go("his slam " + std::to_string(t.ms_done) + ": his stand's clocks aren't known in this stand, so no more slams; his spin next");
+                    return;
+                }
+                const float back = first - 0.02f;
+                for (const auto &c : t.sc_clocks)
+                    if (const float v = value<float>(c.first); std::isfinite(v) && v > 0 && v < 30)
+                        write(c.first, std::max(0.0f, v - back));
+                t.ms_holding = true, t.ms_rewound_at = now;
+                // (a new stand for his slam's pace and his aim, see papu_stand_clock and papu_aim, with the slam just seen before
+                // it; his red isn't touched)
+                t.stand_seen = t.stand_at = now, t.slam_seen_at = now - 1, t.aim_wrote = false;
+                if (t.ms_lines < 40)
+                    ++t.ms_lines, std::cout << "Boss pattern: his slam " << t.ms_done << " of " << t.ms_total << "; his stand plays again from its start (his clocks back "
+                                            << std::to_string(back).substr(0, 4) << " s)\n" << std::flush;
+            }
+            // (held while it counts down, until his next slam)
+            if (t.ms_holding && ticking && left < 2.0f)
+                write(wait + 0x50, 5.0f);
+            if (t.ms_holding && now - t.ms_rewound_at > 2500)
+            {
+                t.ms_total = t.ms_done;
+                let_go("no slam came 2.5 s after his stand was played again: his wait let go, his spin next");
+            }
+        }
+        void papu_who(BossTuning &t, int s, std::uint64_t now);         // (V1.3.41, below the write watch it uses)
+        void papu_stand_clock(BossTuning &t, int s, std::uint64_t now); // (V1.3.56, the same)
         void papu_who_off(BossTuning &t, const char *why);
         void papu_rule(BossTuning &t, const Shared &state, std::uint64_t now)
         {
             if (!t.papu || !t.papu_ai || !event_owner(t.papu))
+            {
+                // (V1.3.68: no wall without him, see papu_wall; V1.3.69, after the code review: nor its watch; V1.3.74: nor in
+                // the stick)
+                wall_live = false, wall_stick_on = false, wall_shown = false; // (V1.3.79: nor drawn)
+                if (wall_arm_address.load() || wall_place.load())
+                    papu_wall_off();
                 return;
+            }
             papu_entity = t.papu;
             const int s = value<int>(t.papu_ai + t.state_at);
             // V1.3.31: his immunity as the game has it: his actor's can-be-hit flag (+0x7c, 0x8). V1.3.29's log: it clears at
@@ -9023,6 +11141,19 @@ namespace ingame
             // (V1.3.34: not while we hold it clear ourselves, see papu_list_block)
             const bool immune = (value<std::uint32_t>(t.papu + 0x7c) & 0x8) == 0 && !t.flag_held;
             papu_lists(t);
+            // (V1.3.59) whether his immunity's timer counts down now: its time left (+0x50) gone down in the last 0.15 s
+            if (const auto timer = papu_timer(t))
+            {
+                const float left = value<float>(timer + 0x50);
+                if (timer != t.timer_seen)
+                    t.timer_tick_at = 0;
+                else if (std::isfinite(left) && left < t.timer_seen50 - 0.0005f)
+                    t.timer_tick_at = now;
+                t.timer_seen = timer, t.timer_seen50 = left;
+                t.timer_ticking = t.timer_tick_at && now - t.timer_tick_at < 150 && std::isfinite(left) && left > 0.02f;
+            }
+            else
+                t.timer_seen = 0, t.timer_tick_at = 0, t.timer_ticking = false;
             probe_state_at = t.papu_ai + t.state_at;
             probe_timer_at = t.hh && t.hh_timer_at && typed(t.hh, 0x13bbbd0) ? t.hh + t.hh_timer_at : 0;
             probe_damage_at = t.health_part && typed(t.health_part, 0x14da2c0) ? t.health_part + 0x310 : 0;
@@ -9074,9 +11205,7 @@ namespace ingame
             papu_speed_timers(t, percent, s);
             // V1.3.41: what turns with him, looked for in his first spins of a visit (see papu_turn_research; before his state
             // is noted, so his spin's start is seen)
-#ifndef CRASH_NST_STABLE
-            papu_turn_research(t, s, now, state.boss_rules != 0); // (not in the Stable build: research for the aim)
-#endif
+            papu_turn_research(t, s, now, state.boss_rules != 0); // (what the aim needs; V1.4: in the Stable build too)
             // (after the code review: when the fight starts over from his throne his parts may be new, so what was found is
             // looked for again)
             if (s == 6 && (t.turn_spins || !t.turn_places.empty() || t.turn_tracking))
@@ -9099,7 +11228,12 @@ namespace ingame
                     t.blocked_told = now, t.blocked_seen = boss_blocked.load();
                 }
                 else if (s == 3 || s == 4)
+                {
                     t.valid_hit_at = now; // (a hit that counts)
+                    // V1.3.59: red after it is ours too, until the slam after his next spin (see hit_red)
+                    if (state.boss_rules && s == 3 && !t.was_red)
+                        t.hit_red = true, t.hit_hold = false, t.hit_red_at = now, t.red_spun = false, t.slam_wait = false, t.red_skip_spin = false, t.ms_due = true;
+                }
                 // (V1.3.30) any hit the game takes starts its immunity, as long as it's set for that hit
                 if (s == 3 || s == 4)
                 {
@@ -9114,10 +11248,17 @@ namespace ingame
                 if (s == 5 && t.state != 5 && state.boss_rules)
                     papu_start_red(t, now);
                 // V1.3.32: his first spin since he turned red is over: red ends with the slam after it (see papu_red_end)
-                if (t.state == 2 && s == 1 && (immune || t.start_red) && state.boss_rules && !t.red_spun)
+                // (V1.3.58: a spin he was in as he turned red again doesn't count, see papu_window)
+                // (V1.3.59: and red after a hit, ours too)
+                if (t.state == 2 && s == 1 && (immune || t.start_red || t.hit_red) && state.boss_rules && !t.red_spun && t.red_skip_spin)
+                    t.red_skip_spin = false;
+                else if (t.state == 2 && s == 1 && (immune || t.start_red || t.hit_red) && state.boss_rules && !t.red_spun)
                     t.red_spun = true, t.slam_wait = true, t.slam_wait_since = now, t.slams_seen = papu_slams.load();
                 else if (t.state == 1 && s == 2 && t.slam_wait)
                     papu_red_end(t, immune, now, "his next spin started before a slam");
+                // V1.3.59: up after a hit while the game's immunity timer of it doesn't count down: red held by us from here
+                if (t.state == 3 && s == 1 && t.hit_red && !t.hit_hold && !t.timer_ticking && state.boss_rules)
+                    papu_hit_hold(t, now, "he's up, and the game's immunity timer of his hit doesn't count down");
                 // research: what in his health part changed since the last state began
                 if (!t.health_part || !typed(t.health_part, 0x14da2c0))
                 {
@@ -9205,16 +11346,24 @@ namespace ingame
                 t.immune_until = 0; // the fight starts over (Crash died)
             if (s != 3)
                 t.forbidden = false;
+            if (s == 6 || !state.boss_rules)
+                t.hit_red = t.hit_hold = false; // (V1.3.59: the fight over, or the rule off)
             // V1.3.35: his moves timed, what plays them looked for, his slam at the speed (see papu_cycle, papu_clocks and
             // papu_slam_rate), his spin speed looked for a little into each spin (research, see papu_spin_search); and when the
             // fight starts over from his throne, what was found in his parts is looked for again
             papu_cycle(t, s, now);
             papu_clocks(t, s, now);
-#ifndef CRASH_NST_STABLE
-            // (not in the Stable build: his slam's speed is still being looked for, and the aim's spin start still jumps)
+            // (his slam's speed (V1.3.53: his animation stepped faster as he stands, see papu_slam_speed; V1.3.35's search for
+            // it only while that isn't on), the slam aim and the wall; V1.4: in the Stable build too)
+            papu_slam_speed(t, s, percent, state.boss_slam_ms, state.boss_slam_fixed_ms, state.boss_rules != 0);
+            papu_stand_clock(t, s, now);        // (V1.3.56)
+            papu_multi_slam(t, state, s, now); // (V1.3.62)
             papu_slam_rate(t, s, percent, now);
+            papu_crash_motion(t); // (V1.3.64)
+            papu_chair(t, state, s, now);
+            papu_wall(t, state, s, now); // (V1.3.68)
             papu_aim(t, state, s, now);
-#endif
+            papu_reverse(t, state, s, now); // (V1.3.60)
             papu_who(t, s, now);
             if (t.spin_search_due && now >= t.spin_search_due)
             {
@@ -9229,14 +11378,27 @@ namespace ingame
                 papu_red_end(t, immune, now, "his slam");
             else if (t.slam_wait && now - t.slam_wait_since >= 2500)
                 papu_red_end(t, immune, now, "no slam 2.5 s after his spin");
+            papu_window(t, state, s, now); // (V1.3.58)
+            // V1.3.59: the game's immunity of his hit over before his red is (his can-be-hit flag is the game's and back): red
+            // held by us from here (see hit_red)
+            if (t.hit_red && !t.hit_hold && (s == 1 || s == 2) && !immune && state.boss_rules)
+                papu_hit_hold(t, now, "the game's immunity of his hit is over before his red");
             if (t.start_timer && !t.start_timer_checked && now - t.start_timer_at >= 300)
             {
                 t.start_timer_checked = true;
                 const auto timer = papu_timer(t);
                 const float left = timer ? value<float>(timer + 0x50) : 0.0f;
                 t.start_timer_ticks = timer && std::isfinite(left) && left > 0 && left < t.start_timer_set - 0.15f;
-                std::cout << "Boss rule: his immunity's timer " << (t.start_timer_ticks ? "runs again" : "doesn't count down (it had ended): red goes on without it")
-                          << " (" << left << " of " << t.start_timer_set << " s left " << seconds(now - t.start_timer_at) << " in)\n" << std::flush;
+                // (V1.3.59: one that doesn't count down is put back as the game had it, and his red is held by us instead)
+                const bool put_back = !t.start_timer_ticks && timer && t.timer_kept;
+                if (put_back)
+                    write(timer + 0x48, t.timer_kept48), write(timer + 0x50, t.timer_kept50);
+                if (!t.start_timer_ticks)
+                    t.start_timer = false;
+                t.timer_kept = false;
+                std::cout << "Boss rule: his immunity's timer " << (t.start_timer_ticks ? "runs again" : "doesn't count down: red goes on without it") << " (" << left << " of "
+                          << t.start_timer_set << " s left " << seconds(now - t.start_timer_at) << " in)" << (put_back ? "; its numbers put back as the game had them" : "") << "\n"
+                          << std::flush;
             }
             // V1.3.34: red without the game's immunity (no timer yet, or one that didn't run again): his health script's list
             // emptied and his can-be-hit flag held clear for as long as that red lasts (see papu_list_block); back as red ends,
@@ -9245,18 +11407,24 @@ namespace ingame
                 const auto timer = papu_timer(t);
                 // (a timer run again at the fight's start is checked 300 ms in: until then the block stays as it is)
                 const bool pending = t.start_timer && !t.start_timer_checked;
-                const bool no_immunity = !timer || (t.start_timer && t.start_timer_checked && !t.start_timer_ticks);
+                // (V1.3.59: his timer not run again, see papu_start_red)
+                const bool no_immunity = !timer || !t.start_timer || (t.start_timer_checked && !t.start_timer_ticks);
                 // (a hit the game took anyway: his flinch, or a timer the game made at it while the block was on)
                 const bool came_hit = s == 3 || s == 4 || (timer && list_block_now.list && !t.block_had_timer);
-                const bool want = state.boss_rules && t.lists_done && t.start_red && no_immunity && !came_hit && s != 6;
+                // (V1.3.59: and red after a hit, once it's held by us, see hit_red)
+                const bool hit_want = t.hit_red && t.hit_hold && (s == 1 || s == 2);
+                const bool want = state.boss_rules && t.lists_done && ((t.start_red && no_immunity) || hit_want) && !came_hit && s != 6;
                 if (!pending && want != (list_block_now.list != 0))
                 {
                     if (want)
-                        papu_list_block(t, true, now, !timer ? "no timer of his yet: his first fight in this visit" : "his timer didn't run again");
+                        papu_list_block(t, true, now, hit_want && !t.start_red ? "after his hit, the game's immunity is over before his red"
+                                                      : !timer                 ? "no timer of his yet: his first fight in this visit"
+                                                                               : "his timer isn't running");
                     else
                         papu_list_block(t, false, now, came_hit ? "a hit came anyway (the game's own immunity runs now)" : !state.boss_rules ? "the red rule is off"
                                                                                                                          : s == 6 ? "the fight starts over from his throne"
-                                                                                                                         : !t.start_red ? "his red is over" : "his timer runs again");
+                                                                                                                         : !t.start_red && !t.hit_red ? "his red is over"
+                                                                                                                                                      : "his timer runs again");
                 }
                 if (list_block_now.list && typed(t.papu, 0x1592220))
                 {
@@ -9283,7 +11451,8 @@ namespace ingame
             // V1.3.30: for as long as the game's immunity of that hit lasts. V1.3.31: as the game has it, his can-be-hit flag
             // (see papu_immune_watch), which papu_cut ends with his first spin after the hit (Eric: "once the cycle is
             // done"): he can't be hit whenever he's red, and can be as soon as he isn't
-            const bool red = state.boss_rules && (((immune || t.start_red) && (s == 1 || s == 2)) || (t.start_red && s == 5) || (t.forbidden && s == 3));
+            // (V1.3.59: and after a hit until the slam after his next spin, also once the game's immunity of it is over, see hit_red)
+            const bool red = state.boss_rules && (((immune || t.start_red || t.hit_red) && (s == 1 || s == 2)) || (t.start_red && s == 5) || (t.forbidden && s == 3));
             // (red's end, to see how it fits his spin: the state then, and how long he's been in it)
             if (t.red && !red && t.red_lines < 80)
                 ++t.red_lines, std::cout << "Boss rule: he's not red any more, " << (t.game_hit_at ? seconds(now - t.game_hit_at) : std::string("?")) << " after his hit ("
@@ -9390,6 +11559,15 @@ namespace ingame
                 const auto [aku, out] = aku_manager_state(player());
                 std::cout << "Boss rule: a second after Crash's hit, Aku's manager is in state " << aku << (out ? ", his mask still on screen" : ", no mask on screen")
                           << " (" << t.hit_masks << " masks before)\n" << std::flush;
+                // (V1.3.82: the mask's hit didn't take, nothing changed and he isn't blinking: he had none to lose, so the
+                // landing costs him his life, see boss_rule_hit)
+                if (aku == t.hit_aku_state && out == t.hit_aku_out && crash_game_flag("DamagedInvulnerable") != 1 && !crash_dead_now())
+                {
+                    std::ostringstream line;
+                    line << "Boss rule: the mask's hit didn't take (Aku's manager as before, Crash not blinking): he had none to lose";
+                    boss_rule_hit(t, line, true);
+                    std::cout << line.str() << "\n" << std::flush;
+                }
             }
             if (red != t.red)
             {
@@ -9478,6 +11656,10 @@ namespace ingame
                 // (V1.3.34) his health script's list as the game had it, if it's still there
                 id_list_restore("the fight was left");
                 papu_who_off(t, "the fight was left"); // (V1.3.41: never left on past his objects)
+                papu_steer_off(), papu_slam_off();     // (V1.3.52, V1.3.53: the same)
+                papu_wall_off();                       // (V1.3.68: the wall's watch on Crash's physics, see papu_wall)
+                wall_stick_on = false, wall_stick_cut = 0; // (V1.3.74: and in the stick, see papu_wall_stick)
+                wall_shown = false;                         // (V1.3.79: and drawn, see wall_outline)
                 t = {};
                 t.level = boss, t.entered = now;
                 // (V1.3.28) Papu Papu's stomps from here on only
@@ -9506,6 +11688,9 @@ namespace ingame
             // (V1.3.41, after the code review: the watch on his facing's place never outlives him, see papu_who)
             if (t.watch_step == 1 && (boss != "B101" || !t.papu || !event_owner(t.papu) || now - t.watch_at > 1500))
                 papu_who_off(t, "he's gone, or 1.5 s went by");
+            // (V1.3.52: nor the steering, see papu_steer)
+            if ((steer_body.load() || slam_body.load()) && (boss != "B101" || !t.papu || !event_owner(t.papu)))
+                t.steer_on = false, papu_steer_off(), papu_slam_off();
             if (boss == "B101")
                 papu_rule(t, state, now);
             stretch_bar_fill(t, state, now);
@@ -9562,6 +11747,9 @@ namespace ingame
                         t.hit_count_at = field_offset(meta, "InternalStore__internalCounter_id_e24taaam", 4);
                         if (t.state_at)
                             t.papu = owner, t.papu_ai = c, t.state = -1;
+                        // (V1.3.52: his objects made again: the steering lets go of his old physics, see papu_steer)
+                        if (t.state_at)
+                            t.steer_on = false, papu_steer_off(), papu_slam_off(), t.slam_stand = 0;
                         // V1.3.34: his AI's timers, its waits (see papu_speed_timers)
                         t.ai_timers.clear();
                         const unsigned count = value<unsigned>(meta + 24);
@@ -11279,6 +13467,12 @@ namespace ingame
             unsigned count = 0;
             DWORD thread = 0;
             WhoFrame frames[20]{};
+            // (V1.3.51) the registers the frames leave out, as the write was caught (the game's code may have just read what
+            // it writes through one of them), and at the game's physics step (+0xf8fa38, see steer_copy) the 48 bytes it was
+            // copying then, from rdx
+            std::uint64_t rax = 0, rcx = 0, rdx = 0, r8 = 0, r9 = 0, r10 = 0, r11 = 0;
+            std::array<float, 12> copied{};
+            bool copied_read = false;
         };
         WhoCapture who_captures[6];
         std::atomic_uint who_count{0}, who_hits{0};
@@ -11305,6 +13499,14 @@ namespace ingame
                 return;
             auto &cap = who_captures[i];
             cap.value = v, cap.thread = GetCurrentThreadId();
+            cap.rax = context.Rax, cap.rcx = context.Rcx, cap.rdx = context.Rdx, cap.r8 = context.R8, cap.r9 = context.R9, cap.r10 = context.R10, cap.r11 = context.R11;
+            cap.copied_read = false;
+            if (context.Rip == base() + 0xf8fa3d && context.Rdx >= 0x10000 && !(context.Rdx & 15))
+            {
+                SIZE_T got = 0;
+                cap.copied_read = ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void *>(context.Rdx), cap.copied.data(), sizeof cap.copied, &got) &&
+                                  got == sizeof cap.copied;
+            }
             CONTEXT c = context;
             unsigned n = 0;
             for (; n < 20 && c.Rip >= 0x10000 && c.Rsp; ++n)
@@ -11327,18 +13529,218 @@ namespace ingame
             cap.count = n;
             who_count = i + 1;
         }
+        // (V1.3.52, see steer_copy) the watch on his physics' turn stopped just after a store into it: when it's the game's copy
+        // (+0xf8fa38, its rax + rcx his physics' data), the turn it stored (still in xmm1) is noted, changed, and stored again
+        // (the second stop is let through)
+        void steer_apply(CONTEXT &c)
+        {
+            const auto body = steer_body.load(std::memory_order_acquire);
+            if (!body || c.Rip != base() + steer_after || c.Rax + c.Rcx != body)
+                return;
+            if (steer_rewound.exchange(false))
+                return; // (ours, stored again)
+            float q[4];
+            std::memcpy(q, &c.Xmm1, sizeof q);
+            if (!std::isfinite(q[0]) || !std::isfinite(q[1]) || !std::isfinite(q[2]) || !std::isfinite(q[3]))
+                return;
+            const float game = 2 * std::atan2(q[2], q[3]);
+            steer_game.store(game, std::memory_order_relaxed);
+            steer_copies.fetch_add(1, std::memory_order_relaxed);
+            const int mode = steer_mode.load(std::memory_order_acquire);
+            const float d = mode == 1   ? wrap_angle(steer_target.load(std::memory_order_relaxed) - game)
+                            : mode == 2 ? steer_delta.load(std::memory_order_relaxed)
+                            : mode == 3 ? wrap_angle(steer_delta.load(std::memory_order_relaxed) + 2 * wrap_angle(steer_pivot.load(std::memory_order_relaxed) - game))
+                                        : 0.0f;
+            if (!std::isfinite(d) || std::abs(d) < 1e-5f)
+                return;
+            // (turned about his up axis by d: a quaternion about z, times his)
+            const float h = d / 2, sh = std::sin(h), ch = std::cos(h);
+            const float r[4]{ch * q[0] - sh * q[1], ch * q[1] + sh * q[0], ch * q[2] + sh * q[3], ch * q[3] - sh * q[2]};
+            std::memcpy(&c.Xmm1, r, sizeof r);
+            c.Rip = base() + steer_copy;
+            steer_rewound = true;
+            steer_turned.fetch_add(1, std::memory_order_relaxed);
+        }
+        // (V1.3.53, see slam_step) the breakpoint before a character's animation step is stored: the store done here, Papu
+        // Papu's step longer as he stands, and on past it (so it doesn't stop there again)
+        void slam_apply(CONTEXT &c)
+        {
+            slam_hits.fetch_add(1, std::memory_order_relaxed);
+            float dt = 0;
+            std::memcpy(&dt, &c.Xmm0, sizeof dt);
+            const auto data = slam_body.load(std::memory_order_acquire);
+            std::uint64_t body = 0;
+            // (V1.3.54: his by where his slot's body leads, read safely; see slam_body)
+            if (data && read(static_cast<Address>(c.Rdx), body) && body >= 0x10000)
+            {
+                bool his = body == slam_seen.load(std::memory_order_relaxed);
+                if (!his)
+                {
+                    std::uint64_t holder = 0, record = 0;
+                    std::int16_t offset = 0;
+                    his = read(static_cast<Address>(body + 0x30), holder) && holder >= 0x10000 && read(static_cast<Address>(holder), record) && record >= 0x10000 &&
+                          read(static_cast<Address>(record + 0x14), offset) && record + static_cast<std::uint64_t>(static_cast<std::int64_t>(offset)) == data;
+                    if (his)
+                        slam_seen = body;
+                }
+                if (his)
+                {
+                    slam_steps.fetch_add(1, std::memory_order_relaxed);
+                    slam_dt.store(dt, std::memory_order_relaxed);
+                    float frame = 0;
+                    std::int32_t layer = -1;
+                    if (read(static_cast<Address>(c.R15 + 0x48), frame))
+                        slam_frame_dt.store(frame, std::memory_order_relaxed);
+                    if (read(static_cast<Address>(c.R15 + 0x4c), layer) && layer >= 0 && layer < 32)
+                        slam_layers.fetch_or(1u << layer, std::memory_order_relaxed);
+                    // (V1.3.55: the layer's node and item, see slam_nodes)
+                    if (layer >= 0 && layer < 16)
+                    {
+                        std::uint64_t item = 0;
+                        slam_nodes[static_cast<std::size_t>(layer)].store(c.Rcx, std::memory_order_relaxed);
+                        if (read(static_cast<Address>(c.Rsp + 0x70), item))
+                            slam_items[static_cast<std::size_t>(layer)].store(item, std::memory_order_relaxed);
+                    }
+                    const float rate = slam_rate.load(std::memory_order_relaxed);
+                    if (rate > 1.0f && rate <= 2.0f && std::isfinite(dt) && dt > 0)
+                        dt *= rate, slam_faster.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            *reinterpret_cast<float *>(c.Rsp + 0x20) = dt;
+            c.Rip += 6;
+        }
+        // (V1.3.68, see papu_wall) the wall's watch stopped just after a store into the watched place: with the wall on and
+        // the place in it, the place is set out of it right here, in the thread that stored it, before anything reads it. (A
+        // store more than 300 from the last one is left alone: a teleport, or that memory is something else's now.) V1.3.69,
+        // after the code review: our own setting stops the watch again and is let through (V1.3.68's could stop it again and
+        // again: a point set onto the wall's line could read back a hair inside it); nothing is read until the wall is on and
+        // the stop is on the place watched now, and it's read the safe way (the watch only says its own 8 bytes are there)
+        void wall_apply(const CONTEXT &c)
+        {
+            if (wall_setting_thread.load(std::memory_order_relaxed) == GetCurrentThreadId())
+                return;
+            const auto at = wall_place.load(std::memory_order_acquire), watched = wall_arm_address.load(std::memory_order_relaxed);
+            if (!at || !watched || c.Dr3 != watched)
+                return;
+            if (!wall_live.load(std::memory_order_relaxed))
+            {
+                wall_last_known.store(false, std::memory_order_relaxed); // (from scratch when it's on again)
+                return;
+            }
+            wall_stores.fetch_add(1, std::memory_order_relaxed);
+            const int kind = wall_kind.load(std::memory_order_relaxed);
+            // V1.3.76 (see finite_bits): what was stored has to be able to be where Crash is (no number too small for its kind,
+            // as an address's top half is, from the bits: this thread may take such numbers as 0; none past 10 km), and (see
+            // below) near where he's drawn; anything else is left alone
+            double x = 0, y = 0;
+            bool finite = true, small = false;
+            if (kind == 1)
+            {
+                std::array<std::uint64_t, 2> b{};
+                if (!read(static_cast<Address>(at), b))
+                    return;
+                for (const auto w : b)
+                    finite = finite && finite_bits(w), small = small || too_small_bits(w);
+                std::memcpy(&x, &b[0], sizeof x), std::memcpy(&y, &b[1], sizeof y);
+            }
+            else
+            {
+                std::array<std::uint32_t, 2> b{};
+                if (!read(static_cast<Address>(at), b))
+                    return;
+                float f[2]{};
+                for (const auto w : b)
+                    finite = finite && finite_bits(w), small = small || too_small_bits(w);
+                std::memcpy(f, b.data(), sizeof f);
+                x = f[0], y = f[1];
+            }
+            if (!finite)
+                return;
+            if (small || std::abs(x) > 1e4 || std::abs(y) > 1e4)
+            {
+                wall_last_known.store(false, std::memory_order_relaxed);
+                return;
+            }
+            const float px = static_cast<float>(x / body_meters), py = static_cast<float>(y / body_meters);
+            const bool known = wall_last_known.load(std::memory_order_relaxed), was_set = wall_last_set.load(std::memory_order_relaxed);
+            const float step = std::hypot(px - wall_lx.load(std::memory_order_relaxed), py - wall_ly.load(std::memory_order_relaxed));
+            const auto keep = [&](float lx, float ly, bool set) {
+                wall_lx.store(lx, std::memory_order_relaxed), wall_ly.store(ly, std::memory_order_relaxed);
+                wall_last_known.store(true, std::memory_order_relaxed), wall_last_set.store(set, std::memory_order_relaxed);
+            };
+            // (V1.3.76: within 60 of where he was drawn this frame: his physics is a frame's run from it at most; after the code
+            // review, not 150, so less of what isn't his can pass)
+            const float from_drawn = std::hypot(px - wall_cx.load(std::memory_order_relaxed), py - wall_cy.load(std::memory_order_relaxed));
+            if (!known || !(step <= 300) || !(from_drawn <= 60))
+                return keep(px, py, false);
+            const float mx = wall_mx.load(std::memory_order_relaxed), my = wall_my.load(std::memory_order_relaxed);
+            const float ux = wall_ux.load(std::memory_order_relaxed), uy = wall_uy.load(std::memory_order_relaxed);
+            const float ax = px - mx, ay = py - my;
+            float tf = 0, tl = 0;
+            const float depth = std::hypot(ax, ay) > 1500 ? 0.0f
+                                                           : wall_push(ax * ux + ay * uy, ay * ux - ax * uy, wall_front.load(std::memory_order_relaxed), tf, tl);
+            if (!(depth > 0))
+                return keep(px, py, false);
+            // (how far this store went from the last one set out of the wall: small if the physics goes on from this place)
+            if (was_set)
+                for (float went = wall_far.load(std::memory_order_relaxed); step > went && !wall_far.compare_exchange_weak(went, step, std::memory_order_relaxed);)
+                {
+                }
+            const float tx = mx + tf * ux - tl * uy, ty = my + tf * uy + tl * ux;
+            wall_setting_thread.store(GetCurrentThreadId(), std::memory_order_relaxed);
+            if (kind == 1)
+            {
+                const double v[2]{tx * static_cast<double>(body_meters), ty * static_cast<double>(body_meters)};
+                std::memcpy(reinterpret_cast<void *>(at), v, sizeof v);
+            }
+            else
+            {
+                const float v[2]{tx * body_meters, ty * body_meters};
+                std::memcpy(reinterpret_cast<void *>(at), v, sizeof v);
+            }
+            wall_setting_thread.store(0, std::memory_order_relaxed);
+            keep(tx, ty, true);
+            wall_stops.fetch_add(1, std::memory_order_relaxed);
+        }
+        // V1.3.73: every watch's debug register as it's meant to be now, from the watches' own addresses: the research watch's
+        // (0, see who_debug_registers), the steering's and the slam's (1 and 2, see steer_dr7) and the wall's (3, see
+        // wall_debug_register). Eric's V1.3.71 and V1.3.72 runs: in 3 of the 4 aimed stands where the wall's watch went on a
+        // new place, Papu Papu's turn as the game copies it into his physics stopped being steered (6 copies turned, or none,
+        // for about 70 in a stand), and his spin started up to 73 degrees from his aim ("it kind of messes with his face
+        // direction"). Windows puts back the registers a stop saved as the handler returns, so a thread in the handler as a
+        // watch was set in every thread could keep the old ones, and each setting of one register wrote the others back as
+        // it read them then. Now each setting writes all of them, and so does every return from the handler (V1.3.69's
+        // wall_keep_register, for the wall's alone); nothing else in the game uses them
+        // (V1.4: the watches as they are now, all four: the research watch's, the steering's, the slam's, the wall's)
+        using Watches = std::array<std::uint64_t, 4>;
+        Watches watches_now()
+        {
+            return {who_arm_address.load(), steer_arm_address.load(), slam_arm_address.load(), wall_arm_address.load()};
+        }
+        void debug_registers_set(CONTEXT &c, const Watches &w)
+        {
+            const auto who = w[0], wall = w[3];
+            DWORD64 dr7 = who ? 1ULL | (1ULL << 16) | (2ULL << 18) : 0, dr1 = 0, dr2 = 0;
+            steer_dr7(dr1, dr2, dr7, w[1], w[2]);
+            if (wall)
+                dr7 |= (1ULL << 6) | (1ULL << 28) | (2ULL << 30);
+            c.Dr0 = who, c.Dr1 = dr1, c.Dr2 = dr2, c.Dr3 = wall, c.Dr7 = dr7;
+            c.ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+        }
+        void debug_registers_now(CONTEXT &c)
+        {
+            debug_registers_set(c, watches_now());
+        }
+        LONG who_single_step(CONTEXT *context, std::uint64_t page);
         LONG CALLBACK who_handler(EXCEPTION_POINTERS *e)
         {
             auto *record = e->ExceptionRecord;
             auto *context = e->ContextRecord;
-            if (record->ExceptionCode == who_arm_code)
+            // (this thread's watches set: the steering's and the slam's, (V1.3.68) the wall's, the research watch's; V1.3.73:
+            // all of them as they're meant to be now, whichever was set, see debug_registers_now)
+            if (record->ExceptionCode == steer_arm_code || record->ExceptionCode == wall_arm_code || record->ExceptionCode == who_arm_code)
             {
-                const auto at = who_arm_address.load();
-                if (at)
-                    context->Dr0 = at, context->Dr7 = (context->Dr7 & ~0xF0003ULL) | 1ULL | (1ULL << 16) | (2ULL << 18);
-                else
-                    context->Dr0 = 0, context->Dr7 &= ~0xF0003ULL;
-                context->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+                debug_registers_now(*context);
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
             const auto page = who_page.load();
@@ -11351,6 +13753,42 @@ namespace ingame
             }
             if (record->ExceptionCode != EXCEPTION_SINGLE_STEP)
                 return EXCEPTION_CONTINUE_SEARCH;
+            // (V1.3.69: and the wall's watch kept as it is now in every thread going on from here; V1.3.73: every watch, see
+            // debug_registers_now)
+            const LONG result = who_single_step(context, page);
+            if (result == EXCEPTION_CONTINUE_EXECUTION)
+                debug_registers_now(*context);
+            return result;
+        }
+        LONG who_single_step(CONTEXT *context, std::uint64_t page)
+        {
+            // (V1.3.68) the wall's watch, see wall_apply (and on to the others if one of theirs is in the same stop; ours either
+            // way, never passed on; V1.3.69, after the code review: only with debug register 3 on, not a status bit left over)
+            const bool wall_stop = (context->Dr6 & 8) && (context->Dr7 & 0x40);
+            if (wall_stop)
+            {
+                context->Dr6 &= ~8ULL;
+                wall_apply(*context);
+                if (!(context->Dr6 & (0xFULL | 0x4000ULL)))
+                    return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            // (V1.3.53) the slam's step, see slam_step: a stop before an instruction, so only right there (a debug status
+            // bit left from an earlier stop doesn't count)
+            if ((context->Dr6 & 4) && context->Rip == base() + slam_step)
+            {
+                context->Dr6 &= ~4ULL;
+                slam_apply(*context);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            if (context->Dr6 & 2) // (V1.3.52) the steering's watch, see steer_copy
+            {
+                const bool also = context->Dr6 & 1;
+                context->Dr6 &= ~0xFULL;
+                steer_apply(*context);
+                if (also && who_armed)
+                    who_capture(*context);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
             if (context->Dr6 & 1) // the hardware watch
             {
                 context->Dr6 &= ~0xFULL;
@@ -11368,16 +13806,36 @@ namespace ingame
                 }
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
-            return EXCEPTION_CONTINUE_SEARCH;
+            return wall_stop ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
         }
-        // the hardware watch on (at != 0) or off in every thread; returns how many threads took it
-        unsigned who_debug_registers(std::uint64_t at)
+        // V1.4 (Eric's V1.3.82 run: "There is a little stutter shows in the clip"; his clip: the game stood still for a frame
+        // or two (35 to 70 ms) at the fight's start and as Papu Papu started a stand, twice a stand, each where a watch went
+        // into every thread: the slam's step as he stands, the steering's as his aim holds, the wall's as it tries a place).
+        // Each of the game's 108 threads was stopped, its debug registers written and let go, one after another, on the
+        // game's own thread, which waited for all of it. Now a thread of ours does it, so the game goes on meanwhile (the
+        // game's own thread still gets them at once, through the handler), and a thread that has the watches as they are
+        // now is left alone: setting them again with nothing changed only goes into the threads made since, unless a watch
+        // looked lost (`all`). Each thread is written from one reading of the watches, the one it's remembered with
+        struct ArmedThread
         {
-            if (!who_handler_cookie)
-                who_handler_cookie = AddVectoredExceptionHandler(1, who_handler);
-            who_arm_address = at;
+            std::uint64_t created = 0;
+            Watches watches{};
+        };
+        std::unordered_map<DWORD, ArmedThread> armed_threads; // (our arming thread's alone)
+        std::atomic_uint arm_last{0}, arm_lines{0};
+        std::atomic<std::uint64_t> arm_asked{0}, arm_served{0};
+        std::atomic_uint arm_estimate{0};
+        std::atomic_bool arm_all_asked{false};
+        HANDLE arm_event = nullptr;
+        std::once_flag arm_once;
+        // the watches into every thread of the game's but this one; how many have them
+        unsigned arm_threads(bool all)
+        {
+            const auto started = precise_seconds();
+            const Watches now_watches = watches_now();
             const DWORD self = GetCurrentThreadId(), process = GetCurrentProcessId();
-            unsigned done = 0;
+            unsigned done = 0, set = 0, seen = 0;
+            std::unordered_map<DWORD, ArmedThread> kept;
             const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
             if (snapshot != INVALID_HANDLE_VALUE)
             {
@@ -11387,29 +13845,157 @@ namespace ingame
                 {
                     if (entry.th32OwnerProcessID != process || entry.th32ThreadID == self)
                         continue;
-                    const HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, entry.th32ThreadID);
+                    const HANDLE thread =
+                        OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ThreadID);
                     if (!thread)
                         continue;
+                    ++seen;
+                    // (the same thread, not another one given its id since: by when it was made)
+                    FILETIME made{}, ended{}, kernel{}, user{};
+                    const std::uint64_t created = GetThreadTimes(thread, &made, &ended, &kernel, &user)
+                                                      ? (static_cast<std::uint64_t>(made.dwHighDateTime) << 32) | made.dwLowDateTime
+                                                      : 0;
+                    const auto had = armed_threads.find(entry.th32ThreadID);
+                    if (!all && created && had != armed_threads.end() && had->second.created == created && had->second.watches == now_watches)
+                    {
+                        kept[entry.th32ThreadID] = had->second, ++done;
+                        CloseHandle(thread);
+                        continue;
+                    }
+                    // (nothing between its stop and its going on that could wait on it: no memory taken, no log; the thread may
+                    // be holding the heap's lock)
+                    bool wrote = false;
                     if (SuspendThread(thread) != static_cast<DWORD>(-1))
                     {
                         CONTEXT c{};
                         c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
                         if (GetThreadContext(thread, &c))
                         {
-                            if (at)
-                                c.Dr0 = at, c.Dr7 = (c.Dr7 & ~0xF0003ULL) | 1ULL | (1ULL << 16) | (2ULL << 18);
-                            else
-                                c.Dr0 = 0, c.Dr7 &= ~0xF0003ULL;
-                            if (SetThreadContext(thread, &c))
-                                ++done;
+                            debug_registers_set(c, now_watches); // (V1.3.73: every watch's, not only the one set)
+                            c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                            wrote = SetThreadContext(thread, &c) != 0;
                         }
                         ResumeThread(thread);
                     }
                     CloseHandle(thread);
+                    if (wrote)
+                    {
+                        ++done, ++set;
+                        if (created)
+                            kept[entry.th32ThreadID] = {created, now_watches};
+                    }
                 }
                 CloseHandle(snapshot);
             }
+            armed_threads = std::move(kept);
+            arm_last = done;
+            const double ms = (precise_seconds() - started) * 1000;
+            if (set && arm_lines.fetch_add(1) < 24)
+            {
+                // (made whole first: the game's thread's lines may switch the log to hex as they go)
+                std::ostringstream line;
+                line << "Boss timing: the watches went into " << set << " of " << seen << " threads" << (all ? " (all of them again)" : "") << " in " << std::lround(ms)
+                     << " ms, off the game's thread\n";
+                std::cout << line.str() << std::flush;
+            }
+            return done;
+        }
+        void arm_worker()
+        {
+            std::uint64_t done = 0;
+            for (;;)
+            {
+                WaitForSingleObject(arm_event, INFINITE);
+                while (arm_asked.load() != done)
+                {
+                    done = arm_asked.load();
+                    arm_threads(arm_all_asked.exchange(false));
+                    arm_served = done;
+                }
+            }
+        }
+        // the watches as they are now into the game's other threads, by our arming thread (on this one, if it can't be made);
+        // how many threads have them or will, as of the last time
+        unsigned arm_others(bool all)
+        {
+            std::call_once(arm_once,
+                           []
+                           {
+                               arm_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                               try
+                               {
+                                   if (arm_event)
+                                       std::thread(arm_worker).detach();
+                               }
+                               catch (const std::exception &)
+                               {
+                                   CloseHandle(arm_event), arm_event = nullptr;
+                               }
+                           });
+            if (!arm_event)
+                return arm_threads(all);
+            if (all)
+                arm_all_asked = true;
+            arm_asked.fetch_add(1);
+            SetEvent(arm_event);
+            if (const unsigned last = arm_last.load())
+                return last;
+            if (const unsigned estimate = arm_estimate.load())
+                return estimate;
+            // (before its first time: the game's other threads, counted once)
+            unsigned others = 0;
+            const DWORD self = GetCurrentThreadId(), process = GetCurrentProcessId();
+            if (const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0); snapshot != INVALID_HANDLE_VALUE)
+            {
+                THREADENTRY32 entry{};
+                entry.dwSize = sizeof(entry);
+                for (BOOL ok = Thread32First(snapshot, &entry); ok; ok = Thread32Next(snapshot, &entry))
+                    others += entry.th32OwnerProcessID == process && entry.th32ThreadID != self;
+                CloseHandle(snapshot);
+            }
+            arm_estimate = std::max(others, 1u);
+            return arm_estimate.load();
+        }
+        // (V1.4) the arming asked for last, and whether the one asked for as `ticket` (or later) is done: the watches as they
+        // were then are in the game's threads
+        std::uint64_t arm_ticket()
+        {
+            return arm_asked.load();
+        }
+        bool arm_reached(std::uint64_t ticket)
+        {
+            return !arm_event || arm_served.load() >= ticket;
+        }
+        // the hardware watch on (at != 0) or off in every thread; returns how many threads took it
+        unsigned who_debug_registers(std::uint64_t at)
+        {
+            if (!who_handler_cookie)
+                who_handler_cookie = AddVectoredExceptionHandler(1, who_handler);
+            who_arm_address = at;
+            const unsigned done = arm_others(false);
             RaiseException(who_arm_code, 0, 0, nullptr); // this thread, through the handler
+            return done + 1;
+        }
+        // (V1.3.52) the steering's watch (debug register 1, see steer_copy) and (V1.3.53) the slam's step (debug register 2, see
+        // slam_step) on (not 0) or off in every thread; returns how many threads took them
+        unsigned steer_debug_register(std::uint64_t at, std::uint64_t step_at, bool all)
+        {
+            if (!who_handler_cookie)
+                who_handler_cookie = AddVectoredExceptionHandler(1, who_handler);
+            steer_arm_address = at, slam_arm_address = step_at;
+            const unsigned done = arm_others(all);
+            RaiseException(steer_arm_code, 0, 0, nullptr); // this thread, through the handler
+            return done + 1;
+        }
+        // (V1.3.68) the wall's watch (debug register 3, see wall_apply) on 8 bytes at `at` (0: off) in every thread, the
+        // others kept; returns how many threads took it
+        unsigned wall_debug_register(std::uint64_t at, bool all)
+        {
+            if (!who_handler_cookie)
+                who_handler_cookie = AddVectoredExceptionHandler(1, who_handler);
+            wall_arm_address = at;
+            const unsigned done = arm_others(all);
+            RaiseException(wall_arm_code, 0, 0, nullptr); // this thread, through the handler
             return done + 1;
         }
         struct WhoState
@@ -11472,7 +14058,18 @@ namespace ingame
                     out << std::dec << " rsp=0x" << std::hex << f.rsp << std::dec << " rbx=" << who_register(f.rbx)
                         << " rbp=" << who_register(f.rbp) << " rsi=" << who_register(f.rsi) << " rdi=" << who_register(f.rdi)
                         << " r12=" << who_register(f.r12) << " r13=" << who_register(f.r13) << " r14=" << who_register(f.r14)
-                        << " r15=" << who_register(f.r15) << "\n";
+                        << " r15=" << who_register(f.r15);
+                    // (V1.3.51: and as the write was caught, the rest)
+                    if (k == 0)
+                        out << " rax=" << who_register(cap.rax) << " rcx=" << who_register(cap.rcx) << " rdx=" << who_register(cap.rdx) << " r8=" << who_register(cap.r8)
+                            << " r9=" << who_register(cap.r9) << " r10=" << who_register(cap.r10) << " r11=" << who_register(cap.r11);
+                    out << "\n";
+                }
+                if (cap.copied_read)
+                {
+                    const auto &q = cap.copied;
+                    out << "Who:   what the game was copying then (from rdx): place (" << q[0] << ", " << q[1] << ", " << q[2] << ", " << q[3] << "), turn (" << q[4] << ", "
+                        << q[5] << ", " << q[6] << ", " << q[7] << "), and (" << q[8] << ", " << q[9] << ", " << q[10] << ", " << q[11] << ")\n";
                 }
                 std::cout << out.str() << std::flush;
                 // the code of every function in the chain, once
@@ -11586,7 +14183,8 @@ namespace ingame
         // CBehaviorComponent (+0xd8, which the game put back every frame in V1.3.40) is caught by the write watch above, once a
         // visit, at his next aimed stand (nothing of ours is set there while it's on): the game's code that writes it, with
         // the calls that led there, their registers and their code, shows where the game keeps his facing
-        // (the watch off: every thread's debug registers cleared before his objects can go)
+        // (the watch off: every thread's debug registers cleared, V1.4: off the game's thread, see arm_others; a stop on the
+        // old watch meanwhile does nothing, who_armed being off)
         void papu_who_off(BossTuning &t, const char *why)
         {
             if (t.watch_step != 1)
@@ -11611,12 +14209,19 @@ namespace ingame
                     papu_who_off(t, s != 1 ? "his stand is over" : "1.5 s went by");
                 return;
             }
-            if (t.watch_step || !t.watch_due || s != 1 || !t.aim_wrote || w.mode || IsDebuggerPresent())
+            // (V1.3.52: not while he's steered: the same place, see papu_steer)
+            if (t.watch_step || !t.watch_due || s != 1 || !t.aim_wrote || w.mode || t.steer_on || IsDebuggerPresent())
                 return;
+            // (V1.3.42: his physics' turn when it's found, see papu_body_record: what writes that is where his spin comes from;
+            // else the place V1.3.41 watched)
             Address target = 0;
-            for (const auto part : list(value<Address>(t.papu + 24), 128))
-                if (typed(part, 0x150c710))
-                    target = part + 0xd8;
+            const char *what = "Papu Papu's facing place (his CBehaviorComponent +0xd8)";
+            if (const auto body = papu_body_record(t.papu))
+                target = body + 0x18, what = "Papu Papu's physics turn (its quaternion's z and w)";
+            else
+                for (const auto part : list(value<Address>(t.papu + 24), 128))
+                    if (typed(part, 0x150c710))
+                        target = part + 0xd8;
             if (!target || (target & 7))
             {
                 t.watch_step = 2;
@@ -11628,13 +14233,186 @@ namespace ingame
             w = {};
             w.started = now; // (its mode stays 0: it's not the ice test's, see update_ice_who)
             who_last = value<std::uint64_t>(target);
-            who_what = "Papu Papu's facing place (his CBehaviorComponent +0xd8)", who_every = true;
+            who_what = what, who_every = true;
             who_target = target;
             who_armed = true;
             const auto threads = who_debug_registers(target);
             t.watch_step = 1, t.watch_at = now;
-            std::cout << "Boss rule research: his spin jumped from his aim: a watch on his facing's place (0x" << std::hex << target << std::dec << ") in " << threads
-                      << " threads, to see what writes it\n" << std::flush;
+            std::cout << "Boss rule research: his spin jumped from his aim: a watch on " << what << " (0x" << std::hex << target << std::dec << ") in " << threads
+                      << " threads, to see what writes it (nothing of ours is set while it's on)\n" << std::flush;
+        }
+        // V1.3.56 (Eric: "is it possible to speed up his slam"; V1.3.55's run: in his animation, the numbers that count the time
+        // from his stand's start, 0.14 s at 0.12 s in and 1 a second, his root layer's node +0x140 and +0x144, its +0xd0 object's
+        // +0x10, and some of his layers' nodes' +0x130; his slam comes when that time reaches about 0.9 s). As he stands: those
+        // found (the numbers there that hold about the time since his stand began, checked 40 ms later to have gone on by about
+        // the time between), then moved on faster each frame until his slam, so his stand plays faster; the log says how often
+        // the game went on from what was set, or put it back (V1.3.56's run: it went on from it, every frame).
+        // V1.3.57 (Eric: "find the right scale for each speed"): his slam comes at his pace for the boss speed (papu_slam_pace:
+        // at 200% 0.45 s after he stands, or /boss_slam's), on time: each frame his clock runs at what's left to his slam's
+        // time on it over what's left of the real time (1 to 4 times the game's), so it makes up for the first 0.1 s found at
+        // the game's pace; his slam's time on the clock as the game plays it is the least seen at his slams (0.9 s past his
+        // stand's start until one is); found from 0.06 s in (V1.3.56: 0.1 s); and no more watch on it (V1.3.56's first stand)
+        void papu_stand_clock(BossTuning &t, int s, std::uint64_t now)
+        {
+            if (!slam_body.load() || !t.stand_seen)
+                return;
+            if (t.sc_stand != t.stand_seen)
+                t.sc_stand = t.stand_seen, t.sc_step = 0, t.sc_cands.clear(), t.sc_clocks.clear(), t.sc_from.clear(), t.sc_written = false,
+                t.sc_frames = t.sc_held = t.sc_back = 0, t.sc_extra = 0, t.sc_target = 0, t.sc_tries = 0, t.sc_retry_at = 0, t.sc_bad.clear(), t.sc_late_tries = 0;
+            const bool slammed = t.slam_seen_at && t.slam_seen_at >= t.stand_seen;
+            // (his slam, or his stand over: how it went; and his slam's time on his clock, the least seen)
+            if (t.sc_step == 2 && (slammed || s != 1))
+            {
+                t.sc_step = 3;
+                const float at = value<float>(t.sc_clocks[0].first);
+                if (slammed && std::isfinite(at) && at > 0.5f && at < 1.5f)
+                    t.sc_slam_clock = t.sc_slam_clock > 0 ? std::min(t.sc_slam_clock, at) : at;
+                // (V1.3.61: a slam late by more than 0.1 s is told past the first 12 too, with what was moved on)
+                const float came = slammed ? static_cast<float>(t.slam_seen_at - t.stand_seen) / 1000.0f : 0.0f;
+                const bool late = slammed && came > t.sc_target + 0.1f;
+                if (t.sc_told < 12 || (late && t.sc_fail_told < 16))
+                {
+                    std::ostringstream line;
+                    line << std::fixed << std::setprecision(2) << "Boss speed: his stand played faster ("
+                         << (t.sc_slam_fixed ? "the seed's " + std::to_string(t.sc_slam_fixed) + " ms" : std::to_string(t.sc_percent) + "%") << "): ";
+                    if (slammed)
+                        line << "his slam came " << came << " s after he stood (meant for " << t.sc_target << " s)";
+                    else
+                        line << "no slam in this stand";
+                    line << "; his clock moved on " << t.sc_extra << " s more over " << t.sc_frames << " frames, at " << at << " s at his slam; the game went on from it "
+                         << t.sc_held << " frames, put it back " << t.sc_back;
+                    if (late)
+                    {
+                        line << "; late: moved on were";
+                        for (std::size_t i = 0; i < t.sc_clocks.size() && i < 8; ++i)
+                            line << (i ? ", " : " ") << t.sc_clocks[i].second;
+                    }
+                    ++(t.sc_told < 12 ? t.sc_told : t.sc_fail_told), std::cout << line.str() << "\n" << std::flush;
+                }
+            }
+            if (s != 1)
+                return;
+            const auto since = now - t.stand_seen;
+            const float since_s = static_cast<float>(since) / 1000.0f;
+            // V1.3.59 (Eric: "it took a while for his speed and stuff to catch up"; his V1.3.58 run: in the first two stands of
+            // each visit, none of the numbers found 0.06 s in went on with the time, and those slams came at the game's 0.9 s):
+            // looked for again (3 tries, until 0.4 s into his stand) when none are found or none go on; numbers up to 0.25 s
+            // behind the time since he stood count too (the game may have stopped a moment as his breakpoints were set), up
+            // to 96 of them (V1.3.58 kept 24, and the second visit's first stand had that many); checked 50 ms later
+            const auto retry = [&](const std::string &why) {
+                // (V1.3.61: and after numbers that went past his slam's time, two more tries until 0.9 s in)
+                const bool again = (t.sc_tries < 3 && since < 400) || (t.sc_late_tries && t.sc_tries < 5 && since < 900);
+                if (t.sc_fail_told < 16)
+                {
+                    std::ostringstream line;
+                    line << std::fixed << std::setprecision(2) << "Boss speed: his stand's clocks, try " << t.sc_tries << " (" << since_s << " s in): " << why
+                         << (again ? "; looked for again" : "; his slam stays the game's in this stand");
+                    ++t.sc_fail_told, std::cout << line.str() << "\n" << std::flush;
+                }
+                t.sc_cands.clear(), t.sc_from.clear(), t.sc_clocks.clear();
+                t.sc_step = again ? 0 : 9, t.sc_retry_at = now + 20;
+            };
+            if (t.sc_step == 0 && since >= 60 && now >= t.sc_retry_at)
+            {
+                ++t.sc_tries;
+                // (the numbers that hold about the time since he stood, or a little less)
+                for (const auto &o : papu_anim_objects())
+                {
+                    std::array<float, 0xc0> f{};
+                    if (!read(o.first, f))
+                        continue;
+                    for (std::size_t i = 0; i < f.size() && t.sc_cands.size() < 96; ++i)
+                        if (std::isfinite(f[i]) && f[i] > 0.02f && f[i] < since_s + 0.06f && f[i] > since_s - 0.25f &&
+                            std::find(t.sc_bad.begin(), t.sc_bad.end(), o.first + i * 4) == t.sc_bad.end())
+                            t.sc_cands.push_back({o.first + i * 4, o.second + " +" + hex(static_cast<unsigned>(i * 4))}), t.sc_from.push_back(f[i]);
+                }
+                t.sc_t0 = now, t.sc_step = 1;
+                if (t.sc_cands.empty())
+                    retry("none found");
+                return;
+            }
+            if (t.sc_step == 1 && now - t.sc_t0 >= 50)
+            {
+                const float went = static_cast<float>(now - t.sc_t0) / 1000.0f, searched = static_cast<float>(t.sc_t0 - t.stand_seen) / 1000.0f;
+                std::ostringstream found, missed;
+                unsigned shown = 0;
+                for (std::size_t i = 0; i < t.sc_cands.size(); ++i)
+                {
+                    // (V1.3.61, Eric's V1.3.59 run: the first try missed them in the first stands of each visit, as they went on
+                    // faster than the time for a moment, catching up after the game stopped as his breakpoints were set (0.047
+                    // to 0.157 s in 0.063 s, 0.073 s behind): one behind the time since he stood may go on faster by as much)
+                    const float v = value<float>(t.sc_cands[i].first), behind = std::max(0.0f, searched - t.sc_from[i]);
+                    if (std::isfinite(v) && v - t.sc_from[i] > went * 0.5f && v - t.sc_from[i] < went * 1.6f + behind)
+                        t.sc_clocks.push_back(t.sc_cands[i]), found << (t.sc_clocks.size() > 1 ? ", " : "") << t.sc_cands[i].second << " (" << v << ")";
+                    else if (shown++ < 4)
+                        missed << (shown > 1 ? ", " : "") << t.sc_cands[i].second << " " << t.sc_from[i] << " -> " << v;
+                }
+                if (t.sc_clocks.empty())
+                {
+                    retry("none of the " + std::to_string(t.sc_cands.size()) + " looked at went on with the time (" + std::to_string(went).substr(0, 5) + " s; " + missed.str() + ")");
+                    return;
+                }
+                if (auto &told = t.sc_tries > 1 ? t.sc_fail_told : t.sc_told; told < (t.sc_tries > 1 ? 16u : 4u))
+                    ++told, std::cout << "Boss speed: his stand's clocks" << (t.sc_tries > 1 ? " (try " + std::to_string(t.sc_tries) + ")" : std::string()) << ": " << found.str()
+                                      << "\n" << std::flush;
+                // (how far the first is ahead of the time since he stood, before anything is moved on; behind it, below 0)
+                t.sc_step = 2, t.sc_last = now, t.sc_lead = value<float>(t.sc_clocks[0].first) - since_s;
+                t.sc_drive_from = value<float>(t.sc_clocks[0].first), t.sc_drive_at = now, t.sc_extra = 0, t.sc_frames = 0;
+                return;
+            }
+            if (t.sc_step != 2 || (t.sc_percent <= 100 && !t.sc_slam_fixed))
+                return;
+            // (when his slam comes at his pace, and how fast his clock runs to have it then)
+            const float game = t.sc_slam_clock > 0 ? t.sc_slam_clock - t.sc_lead : 0.9f, slam_at = t.sc_slam_clock > 0 ? t.sc_slam_clock : 0.9f + t.sc_lead;
+            const float pace = papu_slam_pace(t.sc_percent, t.sc_slam_ms, game);
+            t.sc_target = t.sc_slam_fixed ? std::min(game, static_cast<float>(t.sc_slam_fixed) / 1000.0f) : game / pace;
+            const float clock = value<float>(t.sc_clocks[0].first), left = t.sc_target - since_s;
+            // V1.3.61 (Eric's V1.3.59 run: "there was one time where it did take a while to catch up"; that stand's numbers were
+            // moved on to 3.08 s and his slam came at the game's 0.95 s: not what his slam goes by in that stand): none is moved
+            // on past his slam's time on it, and one past it by 0.15 s with no slam is looked for again without those (twice at
+            // most in a stand)
+            // (V1.3.63, Eric's V1.3.61 run: his slam came at 0.97 s with one moved on that the game put back 35 frames, never past
+            // his slam's time: also when it's held back. V1.3.66 (Eric's V1.3.65 run: the slam that came late found the right
+            // ones again 0.67 s in, and V1.3.63's check, his slam 0.1 s late and the first still short of it, threw them out
+            // too): held back is the game not keeping what's added: 0.1 s or more after they began to be moved on, the first
+            // has gone on by less than half the time since plus what was added)
+            const float driven = static_cast<float>(now - t.sc_drive_at) / 1000.0f;
+            const bool past = clock > slam_at + 0.15f, held_back = driven >= 0.1f && clock - t.sc_drive_from < 0.5f * (driven + t.sc_extra);
+            if (std::isfinite(clock) && (past || held_back) && t.sc_late_tries < 2)
+            {
+                ++t.sc_late_tries;
+                std::ostringstream names;
+                for (std::size_t i = 0; i < t.sc_clocks.size(); ++i)
+                    t.sc_bad.push_back(t.sc_clocks[i].first), names << (i ? ", " : "") << (i < 8 ? t.sc_clocks[i].second : std::string("..."));
+                if (t.sc_fail_told < 16)
+                {
+                    std::ostringstream line;
+                    line << std::fixed << std::setprecision(2) << "Boss speed: his stand's clocks " << (past ? "went past" : "were kept short of") << " his slam's time on them ("
+                         << clock << " of " << slam_at << ") with no slam, " << since_s << " s in: not what his slam goes by in this stand (" << names.str()
+                         << "); looked for again without them";
+                    ++t.sc_fail_told, std::cout << line.str() << "\n" << std::flush;
+                }
+                t.sc_cands.clear(), t.sc_from.clear(), t.sc_clocks.clear(), t.sc_step = 0, t.sc_retry_at = now;
+                t.sc_extra = 0, t.sc_written = false, t.sc_frames = t.sc_held = t.sc_back = 0;
+                return;
+            }
+            const float run = !std::isfinite(clock) || clock >= slam_at ? 1.0f : left > 0.01f ? std::clamp((slam_at - clock) / left, 1.0f, 4.0f) : 4.0f;
+            const float dt = std::clamp(static_cast<float>(now - t.sc_last) / 1000.0f, 0.005f, 0.05f), extra = (run - 1.0f) * dt;
+            t.sc_last = now;
+            // (the first: did the game go on from what was set? Then it's ahead of the time since he stood by what was added; put
+            // back, by what it was before)
+            if (t.sc_written && std::isfinite(clock))
+                ++(clock - since_s > t.sc_lead + 0.5f * t.sc_extra ? t.sc_held : t.sc_back);
+            if (extra <= 0)
+                return;
+            for (std::size_t i = 0; i < t.sc_clocks.size(); ++i)
+                if (const float v = value<float>(t.sc_clocks[i].first); std::isfinite(v) && v > 0 && v < 30)
+                {
+                    write(t.sc_clocks[i].first, v + extra);
+                    if (i == 0)
+                        t.sc_wrote = v + extra, t.sc_written = true;
+                }
+            t.sc_extra += extra, ++t.sc_frames;
         }
         //  contact (research): the floor change is noticed in the game's code at +0x510b70, called every frame from
         //  Crash's update (+0x4bcc70) with Crash and his ground contact object (type +0x1509a38). This dumps that code
@@ -12825,6 +15603,7 @@ namespace ingame
             // V1.3.33 (Eric: "get rid of Aku Aku Mask when we have hard bosses"): in a harder boss fight Crash has no mask:
             // the Aku Aku lock takes his (even a filler one) and keeps the fight's crates and items from giving one
             const bool hard = hard_boss_no_masks(state, boss_zone_key());
+            boss_masks_off = hard; // (V1.3.82, see boss_rule_hit)
             static bool hard_told = false;
             if (hard != hard_told)
             {
@@ -13086,6 +15865,8 @@ namespace ingame
         boss_block_actor = 0, boss_block_red = false;
         id_list_restore("the client stopped");
         papu_who_off(boss_tuning, "the client stopped");
+        wall_live = false, wall_place = 0, wall_stick_on = false; // (V1.3.68: the wall's watch sets nothing more, see wall_apply; V1.3.74: nor the stick)
+        wall_shown = false;                                       // (V1.3.79: nor is it drawn)
         if (game_thread)
             boss_tint_off(boss_tuning, true);
         else if (boss_tuning.tint_bundle)
@@ -13117,6 +15898,91 @@ namespace ingame
     {
         const auto actor = player();
         return actor && read(actor + 32, at);
+    }
+    // V1.3.74 (see wall_stick_zone): the left stick as the game is about to get it (after the traps), with the push into
+    // Papu Papu's wall taken out as Crash comes up to it: what's left of it into the wall goes from all of it wall_stick_zone
+    // in front of the wall to none 2 in front of it; along it, untouched (V1.3.81: and as long as the stick was)
+    bool wall_stick(unsigned pad, short &x, short &y)
+    {
+        const float sx = x / 32767.0f, sy = y / 32767.0f;
+        // (after the code review: the stick for the check from the pad being pushed, not an idle second one)
+        if (std::hypot(sx, sy) >= 0.2f || wall_stick_pad.load(std::memory_order_relaxed) == static_cast<int>(pad))
+        {
+            wall_stick_in_x.store(sx, std::memory_order_relaxed), wall_stick_in_y.store(sy, std::memory_order_relaxed);
+            wall_stick_pad.store(static_cast<int>(pad), std::memory_order_relaxed);
+        }
+        // (after the code review: only while the game's thread keeps it up to date)
+        if (!wall_stick_on.load(std::memory_order_relaxed) || std::hypot(sx, sy) < 0.2f ||
+            GetTickCount64() - wall_stick_at.load(std::memory_order_relaxed) > 150)
+            return false;
+        const float rx = wall_stick_rx.load(std::memory_order_relaxed), ry = wall_stick_ry.load(std::memory_order_relaxed);
+        const float fx = wall_stick_fx.load(std::memory_order_relaxed), fy = wall_stick_fy.load(std::memory_order_relaxed);
+        // (V1.3.77: the wall's way out where he's nearest it, and how far in front of it he is: its ends are rounded)
+        const float ux = wall_stick_nx.load(std::memory_order_relaxed), uy = wall_stick_ny.load(std::memory_order_relaxed);
+        const float gap = wall_stick_gap.load(std::memory_order_relaxed);
+        // (where the stick sends him, flat; how much of it goes into the wall; how much of that is left this close)
+        float wx = rx * sx + fx * sy, wy = ry * sx + fy * sy;
+        const float into = wx * ux + wy * uy, keep = std::clamp((gap - 2) / wall_stick_zone, 0.0f, 1.0f);
+        const float det = rx * fy - fx * ry;
+        if (!(into > 0) || keep >= 1 || !std::isfinite(keep) || !(std::abs(det) > 0.3f))
+            return false;
+        const float full = std::hypot(wx, wy), along = std::hypot(wx - into * ux, wy - into * uy);
+        wx -= (1 - keep) * into * ux, wy -= (1 - keep) * into * uy;
+        // V1.3.81 (Eric's V1.3.80 run: "sometimes he like walks when he's like running towards the wall ... I think he
+        // sometimes stops a little bit ... running towards a normal wall ... He doesn't stop. He doesn't like lose his
+        // momentum"; the log: pushed toward the wall 32 degrees off straight into it, the stick's push into it taken out
+        // left 16% of it, and he stood): what's left is as long as the stick was, so he runs along the wall as fast as he
+        // came; pushed straight into it (within 15 degrees: what's along it under a quarter of the stick), less of that, down
+        // to none, so he stops at it
+        if (const float left = std::hypot(wx, wy); left > 1e-4f && full > 1e-4f)
+        {
+            const float length = left + (full - left) * std::clamp(along / (0.25f * full), 0.0f, 1.0f);
+            wx *= length / left, wy *= length / left;
+        }
+        // (back to the stick: x along the camera's right, y along where it looks; after the code review, both scaled
+        // down together past the stick's edge, so its way stays along the wall)
+        float nx = (fy * wx - fx * wy) / det, ny = (rx * wy - ry * wx) / det;
+        if (!std::isfinite(nx) || !std::isfinite(ny))
+            return false;
+        if (const float most = std::max(std::abs(nx), std::abs(ny)); most > 1)
+            nx /= most, ny /= most;
+        x = static_cast<short>(std::lround(nx * 32767.0f)), y = static_cast<short>(std::lround(ny * 32767.0f));
+        wall_stick_cut.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    // V1.3.79 (see papu_wall_research): Papu Papu's wall as it's drawn in the game while it's up, along the arena's floor,
+    // 120 high. V1.3.80: one line, all of it where his physics is set back past it (hard): from the bench on one side,
+    // along its curve (see wall_shape), across the hut straight, and along the other curve into the bench
+    std::vector<WallLine> wall_outline()
+    {
+        std::vector<WallLine> lines;
+        if (!wall_shown.load())
+            return lines;
+        const float mx = wall_mx.load(), my = wall_my.load(), ux = wall_ux.load(), uy = wall_uy.load(), front = wall_front.load(), floor = wall_floor.load();
+        if (!(front > 1) || !std::isfinite(mx) || !std::isfinite(my) || !(std::abs(std::hypot(ux, uy) - 1) < 0.01f))
+            return lines;
+        const auto point = [&](float f, float l) { return std::array<float, 3>{mx + f * ux - l * uy, my + f * uy + l * ux, floor}; };
+        const float span = front / wall_front_share, rc = wall_ring_mid_share * span, ring = wall_ring_share * span, round = wall_round_share * span;
+        const float cf = front - round, q = (ring - round) * (ring - round) - (cf - rc) * (cf - rc);
+        WallLine wall;
+        wall.hard = true, wall.height = 120;
+        if (!(q > 0))
+        {
+            for (int i = 0; i <= 16; ++i)
+                wall.points.push_back(point(front, -250 + 500.0f * i / 16));
+            lines.push_back(std::move(wall));
+            return lines;
+        }
+        // (each curve from straight ahead of its middle round to the ring's way through it)
+        const float cl = std::sqrt(q), end = std::atan2(cl, cf - rc);
+        for (int i = 12; i >= 0; --i)
+            wall.points.push_back(point(cf + round * std::cos(end * i / 12), -(cl + round * std::sin(end * i / 12))));
+        for (int i = 1; i < 12; ++i)
+            wall.points.push_back(point(front, -cl + 2 * cl * i / 12));
+        for (int i = 0; i <= 12; ++i)
+            wall.points.push_back(point(cf + round * std::cos(end * i / 12), cl + round * std::sin(end * i / 12)));
+        lines.push_back(std::move(wall));
+        return lines;
     }
     bool gimmick_stage()
     {

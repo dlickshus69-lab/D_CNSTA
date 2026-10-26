@@ -9,6 +9,7 @@ from Options import (
     DefaultOnToggle,
     OptionDict,
     PerGameCommonOptions,
+    NamedRange,
     Range,
     Toggle,
     DeathLink,
@@ -495,7 +496,9 @@ class Boxsanity(Range):
 class Crashsanity(Toggle):
     """Experimental: assign Crash 1/2/3 basic movement rules per regular level.
 
-    F10 restores vanilla controls if a style prevents progress."""
+    Crash 1 controls have no Body Slam, Crouch Jump or Slide (even once found), and only Crash 3 controls double jump.
+    A level only gets controls that can do its clear, power crystal, gems and secret exit, and boxes its controls can't
+    reach are left out of the box checks. F10 restores vanilla controls as a last resort."""
 
     display_name = "Crashsanity"
 
@@ -676,12 +679,49 @@ class BossHealth(Range):
 
 class BossSpeed(Range):
     """How fast a harder boss fights, in percent of the game's (needs Harder Bosses): Papu Papu spins faster (each hit
-    still speeds him up, gentler near the top so the end stays beatable) and waits less before his spins."""
+    still speeds him up, gentler near the top so the end stays beatable), waits less before his spins, slams sooner after
+    he stands (unless Boss Slam Time sets it) and can be hit for less time once his red ends (unless Boss Hit Window sets
+    it)."""
 
     display_name = "Boss Speed"
     range_start = 100
     range_end = 200
     default = 150
+
+
+class BossSlamTime(NamedRange):
+    """How soon a harder boss slams after he stands up, in hundredths of a second (needs Harder Bosses; for now Papu
+    Papu). by_speed: from Boss Speed, the game's 0.9 s at 100% down to 0.45 s at 200%. 25 to 90: that time (0.25 to
+    0.9 s) at any Boss Speed."""
+
+    display_name = "Boss Slam Time"
+    range_start = 25
+    range_end = 90
+    default = 0
+    special_range_names = {"by_speed": 0}
+
+
+class BossSlamAim(Range):
+    """How far ahead of Crash a harder boss aims his slam, in percent (needs Harder Bosses; for now Papu Papu): 0 aims
+    where Crash is as the boss stands, 100 where Crash will be as the slam lands if he keeps going the way he is. In
+    between, that share of the way."""
+
+    display_name = "Boss Slam Aim"
+    range_start = 0
+    range_end = 100
+    default = 55
+
+
+class BossHitWindow(NamedRange):
+    """How long a harder boss can be hit once his red ends, in tenths of a second (needs Harder Bosses; for now Papu
+    Papu); then he's red again until the slam after his next spin (or his next spin starts). by_speed: from Boss Speed, 4.4
+    s at 100% down to 2.2 s at 200%. 20 to 100: that time (2 to 10 s) at any Boss Speed."""
+
+    display_name = "Boss Hit Window"
+    range_start = 20
+    range_end = 100
+    default = 0
+    special_range_names = {"by_speed": 0}
 
 
 class HarderBossesAkuAku(Toggle):
@@ -751,6 +791,9 @@ crash_option_groups = [
         HarderBosses,
         BossHealth,
         BossSpeed,
+        BossSlamTime,
+        BossSlamAim,
+        BossHitWindow,
         HarderBossesAkuAku,
     ]),
     OptionGroup("Cosmetic", [
@@ -813,6 +856,9 @@ class CrashOptions(PerGameCommonOptions):
     harder_bosses: HarderBosses
     boss_health: BossHealth
     boss_speed: BossSpeed
+    boss_slam_time: BossSlamTime
+    boss_slam_aim: BossSlamAim
+    boss_hit_window: BossHitWindow
     harder_bosses_aku_aku: HarderBossesAkuAku
     crash_fur_color: CrashFurColor
     crash_chest_color: CrashChestColor
