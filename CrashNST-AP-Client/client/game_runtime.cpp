@@ -816,8 +816,9 @@ namespace ingame
         bool hard_boss_fight(const Shared &state, const std::string &boss)
         {
 #ifdef CRASH_NST_STABLE
-            // (Stable V1.3.1: harder bosses are Papu Papu's alone; every other boss is as the game has him)
-            if (boss != "B101")
+            // (Stable V1.3.1: harder bosses are Papu Papu's alone; every other boss is as the game has him. Stable V1.5:
+            // and Ripper Roo's)
+            if (boss != "B101" && boss != "B102")
                 return false;
 #endif
             return !boss.empty() && (state.boss_rules != 0 || state.boss_health > 100 || state.boss_speed > 100);
@@ -1716,7 +1717,6 @@ namespace ingame
         Address event_sent(Address event, Address context)
         {
             const auto crash = event_crash.load();
-#ifndef CRASH_NST_STABLE
             // (V1.4.17, Eric's V1.4.16 run: "the game crashed again when I got a game over and retried"; the log: after the
             // game over his fight started over as meant and no Nitro was made, then the game crashed in a script (the same
             // place as V1.4.14 and V1.4.15, the stack's last frame in the game's script runner) as the fight's intro started.
@@ -1771,7 +1771,6 @@ namespace ingame
                         return 0;
                     }
                 }
-#endif
 #ifndef CRASH_NST_STABLE
             if (const auto ride = ride_research_actor.load(); ride && event && context && ride_event_lines.load() < 160)
                 if (const auto component = value<Address>(context); component && value<Address>(component + 24) == ride)
@@ -1817,7 +1816,6 @@ namespace ingame
                             trap_event_exploded[i] = true;
                         break;
                     }
-#ifndef CRASH_NST_STABLE
                 // (V1.4.15, Eric's V1.4.14 run: "So it was working. I like it. What I want now is hoping that maybe the TNT
                 // doesn't set off the nitro bombs"; and from the start: "he goes through the Nitro, but you're not allowed
                 // to"): what reaches one of Ripper Roo's Nitros' explosion script while Crash isn't touching it (more than
@@ -1853,7 +1851,6 @@ namespace ingame
                                       << " from it): " << (blocked ? "kept from going through" : "through") << "\n" << std::flush;
                         break;
                     }
-#endif
                 if (blocked)
                     return 0;
                 if (const auto since = boss_event_since.load(); since && target && boss_event_lines.load() < 900)
@@ -4197,7 +4194,6 @@ namespace ingame
                     continue;
                 if (name.rfind("Crate_", 0) == 0)
                     scan.crates.push_back(at);
-#ifndef CRASH_NST_STABLE
                 // (V1.4.16, Testing: Ripper Roo's arena with /roo_nitro's copy has no Nitro crate, and the template the memory
                 // search found after a game over could be the old fight's, freed: V1.4.14's and V1.4.15's crash, inside the
                 // spawn. Each of N. Sanity Beach's crates' time-trial script holds the Nitro's template (a handle in its data,
@@ -4221,7 +4217,6 @@ namespace ingame
                                 scan.nitro_template = e;
                         }
                     }
-#endif
                 // the Nitro's template, from a Nitro crate's spawner
                 if (!scan.nitro_template && kind_of(name) == "Crate_Nitro")
                     for (const auto c : list(value<Address>(owner + 24), 64))
@@ -4246,13 +4241,9 @@ namespace ingame
                 const auto scripts = owner_scripts(owner);
                 // (Testing: in a boss arena nothing counts boxes, and Ripper Roo's has no spawner of its own: there, with
                 // /roo_nitro's patched archive, a plain crate's from N. Sanity Beach's crate layer may be borrowed)
-#ifndef CRASH_NST_STABLE
                 // (V1.4.13, V1.4.12's log: every crate has common_Crate_Checkpoint on it, so V1.4.12 took none; a checkpoint
                 // crate is named Crate_Checkpoint, never Crate_Basic)
                 const bool arena_crate = level == "Boss" && kind_of(name) == "Crate_Basic";
-#else
-                const bool arena_crate = false;
-#endif
                 if (!arena_crate && (scripts.find("LevelCount") != std::string::npos || scripts.find("Count") != std::string::npos ||
                                      scripts.find("Checkpoint") != std::string::npos))
                     continue;
@@ -11800,7 +11791,6 @@ namespace ingame
         std::mutex roo_outline_mutex;
         std::vector<std::array<float, 3>> roo_outline_spots;
         float roo_outline_scale = 1; // (V1.4.18: the size of his Nitros, see roo_control)
-#ifndef CRASH_NST_STABLE
         // V1.4.1 research, Testing build (Eric, after Papu Papu: "we're only doing the first one" (Crash 1's Ripper Roo):
         // "random patterns. Every time you die, it's not the same pattern. Nitro's on platform" ("some of the platforms are
         // blocked off by Nitro ... you're still able to hit them, but you just gotta work around ... he goes through the
@@ -13010,7 +13000,7 @@ namespace ingame
                     if (r.look_ok + r.look_bad < 20)
                         return;
                     const bool works = r.look_ok >= 14;
-                    std::cout << "Roo Nitro look: " << try_name(t) << ": drawn 2x " << r.look_ok << " of 20 times" << (works ? ": that's it" : ": put back") << "\n" << std::flush;
+                    std::cout << "Roo Nitro look: " << try_name(t) << ": drawn " << nitro_scale << "x " << r.look_ok << " of 20 times" << (works ? ": that's it" : ": put back") << "\n" << std::flush;
                     if (works)
                     {
                         r.look_method = 1;
@@ -13528,7 +13518,6 @@ namespace ingame
             }
             roo_control(state, now); // (V1.4.2)
         }
-#endif
         void update_boss_tuning(const Shared &state, const std::string &boss)
         {
             auto &t = boss_tuning;
@@ -13546,9 +13535,7 @@ namespace ingame
                 wall_shown = false;                         // (V1.3.79: and drawn, see wall_outline)
                 t = {};
                 t.level = boss, t.entered = now;
-#ifndef CRASH_NST_STABLE
                 roo_research = {}; // (V1.4.1: each visit from scratch)
-#endif
                 {
                     std::lock_guard lock(roo_outline_mutex);
                     roo_outline_spots.clear();
@@ -13593,9 +13580,7 @@ namespace ingame
                 t.steer_on = false, papu_steer_off(), papu_slam_off();
             if (boss == "B101")
                 papu_rule(t, state, now);
-#ifndef CRASH_NST_STABLE
             roo_research_update(state, boss, now); // (V1.4.1)
-#endif
             stretch_bar_fill(t, state, now);
             if (now < t.next)
                 return;
@@ -13689,10 +13674,11 @@ namespace ingame
             {
                 const auto boss = boss_zone_key();
 #ifdef CRASH_NST_STABLE
-                // (Stable V1.3.1: harder bosses are Papu Papu's alone, and none of the boss work runs in other boss fights)
-                const auto papu = boss == "B101" ? boss : std::string();
-                update_boss_research(papu);
-                update_boss_tuning(state, papu);
+                // (Stable V1.3.1: harder bosses are Papu Papu's alone, and none of the boss work runs in other boss fights;
+                // Stable V1.5: Ripper Roo's too)
+                const auto done = boss == "B101" || boss == "B102" ? boss : std::string();
+                update_boss_research(done);
+                update_boss_tuning(state, done);
 #else
                 update_boss_research(boss);
                 update_boss_tuning(state, boss);

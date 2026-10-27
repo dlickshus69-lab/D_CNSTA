@@ -309,7 +309,6 @@ void ClientRuntime::drain_crates(ClientTick &tick)
                 const auto level = level_key(zone);
                 if (!tick.seed_matches || !tick.levels.count(level))
                     continue;
-#ifndef CRASH_NST_STABLE
                 // (Testing, /roo_nitro: N. Sanity Beach's crate layer is in Ripper Roo's arena this session, and a Nitro of
                 // his is made by one of its crates' spawners. A crate broken in a boss arena is never a box check)
                 if (ingame::level_patch_in_place())
@@ -324,7 +323,6 @@ void ClientRuntime::drain_crates(ClientTick &tick)
                         continue;
                     }
                 }
-#endif
                 auto spec = std::find_if(std::begin(box_specs), std::end(box_specs), [&](const auto &box) {
                     return level == box.level && event.name == box.name && event.position == box.position;
                 });
