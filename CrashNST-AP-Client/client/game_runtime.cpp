@@ -412,9 +412,16 @@ namespace ingame
         {
             return movement_style(assigned_movement(), scene_campaign(), vanilla_movement);
         }
+        // (V1.5.7, Koala Kong's rally) when Crash last started a spin, as the attack selector picks it (needs these hooks:
+        // a seed with Crashsanity styles or Ability Shuffle)
+        std::atomic<std::uint64_t> crash_spin_at{0};
         std::uint64_t movement_attack(Address component, Address input, unsigned char ignore_blocks)
         {
             const auto selected = reinterpret_cast<std::uint64_t (*)(Address, Address, unsigned char)>(movement_attack_hook.original)(component, input, ignore_blocks);
+            if (selected < 4)
+                if (const auto actor = value<Address>(component + 24); actor && actor == player() && typed(component, 0x1427ae0))
+                    if (attack_move(string(reinterpret_cast<Address (*)(Address, unsigned)>(base() + 0x47cfa0)(component, static_cast<unsigned>(selected)))) == MoveSpin)
+                        crash_spin_at = GetTickCount64();
             if (selected < 4)
             {
                 const auto style = effective_movement();
@@ -1370,6 +1377,9 @@ namespace ingame
         std::atomic<Address> koala_ai_node{0}, koala_ai_message{0}, koala_ai_component{0};
         std::atomic<std::uint64_t> koala_spun_at{0}, koala_block_until{0};
         std::atomic_uint koala_throws{0}, koala_spins{0}, koala_blocked{0};
+        // (V1.5.7) the rock's landing as the game sends it (5da8f86k after his throw), and its z6g8ytyk (V1.5.6's log: about
+        // 2.5 s after a landing that wasn't spun: it goes, sinking)
+        std::atomic_uint koala_lands{0}, koala_sinks{0};
         std::mutex koala_block_mutex;
         std::vector<std::string> koala_blocked_names;
         thread_local bool koala_own_send = false;
@@ -1922,6 +1932,10 @@ namespace ingame
                             koala_throw_component = component, koala_throw_rock = target, ++koala_throws;
                         else if (name.find("_id_z7wy1dtc") != std::string::npos)
                             koala_spun_rock = target, koala_spun_at = GetTickCount64(), ++koala_spins;
+                        else if (name.find("_id_5da8f86k") != std::string::npos)
+                            ++koala_lands;
+                        else if (name.find("_id_z6g8ytyk") != std::string::npos)
+                            ++koala_sinks;
                     }
                     else if (name.rfind("BossKoalaKong_AiController.", 0) == 0 && name.find("_id_zg4jy91e") != std::string::npos)
                         koala_ai_node = event, koala_ai_message = value<Address>(event + 16), koala_ai_component = component;
@@ -13870,6 +13884,10 @@ namespace ingame
             float last_d = 1e9f;
             unsigned land_samples = 0;
             std::set<Address> old_flights; // (flights already turned: not taken for the next one)
+            // (V1.5.7) when it landed (ms), the game's landings and sinks seen, which settings dumps are done
+            std::uint64_t landed_at = 0;
+            unsigned lands_seen = 0, sinks_seen = 0, spin_told = 0;
+            bool dumped_throw = false, dumped_land = false, dumped_ours = false, dumped_spin = false, told_no_hooks = false;
             float flight_speed = 0, turn_speed = 0;
             std::vector<Candidate> candidates;
             std::size_t trying = 0;
@@ -14017,7 +14035,7 @@ namespace ingame
             }
             if (!r.entered)
             {
-                r.entered = now, r.throws_seen = koala_throws.load(), r.spins_seen = koala_spins.load();
+                r.entered = now, r.throws_seen = koala_throws.load(), r.spins_seen = koala_spins.load(), r.lands_seen = koala_lands.load(), r.sinks_seen = koala_sinks.load();
                 std::cout << "Koala rally: on (harder bosses): he swats each rock back 2 or 3 times before it can hit him\n" << std::flush;
             }
             koala_rally_on = true;
@@ -14051,6 +14069,21 @@ namespace ingame
                                   << std::flush;
                 }
             }
+            // (V1.5.7 research) the rock's settings as the game throws it, lands it on Crash's side, and as Crash spins it
+            // (once each), to compare with a landing of ours
+            if (r.rock_component && typed(r.rock_component, 0x13bbbd0) && !r.dumped_throw && r.rock)
+                r.dumped_throw = true, log_graph_fields(r.rock_component, "Koala rally: the rock as he throws it");
+            if (const auto n = koala_lands.load(); n != r.lands_seen)
+            {
+                r.lands_seen = n;
+                if (r.rock_component && typed(r.rock_component, 0x13bbbd0) && !r.dumped_land && r.step != 4)
+                    r.dumped_land = true, log_graph_fields(r.rock_component, "Koala rally: the rock as the game lands it");
+            }
+            if (const auto n = koala_sinks.load(); n != r.sinks_seen)
+            {
+                r.sinks_seen = n;
+                std::cout << t << "the rock sinks (its z6g8ytyk)" << (r.step == 4 ? ", before Crash spun it where it landed" : "") << "\n" << std::flush;
+            }
             // its glow kept on it while it's around (gone with it)
             if (r.rock && now >= r.glow_at)
             {
@@ -14064,6 +14097,8 @@ namespace ingame
             if (const auto n = koala_spins.load(); n != r.spins_seen)
             {
                 r.spins_seen = n;
+                if (r.rock_component && typed(r.rock_component, 0x13bbbd0) && !r.dumped_spin)
+                    r.dumped_spin = true, log_graph_fields(r.rock_component, "Koala rally: the rock as Crash spins it");
                 if (koala_spun_rock.load() == r.rock && r.rock && r.left > 0 && !r.broken)
                 {
                     if (r.big)
@@ -14250,7 +14285,9 @@ namespace ingame
                     if (!c.position)
                         write(c.at, std::array<float, 3>{0, 0, 0});
                     const bool told = koala_rock_send(r.rock_component, "5da8f86k");
-                    r.step = 4, r.land_t = clock, r.land_samples = 0;
+                    r.step = 4, r.land_t = clock, r.land_samples = 0, r.landed_at = now;
+                    if (!r.dumped_ours && typed(r.rock_component, 0x13bbbd0))
+                        r.dumped_ours = true, log_graph_fields(r.rock_component, "Koala rally: the rock as ours lands");
                     std::cout << t << "LANDED: the turned rock stopped at " << koala_where(at) << " (" << std::lround(d) << " from its spot), Crash at " << koala_where(crash)
                               << "; the rock " << (told ? "told it landed (5da8f86k)" : "couldn't be told it landed (its 5da8f86k wasn't found)") << "\n"
                               << std::flush;
@@ -14258,6 +14295,51 @@ namespace ingame
                 }
                 r.last_d = d;
                 return;
+            }
+            // (V1.5.7, Eric's V1.5.6 run: it landed in front of Crash each time, but the rock Crash can spin
+            // (BossRock_BounceLandCollision) only comes with the game's own landing, and after about 2.5 s the rock sank.)
+            // So a spin of Crash's near where it landed (within 220 sideways, the 0.4 s after he starts it) is taken as the
+            // rock spun: it's sent what the game sends it as Crash spins its rock (5da8f86k, then z7wy1dtc), which makes the
+            // rock fly at Koala Kong again (a new BigRockToBoss); the landed flight is sent down out of the way
+            if (r.step == 4)
+            {
+                // (the rock gone, sunk: nothing left to spin; its flight sent down out of the way)
+                if (!r.rock || !event_owner(r.rock) || value<Address>(r.rock_component + 24) != r.rock)
+                {
+                    const auto &c = r.candidates[r.trying];
+                    if (!c.position)
+                        write(c.at, std::array<float, 3>{0, 0, -3000});
+                    std::cout << t << "the landed rock is gone before Crash spun it\n" << std::flush;
+                    r.old_flights.insert(r.big);
+                    r.step = -1, r.big = 0;
+                    return;
+                }
+                const auto spin = crash_spin_at.load();
+                if (!movement_attack_hook.installed && !r.told_no_hooks)
+                    r.told_no_hooks = true, std::cout << t << "Crash's spins can't be seen in this seed (no movement hooks: no Crashsanity styles or Ability Shuffle)\n" << std::flush;
+                const float side = std::hypot(crash[0] - at[0], crash[1] - at[1]);
+                if (spin > r.landed_at && now - spin < 400 && r.spin_told < 6 && side >= 220.0f)
+                    ++r.spin_told, std::cout << t << "Crash spins " << std::lround(side) << " from where it landed (220 or closer counts)\n" << std::flush;
+                if (spin > r.landed_at && now - spin < 400 && side < 220.0f)
+                {
+                    const auto &c = r.candidates[r.trying];
+                    if (!c.position)
+                        write(c.at, std::array<float, 3>{0, 0, -3000});
+                    const bool landed = koala_rock_send(r.rock_component, "5da8f86k");
+                    const bool spun = landed && koala_rock_send(r.rock_component, "z7wy1dtc");
+                    if (!r.dumped_spin && typed(r.rock_component, 0x13bbbd0))
+                        r.dumped_spin = true, log_graph_fields(r.rock_component, "Koala rally: the rock as Crash spins ours");
+                    std::cout << t << "SPUN: Crash spun the landed rock (" << std::lround(side) << " from it); its z7wy1dtc " << (spun ? "sent" : "couldn't be sent")
+                              << (r.left > 0 ? "" : "; he has no swats left: it hits him") << "\n"
+                              << std::flush;
+                    r.old_flights.insert(r.big);
+                    if (spun && r.left > 0)
+                        r.step = 0, r.big = 0, r.spun_at = now, r.trial_written = false, r.candidates.clear(), r.trying = 0, r.turned_samples = 0, r.land_samples = 0,
+                        r.last_d = 1e9f;
+                    else
+                        r.step = -1, r.big = 0;
+                    return;
+                }
             }
             // landed: where it is now and then (and what appears or goes, in the research lines)
             if (r.step == 4 && r.land_samples < 10 && clock - r.land_t >= 0.25 * (r.land_samples + 1))
