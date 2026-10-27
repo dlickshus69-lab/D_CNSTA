@@ -4,7 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Bigger Nitros, second try:** last build's 2x look only stuck in the pause menu, because the game redrew the Nitros at normal size every frame. This build makes the Nitro's physics body twice the size, and the game copies that to the Nitro's look itself.
-- **If the bigger look still doesn't stick,** the client notices within a second, keeps the Nitros normal size, and draws the big green box around each one so you can see the hitbox.
-- **Fixed the Nitro that "clips onto me but doesn't do anything":** a Nitro that already went off was being put back and reused. Now a new one comes in its place 3 s later.
-- To try: test 3 still on, `/boss ripper1` with harder bosses on. Check whether the Nitros look big while playing (not just paused), and walk onto a Nitro's platform edge. Send the log and a clip.
+- **No more constant outline:** the green box around every Nitro is gone. Outlines show only where a Nitro is about to appear, or while Roo is on one.
+- **Bigger Nitros, third try:** doubling the Nitro's physics body didn't change how it's drawn. This build first looks at Roo's Big TNT, the game's own big crate, to learn where its size is kept. Then it tries each place a Nitro's size might come from, and puts back any that don't work.
+- **The hitbox works:** last run, every time you walked onto a Nitro's platform it went off and you died. That stays the same.
+- To try: test 3 still on, `/boss ripper1` with harder bosses on. Say whether the Nitros look big. Either way, send the log: it lists every place tried and what each did.

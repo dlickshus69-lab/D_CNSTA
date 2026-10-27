@@ -4589,17 +4589,6 @@ namespace ingame
                 out[i] = matrix[12 + i] / body_meters;
             return true;
         }
-        // (V1.4.19) the crate's physics body's matrix itself (what the getter above returns: the game's sync copies it to
-        // the crate's look every frame), or 0
-        Address crate_body_matrix(Address entity)
-        {
-            static const bool verified =
-                code_matches(0x6f2796, std::array<unsigned char, 9>{0x48, 0x83, 0xc1, 0x50, 0xe8, 0x81, 0xcd, 0xa3, 0xff});
-            const auto physics = live_crate(entity) ? crate_physics(entity) : 0;
-            if (!verified || !physics)
-                return 0;
-            return reinterpret_cast<Address>(reinterpret_cast<const float *(*)(Address)>(base() + 0x12f520)(physics + 0x50));
-        }
         bool move_crate_body(Address entity, const std::array<float, 3> &at)
         {
             static const bool verified =
@@ -11903,7 +11892,18 @@ namespace ingame
             // (V1.4.19) how they're drawn bigger: 0 trying their physics bodies (what the game copies to their look each
             // frame), 1 that works, 2 it doesn't (their own size, with their bigger box outlined); its checks
             int look_method = 0;
-            unsigned look_ok = 0, look_bad = 0, body_writes = 0;
+            unsigned look_ok = 0, look_bad = 0;
+            // (V1.4.20) the places tried for it, one at a time (0 the entity's transform's matrix, 1 its model part's
+            // floats, 2 the entity's floats, 3 a matrix in its model part), and when the first Nitro was seen
+            struct LookTry
+            {
+                int kind = 0;
+                unsigned at = 0, count = 0;
+            };
+            std::vector<LookTry> look_tries;
+            std::size_t look_try = 0;
+            bool look_researched = false;
+            std::uint64_t look_since = 0;
             std::set<Address> nitro_moved;
             int nitro_making = -1;
             std::uint64_t nitro_making_since = 0;
@@ -12748,6 +12748,183 @@ namespace ingame
                 const auto in_box = [](const std::array<float, 3> &at, const std::array<float, 3> &spot, float half) {
                     return std::abs(at[0] - spot[0]) < half && std::abs(at[1] - spot[1]) < half;
                 };
+                // (V1.4.18) its look twice the size. V1.4.18 set its model's matrix, which the game sets back every frame
+                // (twice the size only in the pause menu); V1.4.19 its physics body's (Eric's V1.4.19 run: "no, it doesn't
+                // look bigger"; the log: "0 of 60 checks, the bodies set 2 times": the body kept it, the look didn't
+                // follow). (V1.4.20) the game's own big crate here, his Big TNT, is looked at once: how big its model is
+                // drawn, and where in it and its model part that size is kept; then each place a Nitro's look may come from
+                // is tried in turn (its transform's matrix, the floats where the Big TNT keeps its size, matrices in its
+                // model part), each checked 20 times (its model drawn twice the size at least 14 of them) and put back if
+                // not. What's found, and what each try did, goes to the log
+                const auto axis = [](const Matrix &m) { return std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]); };
+                const auto affine = [&](const Matrix &m) {
+                    return std::all_of(m.begin(), m.end(), [](float f) { return std::isfinite(f); }) && std::abs(m[3]) < 0.001f && std::abs(m[7]) < 0.001f &&
+                           std::abs(m[11]) < 0.001f && std::abs(m[15] - 1) < 0.001f && axis(m) > 0.01f && axis(m) < 100;
+                };
+                const auto model_part = [](Address entity) -> Address {
+                    const auto c = value<Address>(entity + 176);
+                    return (typed(c, 0x144bff0) || typed(c, 0x15aee18)) && value<Address>(c + 32) == entity ? c : 0;
+                };
+                const auto drawn = [&](Address entity) {
+                    Matrix m{};
+                    const auto model = crate_model(entity);
+                    return model && read(model + 48, m) && affine(m) ? axis(m) : 0.0f;
+                };
+                // a try's place in this crate, set to `size` (true: it's there and was set or already so)
+                const auto set_try = [&](Address entity, const RooResearch::LookTry &t, float size) {
+                    if (t.kind == 0 || t.kind == 3)
+                    {
+                        const auto holder = t.kind == 0 ? value<Address>(entity + 48) : model_part(entity);
+                        const auto at = holder ? holder + (t.kind == 0 ? 32 : t.at) : 0;
+                        Matrix m{};
+                        if (!at || !read(at, m) || !affine(m))
+                            return false;
+                        bool changed = false;
+                        for (unsigned row = 0; row < 3; ++row)
+                            if (const float l = std::sqrt(m[row * 4] * m[row * 4] + m[row * 4 + 1] * m[row * 4 + 1] + m[row * 4 + 2] * m[row * 4 + 2]);
+                                l > 0.01f && std::abs(l - size) > 0.01f)
+                            {
+                                for (unsigned col = 0; col < 3; ++col)
+                                    m[row * 4 + col] *= size / l;
+                                changed = true;
+                            }
+                        if (changed)
+                            write(at, m);
+                        return true;
+                    }
+                    const auto holder = t.kind == 1 ? model_part(entity) : entity;
+                    if (!holder)
+                        return false;
+                    for (unsigned i = 0; i < t.count; ++i)
+                    {
+                        const float f = value<float>(holder + t.at + 4 * i);
+                        if (!(f > 0.01f && f < 100))
+                            return false;
+                        if (std::abs(f - size) > 0.001f)
+                            write(holder + t.at + 4 * i, size);
+                    }
+                    return true;
+                };
+                const auto try_name = [](const RooResearch::LookTry &t) {
+                    std::ostringstream out;
+                    out << (t.kind == 0 ? "its transform's matrix" : t.kind == 1 ? "its model part's float" : t.kind == 2 ? "its own float" : "its model part's matrix");
+                    if (t.kind != 0)
+                        out << " at +0x" << std::hex << t.at << std::dec << (t.count > 1 ? " (" + std::to_string(t.count) + ")" : std::string());
+                    return out.str();
+                };
+                const auto look = [&](Address e, std::uint64_t at_time) {
+                    if (r.look_method == 2)
+                        return;
+                    if (!r.look_researched)
+                    {
+                        if (!r.look_since)
+                            r.look_since = at_time;
+                        Address big = 0;
+                        for (const auto owner : event_owners())
+                            if (string(value<Address>(owner + 128)).find("BigTNT") != std::string::npos)
+                            {
+                                big = crate_model(owner) ? owner : crate_entity(owner);
+                                if (big && crate_model(big))
+                                    break;
+                                big = 0;
+                            }
+                        if (!big && at_time - r.look_since < 4000)
+                            return;
+                        r.look_researched = true;
+                        const auto describe = [&](Address entity) {
+                            std::ostringstream out;
+                            Matrix t{};
+                            const auto transform = value<Address>(entity + 48);
+                            out << "drawn " << drawn(entity) << "x, transform at +0x30 "
+                                << (transform && read(transform + 32, t) && affine(t) ? "with axes " + std::to_string(axis(t)) : std::string("none"));
+                            const auto part = model_part(entity);
+                            out << ", model part " << (part ? hex(static_cast<unsigned>(value<Address>(part) - base())) : std::string("not found"));
+                            if (part)
+                            {
+                                out << ":";
+                                for (unsigned off = 8; off < 0x100; off += 4)
+                                    if (const float f = value<float>(part + off); std::isfinite(f) && f != 0 && std::abs(f) > 1e-4f && std::abs(f) < 1e5f)
+                                        out << " +" << std::hex << off << std::dec << "=" << f;
+                            }
+                            return out.str();
+                        };
+                        std::cout << "Roo Nitro look: a Nitro " << describe(e) << "\n" << std::flush;
+                        if (const auto transform = value<Address>(e + 48))
+                        {
+                            Matrix t{};
+                            if (read(transform + 32, t) && affine(t))
+                                r.look_tries.push_back({0, 0, 1});
+                        }
+                        if (big)
+                        {
+                            std::cout << "Roo Nitro look: his Big TNT " << describe(big) << "\n" << std::flush;
+                            const float size = drawn(big);
+                            if (size > 0 && std::abs(size - 1) > 0.05f)
+                                for (const int kind : {1, 2})
+                                {
+                                    const auto from = kind == 1 ? model_part(big) : big, to = kind == 1 ? model_part(e) : e;
+                                    std::string where;
+                                    for (unsigned off = 8; from && to && off < 0x300; off += 4)
+                                        if (std::abs(value<float>(from + off) - size) < 0.002f)
+                                        {
+                                            where += " +" + hex(off).substr(1);
+                                            if (std::abs(value<float>(to + off) - 1) < 0.002f)
+                                            {
+                                                if (!r.look_tries.empty() && r.look_tries.back().kind == kind && r.look_tries.back().at + 4 * r.look_tries.back().count == off &&
+                                                    r.look_tries.back().count < 3)
+                                                    ++r.look_tries.back().count;
+                                                else
+                                                    r.look_tries.push_back({kind, off, 1});
+                                            }
+                                        }
+                                    std::cout << "Roo Nitro look: his Big TNT's " << (kind == 1 ? "model part" : "own") << " floats at its size (" << size << "):"
+                                              << (where.empty() ? std::string(" none") : where) << "\n" << std::flush;
+                                }
+                        }
+                        else
+                            std::cout << "Roo Nitro look: no Big TNT found in 4 s\n" << std::flush;
+                        if (const auto part = model_part(e))
+                            for (unsigned off = 16; off + 64 <= 0x200; off += 16)
+                            {
+                                Matrix m{};
+                                if (read(part + off, m) && affine(m) && std::abs(axis(m) - 1) < 0.01f)
+                                    r.look_tries.push_back({3, off, 1});
+                            }
+                        std::string list;
+                        for (const auto &t : r.look_tries)
+                            list += (list.empty() ? "" : ", ") + try_name(t);
+                        std::cout << "Roo Nitro look: " << r.look_tries.size() << " places to try" << (list.empty() ? std::string() : ": " + list) << "\n" << std::flush;
+                        r.look_try = 0, r.look_ok = 0, r.look_bad = 0;
+                        if (r.look_tries.empty())
+                        {
+                            r.look_method = 2;
+                            std::cout << "Roo Nitro look: nothing to try: drawn its own size\n" << std::flush;
+                            return;
+                        }
+                    }
+                    const auto &t = r.look_tries[r.look_try];
+                    if (!set_try(e, t, nitro_scale) || r.look_method == 1)
+                        return;
+                    ++(std::abs(drawn(e) - nitro_scale) < 0.05f ? r.look_ok : r.look_bad);
+                    if (r.look_ok + r.look_bad < 20)
+                        return;
+                    const bool works = r.look_ok >= 14;
+                    std::cout << "Roo Nitro look: " << try_name(t) << ": drawn 2x " << r.look_ok << " of 20 times" << (works ? ": that's it" : ": put back") << "\n" << std::flush;
+                    if (works)
+                    {
+                        r.look_method = 1;
+                        return;
+                    }
+                    for (const auto other : r.nitro_crates)
+                        if (other && live_crate(other))
+                            set_try(other, t, 1.0f);
+                    r.look_ok = 0, r.look_bad = 0;
+                    if (++r.look_try >= r.look_tries.size())
+                    {
+                        r.look_method = 2;
+                        std::cout << "Roo Nitro look: none of them worked: drawn its own size\n" << std::flush;
+                    }
+                };
                 // (as soon as he's there: the level's spawners and the Nitro's template looked for, on their own threads)
                 if (!r.nitro_warm)
                     r.nitro_warm = true, nitro_level_scan("Boss");
@@ -12943,64 +13120,7 @@ namespace ingame
                             ++r.nitro_lines, std::cout << "Roo Nitro: the game moved the one on " << platform_name(r.nitro_platforms[k]) << " to " << roo_xyz(at) << ": put back\n" << std::flush;
                         set_entity_position(e, spot);
                     }
-                    // (V1.4.18) its look twice the size. (V1.4.19, Eric's V1.4.18 run: "I can't really tell if the hitbox is
-                    // bigger or the nitro is bigger"; the log: its model's matrix set back by the game every frame, so set
-                    // 183 times in 183 checks; his clip: twice the size only in the pause menu, where the game doesn't run):
-                    // its physics body's matrix instead, which the game's sync copies to its look each frame; set again
-                    // whenever its axes aren't twice as long. Whether its look follows is checked 60 times as a fight starts:
-                    // if not, the bodies go back to their size and the Nitros are drawn their own size with their bigger box
-                    // outlined around them (the hitbox is that box either way)
-                    if (r.look_method != 2)
-                    {
-                        if (const auto body = crate_body_matrix(e))
-                        {
-                            Matrix b{};
-                            if (read(body, b) && std::all_of(b.begin(), b.end(), [](float f) { return std::isfinite(f); }))
-                            {
-                                const float length = std::sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
-                                if (length > 0.01f && length < 100 && std::abs(length - nitro_scale) > 0.01f)
-                                {
-                                    for (const unsigned i : {0u, 1u, 2u, 4u, 5u, 6u, 8u, 9u, 10u})
-                                        b[i] *= nitro_scale / length;
-                                    write(body, b);
-                                    ++r.body_writes;
-                                }
-                            }
-                        }
-                        else if (r.look_method == 0)
-                        {
-                            r.look_method = 2;
-                            std::cout << "Roo Nitro: no physics body found for the one on " << platform_name(q) << ": drawn its own size, its bigger box outlined\n" << std::flush;
-                        }
-                        Matrix m{};
-                        if (const auto model = crate_model(e); r.look_method == 0 && model && read(model + 48, m))
-                        {
-                            const float length = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
-                            ++(std::abs(length - nitro_scale) < 0.05f ? r.look_ok : r.look_bad);
-                            if (r.look_ok + r.look_bad >= 60)
-                            {
-                                r.look_method = r.look_ok >= 54 ? 1 : 2;
-                                std::cout << "Roo Nitro: " << (r.look_method == 1 ? "drawn 2x through their physics bodies" : "their bodies' size doesn't reach their look")
-                                          << " (" << r.look_ok << " of 60 checks, the bodies set " << r.body_writes << " times)"
-                                          << (r.look_method == 1 ? std::string() : ": drawn their own size, their bigger box outlined") << "\n" << std::flush;
-                                if (r.look_method == 2)
-                                    for (const auto other : r.nitro_crates)
-                                        if (const auto body = other ? crate_body_matrix(other) : 0)
-                                        {
-                                            Matrix b{};
-                                            if (!read(body, b))
-                                                continue;
-                                            const float length = std::sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
-                                            if (length > 0.01f && length < 100)
-                                            {
-                                                for (const unsigned i : {0u, 1u, 2u, 4u, 5u, 6u, 8u, 9u, 10u})
-                                                    b[i] /= length;
-                                                write(body, b);
-                                            }
-                                        }
-                            }
-                        }
-                    }
+                    look(e, now);
                 }
                 // the next one due (both in a row), with nobody on its platform
                 if (r.nitro_making < 0 && !nitro_spawn_state.component && !r.nitro_plan_new && now >= r.nitro_next)
@@ -13032,7 +13152,7 @@ namespace ingame
                 {
                     std::vector<std::array<float, 3>> spots;
                     for (std::size_t k = 0; k < r.nitro_crates.size(); ++k)
-                        if (!r.nitro_crates[k] || (k < r.nitro_hidden.size() && r.nitro_hidden[k]) || r.look_method == 2)
+                        if (!r.nitro_crates[k] || (k < r.nitro_hidden.size() && r.nitro_hidden[k]))
                             spots.push_back(nitro_spot(r.nitro_platforms[k]));
                     std::lock_guard lock(roo_outline_mutex);
                     roo_outline_spots = std::move(spots), roo_outline_scale = nitro_scale;
