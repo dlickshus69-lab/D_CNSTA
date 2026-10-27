@@ -4,7 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Bigger Nitros in Roo's fight:** they're drawn twice the size, and their hitbox is that size too. Standing on a Nitro's platform, even on the edge, sets it off, so you can't use that platform until the Nitros move.
-- **Outline only right before he lands:** a Nitro turns into an outline only at the very end of his hop onto it, and comes back as soon as he's out of its box. You can't read his next hop from it anymore.
-- **No outline on the black screen** after Crash dies.
-- To try: test 3 still on, `/boss ripper1` with harder bosses on. Check whether the Nitros look bigger, try standing on a Nitro's edge, and watch the outlines as he lands. Send the log and a clip.
+- **Bigger Nitros, second try:** last build's 2x look only stuck in the pause menu, because the game redrew the Nitros at normal size every frame. This build makes the Nitro's physics body twice the size, and the game copies that to the Nitro's look itself.
+- **If the bigger look still doesn't stick,** the client notices within a second, keeps the Nitros normal size, and draws the big green box around each one so you can see the hitbox.
+- **Fixed the Nitro that "clips onto me but doesn't do anything":** a Nitro that already went off was being put back and reused. Now a new one comes in its place 3 s later.
+- To try: test 3 still on, `/boss ripper1` with harder bosses on. Check whether the Nitros look big while playing (not just paused), and walk onto a Nitro's platform edge. Send the log and a clip.

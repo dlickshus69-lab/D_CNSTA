@@ -1282,6 +1282,10 @@ namespace ingame
         std::array<std::atomic<Address>, 4> roo_nitro_entity{};
         std::set<std::string> roo_nitro_events_seen;
         std::atomic<unsigned> roo_nitro_kept{0};
+        // (V1.4.19) his Nitros whose explosion went through (a crate stays after it goes off, so this is how to tell;
+        // V1.4.18 put one back and moved it to Crash again: "It's like clips onto me, but it doesn't do anything"), under
+        // event_mutex
+        std::set<Address> roo_nitro_blown;
         // (V1.4.17, Testing) in Ripper Roo's arena with /roo_nitro's copy in: N. Sanity Beach's crates' own level scripts
         // get nothing (see event_sent); which scripts those are, by their class, as found; what they'd have got, once each
         // (whether /roo_nitro's copy is in, and whether the level loaded is his: checked by event_sent itself every 100 ms
@@ -1832,6 +1836,12 @@ namespace ingame
                         blocked = graph == "common_Crate_Explode" && known && d > 200;
                         if (blocked)
                             ++roo_nitro_kept;
+                        else if (graph == "common_Crate_Explode")
+                        {
+                            std::lock_guard lock(event_mutex);
+                            if (roo_nitro_blown.size() < 256)
+                                roo_nitro_blown.insert(target);
+                        }
                         const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
                         bool fresh = false;
                         {
@@ -4578,6 +4588,17 @@ namespace ingame
             for (unsigned i = 0; i < 3; ++i)
                 out[i] = matrix[12 + i] / body_meters;
             return true;
+        }
+        // (V1.4.19) the crate's physics body's matrix itself (what the getter above returns: the game's sync copies it to
+        // the crate's look every frame), or 0
+        Address crate_body_matrix(Address entity)
+        {
+            static const bool verified =
+                code_matches(0x6f2796, std::array<unsigned char, 9>{0x48, 0x83, 0xc1, 0x50, 0xe8, 0x81, 0xcd, 0xa3, 0xff});
+            const auto physics = live_crate(entity) ? crate_physics(entity) : 0;
+            if (!verified || !physics)
+                return 0;
+            return reinterpret_cast<Address>(reinterpret_cast<const float *(*)(Address)>(base() + 0x12f520)(physics + 0x50));
         }
         bool move_crate_body(Address entity, const std::array<float, 3> &at)
         {
@@ -11878,9 +11899,11 @@ namespace ingame
             float hide_at = 140;
             std::vector<std::uint64_t> nitro_struck_at;
             std::vector<int> nitro_strike_step;
-            unsigned strike_lines = 0, look_checks = 0, look_writes = 0;
-            std::uint64_t look_first = 0;
-            bool look_told = false, look_none_told = false;
+            unsigned strike_lines = 0;
+            // (V1.4.19) how they're drawn bigger: 0 trying their physics bodies (what the game copies to their look each
+            // frame), 1 that works, 2 it doesn't (their own size, with their bigger box outlined); its checks
+            int look_method = 0;
+            unsigned look_ok = 0, look_bad = 0, body_writes = 0;
             std::set<Address> nitro_moved;
             int nitro_making = -1;
             std::uint64_t nitro_making_since = 0;
@@ -12071,6 +12094,10 @@ namespace ingame
                     r.nitro_plan_new = false, r.nitro_making = -1, r.nitro_warm = false, r.nitro_moved.clear(), r.nitro_gone.clear(), r.beach_moved.clear();
                     r.nitro_whys.clear(), r.nitro_hidden.clear(), r.next_target = -1;
                     r.nitro_last_d.clear(), r.nitro_struck_at.clear(), r.nitro_strike_step.clear();
+                    {
+                        std::lock_guard lock(event_mutex);
+                        roo_nitro_blown.clear();
+                    }
                     {
                         std::lock_guard lock(beach_meta_mutex);
                         beach_meta_block.clear();
@@ -12775,7 +12802,13 @@ namespace ingame
                     {
                         const auto e = r.nitro_crates[k];
                         std::array<float, 3> at{};
-                        if (!e || !live_crate(e) || !read(e + 32, at))
+                        bool blown = false;
+                        {
+                            // (V1.4.19: one that went off is never kept: a new one comes)
+                            std::lock_guard lock(event_mutex);
+                            blown = roo_nitro_blown.erase(e) > 0;
+                        }
+                        if (!e || blown || !live_crate(e) || !read(e + 32, at))
                             continue;
                         const auto kept = std::find(r.nitro_plan.begin(), r.nitro_plan.end(), r.nitro_platforms[k]);
                         if (kept != r.nitro_plan.end())
@@ -12809,11 +12842,17 @@ namespace ingame
                         continue;
                     const auto spot = nitro_spot(r.nitro_platforms[k]);
                     std::array<float, 3> at{};
-                    if (!live_crate(e) || !read(e + 32, at))
+                    bool blown = false;
                     {
-                        // gone: set off (by whom?), or the fight made over; back in 3 s, outlined
+                        std::lock_guard lock(event_mutex);
+                        blown = roo_nitro_blown.erase(e) > 0;
+                    }
+                    if (blown || !live_crate(e) || !read(e + 32, at))
+                    {
+                        // gone: set off (by whom?), or the fight made over; back in 3 s, outlined. (V1.4.19: one that went off
+                        // stays a crate in the game's memory: what's left of it is left alone)
                         if (r.nitro_lines < 80)
-                            ++r.nitro_lines, std::cout << "Roo Nitro: the one on " << platform_name(r.nitro_platforms[k]) << " is gone after " << seconds(now - r.nitro_made_at[k])
+                            ++r.nitro_lines, std::cout << "Roo Nitro: the one on " << platform_name(r.nitro_platforms[k]) << (blown ? " went off" : " is gone") << " after " << seconds(now - r.nitro_made_at[k])
                                                        << " (Ripper Roo " << std::lround(std::hypot(roo_at[0] - spot[0], roo_at[1] - spot[1])) << " from it"
                                                        << (crash_known ? ", Crash " + std::to_string(std::lround(std::hypot(crash[0] - spot[0], crash[1] - spot[1]))) : std::string())
                                                        << "; his health " << (health_getter_ok() ? std::to_string(actor_health(r.roo) / 100) + " hits" : std::string("?")) << ")\n" << std::flush;
@@ -12904,42 +12943,64 @@ namespace ingame
                             ++r.nitro_lines, std::cout << "Roo Nitro: the game moved the one on " << platform_name(r.nitro_platforms[k]) << " to " << roo_xyz(at) << ": put back\n" << std::flush;
                         set_entity_position(e, spot);
                     }
-                    // (V1.4.18) its look twice the size: the 3 axes of its model's matrix (from its base, so it grows up and out),
-                    // set again whenever they aren't; how often that's needed goes to the log once
-                    if (const auto model = crate_model(e))
+                    // (V1.4.18) its look twice the size. (V1.4.19, Eric's V1.4.18 run: "I can't really tell if the hitbox is
+                    // bigger or the nitro is bigger"; the log: its model's matrix set back by the game every frame, so set
+                    // 183 times in 183 checks; his clip: twice the size only in the pause menu, where the game doesn't run):
+                    // its physics body's matrix instead, which the game's sync copies to its look each frame; set again
+                    // whenever its axes aren't twice as long. Whether its look follows is checked 60 times as a fight starts:
+                    // if not, the bodies go back to their size and the Nitros are drawn their own size with their bigger box
+                    // outlined around them (the hitbox is that box either way)
+                    if (r.look_method != 2)
                     {
-                        Matrix m{};
-                        if (read(model + 48, m) && std::all_of(m.begin(), m.end(), [](float f) { return std::isfinite(f); }) && std::abs(m[15] - 1) < 0.001f)
+                        if (const auto body = crate_body_matrix(e))
                         {
-                            std::array<float, 3> length{};
-                            bool sane = true, off = false;
-                            for (unsigned row = 0; row < 3; ++row)
+                            Matrix b{};
+                            if (read(body, b) && std::all_of(b.begin(), b.end(), [](float f) { return std::isfinite(f); }))
                             {
-                                length[row] = std::sqrt(m[row * 4] * m[row * 4] + m[row * 4 + 1] * m[row * 4 + 1] + m[row * 4 + 2] * m[row * 4 + 2]);
-                                sane = sane && length[row] > 0.01f && length[row] < 100;
-                                off = off || std::abs(length[row] - nitro_scale) > 0.01f;
+                                const float length = std::sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
+                                if (length > 0.01f && length < 100 && std::abs(length - nitro_scale) > 0.01f)
+                                {
+                                    for (const unsigned i : {0u, 1u, 2u, 4u, 5u, 6u, 8u, 9u, 10u})
+                                        b[i] *= nitro_scale / length;
+                                    write(body, b);
+                                    ++r.body_writes;
+                                }
                             }
-                            ++r.look_checks;
-                            if (sane && off)
+                        }
+                        else if (r.look_method == 0)
+                        {
+                            r.look_method = 2;
+                            std::cout << "Roo Nitro: no physics body found for the one on " << platform_name(q) << ": drawn its own size, its bigger box outlined\n" << std::flush;
+                        }
+                        Matrix m{};
+                        if (const auto model = crate_model(e); r.look_method == 0 && model && read(model + 48, m))
+                        {
+                            const float length = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+                            ++(std::abs(length - nitro_scale) < 0.05f ? r.look_ok : r.look_bad);
+                            if (r.look_ok + r.look_bad >= 60)
                             {
-                                for (unsigned row = 0; row < 3; ++row)
-                                    for (unsigned col = 0; col < 3; ++col)
-                                        m[row * 4 + col] *= nitro_scale / length[row];
-                                write(model + 48, m);
-                                ++r.look_writes;
-                                if (!r.look_first)
-                                    r.look_first = now, r.look_checks = 1, r.look_writes = 1;
+                                r.look_method = r.look_ok >= 54 ? 1 : 2;
+                                std::cout << "Roo Nitro: " << (r.look_method == 1 ? "drawn 2x through their physics bodies" : "their bodies' size doesn't reach their look")
+                                          << " (" << r.look_ok << " of 60 checks, the bodies set " << r.body_writes << " times)"
+                                          << (r.look_method == 1 ? std::string() : ": drawn their own size, their bigger box outlined") << "\n" << std::flush;
+                                if (r.look_method == 2)
+                                    for (const auto other : r.nitro_crates)
+                                        if (const auto body = other ? crate_body_matrix(other) : 0)
+                                        {
+                                            Matrix b{};
+                                            if (!read(body, b))
+                                                continue;
+                                            const float length = std::sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
+                                            if (length > 0.01f && length < 100)
+                                            {
+                                                for (const unsigned i : {0u, 1u, 2u, 4u, 5u, 6u, 8u, 9u, 10u})
+                                                    b[i] /= length;
+                                                write(body, b);
+                                            }
+                                        }
                             }
                         }
                     }
-                    else if (!r.look_none_told)
-                        r.look_none_told = true, std::cout << "Roo Nitro: no model found for the one on " << platform_name(q) << ": drawn its own size\n" << std::flush;
-                }
-                if (!r.look_told && r.look_first && now - r.look_first >= 2000)
-                {
-                    r.look_told = true;
-                    std::cout << "Roo Nitro: drawn " << nitro_scale << "x: its look set " << r.look_writes << " times in " << r.look_checks << " checks over 2 s"
-                              << (r.look_writes * 2 > r.look_checks ? " (the game sets it back: set again each frame)" : " (the game keeps it)") << "\n" << std::flush;
                 }
                 // the next one due (both in a row), with nobody on its platform
                 if (r.nitro_making < 0 && !nitro_spawn_state.component && !r.nitro_plan_new && now >= r.nitro_next)
@@ -12971,7 +13032,7 @@ namespace ingame
                 {
                     std::vector<std::array<float, 3>> spots;
                     for (std::size_t k = 0; k < r.nitro_crates.size(); ++k)
-                        if (!r.nitro_crates[k] || (k < r.nitro_hidden.size() && r.nitro_hidden[k]))
+                        if (!r.nitro_crates[k] || (k < r.nitro_hidden.size() && r.nitro_hidden[k]) || r.look_method == 2)
                             spots.push_back(nitro_spot(r.nitro_platforms[k]));
                     std::lock_guard lock(roo_outline_mutex);
                     roo_outline_spots = std::move(spots), roo_outline_scale = nitro_scale;
