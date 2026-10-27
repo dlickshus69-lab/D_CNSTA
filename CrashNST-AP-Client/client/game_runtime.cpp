@@ -12538,6 +12538,7 @@ namespace ingame
                     // them off the Nitros' platforms); 2 Nitros, 3 from the second hit, 4 from the fourth: 3 platforms at least
                     // always free)
                     std::vector<int> nitros;
+                    std::string safe_text;
                     const auto pattern = make_pattern(length, from, start);
                     if (nitro_mode)
                     {
@@ -12584,21 +12585,78 @@ namespace ingame
                                         reached.push_back(x);
                             return reached.size() == free.size();
                         };
+                        // (V1.4.21, Eric's V1.4.20 run, the Nitros twice the size at last: "Now we just gotta make it where we're
+                        // not stuck ... the game knows [his] pattern for that time that he's fighting. Unless he dies, it's
+                        // different ... the nitro should know where he's gonna be jumping, and so we shouldn't get blocked off.
+                        // Where it becomes impossible, but not easy either"; his clip: after hit 2 his pattern of 5 left only the
+                        // middle left and back middle off his path, and Crash was cornered at the back, whose one way out is the
+                        // middle): the Nitros are picked with this stage's pattern in hand, every way of placing them weighed
+                        // (from the most Nitros down): besides the above, a platform off his path and free must be left when his
+                        // path doesn't take them all ("safe"); one safe platform with two ways out (not a dead end like the back)
+                        // above all else; then Nitros off his path (they take the places Crash would rest: not easy), Nitros next
+                        // to a safe platform or Crash's, and not where they just were; ties at random
+                        const std::size_t count = r.platforms.size();
+                        std::vector<bool> on_path(count), was(count);
+                        for (const int x : pattern)
+                            if (x >= 0 && static_cast<std::size_t>(x) < count)
+                                on_path[static_cast<std::size_t>(x)] = true;
+                        for (const int x : r.nitro_platforms)
+                            if (x >= 0 && static_cast<std::size_t>(x) < count)
+                                was[static_cast<std::size_t>(x)] = true;
+                        const auto off_path = static_cast<std::size_t>(std::count(on_path.begin(), on_path.end(), false));
+                        std::uniform_real_distribution<float> tie(0.0f, 0.9f);
+                        float best_score = -1e9f;
+                        std::vector<int> best, best_safe;
                         for (std::size_t n = std::min(want, can.size()); n > 0 && nitros.empty(); --n)
-                            for (unsigned tries = 0; tries < 200 && nitros.empty(); ++tries)
+                        {
+                            for (unsigned mask = 0; mask < (1u << can.size()); ++mask)
                             {
+                                std::size_t bits = 0;
+                                for (unsigned m = mask; m; m &= m - 1)
+                                    ++bits;
+                                if (bits != n)
+                                    continue;
                                 std::vector<int> picked;
-                                if (tries == 0)
-                                    picked.assign(can.begin(), can.begin() + static_cast<std::ptrdiff_t>(n));
-                                else
+                                for (std::size_t i = 0; i < can.size(); ++i)
+                                    if (mask & (1u << i))
+                                        picked.push_back(can[i]);
+                                if (!fair(picked))
+                                    continue;
+                                std::vector<bool> nitro(count);
+                                for (const int x : picked)
+                                    nitro[static_cast<std::size_t>(x)] = true;
+                                std::vector<int> safe;
+                                for (std::size_t q = 0; q < count; ++q)
+                                    if (!nitro[q] && !on_path[q])
+                                        safe.push_back(static_cast<int>(q));
+                                if (off_path > 0 && safe.empty())
+                                    continue;
+                                const auto ways_out = [&](int q) {
+                                    int ways = 0;
+                                    for (std::size_t x = 0; x < count; ++x)
+                                        ways += !nitro[x] && straight(q, static_cast<int>(x)) ? 1 : 0;
+                                    return ways;
+                                };
+                                const bool open_safe = std::any_of(safe.begin(), safe.end(), [&](int q) { return ways_out(q) >= 2; });
+                                float score = open_safe ? 10.0f : 0.0f;
+                                for (const int x : picked)
                                 {
-                                    auto shuffled = can;
-                                    std::shuffle(shuffled.begin(), shuffled.end(), rng);
-                                    picked.assign(shuffled.begin(), shuffled.begin() + static_cast<std::ptrdiff_t>(n));
+                                    const auto q = static_cast<std::size_t>(x);
+                                    score += on_path[q] ? 0.0f : 3.0f;
+                                    if (std::any_of(safe.begin(), safe.end(), [&](int y) { return straight(x, y); }) || (crash_on >= 0 && straight(x, crash_on)))
+                                        score += 1.0f;
+                                    if (was[q])
+                                        score -= 1.0f;
                                 }
-                                if (fair(picked))
-                                    nitros = picked;
+                                score += tie(rng);
+                                if (score > best_score)
+                                    best_score = score, best = picked, best_safe = safe;
                             }
+                            // (the most Nitros any placement allows: the best of those)
+                            nitros = best;
+                        }
+                        for (const int x : best_safe)
+                            safe_text += (safe_text.empty() ? "" : ", ") + platform_name(x);
                         r.nitro_plan = nitros, r.nitro_plan_new = true, r.nitro_plan_after_hit = fight;
                     }
                     bool set = false, fourth = false;
@@ -12632,7 +12690,7 @@ namespace ingame
                                                      << (set ? "a pattern of " + std::to_string(length) + ": " + pattern_text(pattern, start)
                                                              : "no pattern of " + std::to_string(length) + " fits (the game's own)")
                                                      << " (from " << platform_name(from) << ")"
-                                                     << (nitro_mode ? (nitros.empty() ? std::string(", no Nitros") : ", Nitros on " + nitro_text) : std::string()) << "\n";
+                                                     << (nitro_mode ? (nitros.empty() ? std::string(", no Nitros") : ", Nitros on " + nitro_text + (safe_text.empty() ? std::string(" (nowhere off his path)") : " (safe: " + safe_text + ")")) : std::string()) << "\n";
                     }
                 }
                 if (on_stage >= 0 && landed)

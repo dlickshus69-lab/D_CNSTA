@@ -4,7 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **No more constant outline:** the green box around every Nitro is gone. Outlines show only where a Nitro is about to appear, or while Roo is on one.
-- **Bigger Nitros, third try:** doubling the Nitro's physics body didn't change how it's drawn. This build first looks at Roo's Big TNT, the game's own big crate, to learn where its size is kept. Then it tries each place a Nitro's size might come from, and puts back any that don't work.
-- **The hitbox works:** last run, every time you walked onto a Nitro's platform it went off and you died. That stays the same.
-- To try: test 3 still on, `/boss ripper1` with harder bosses on. Say whether the Nitros look big. Either way, send the log: it lists every place tried and what each did.
+- **Nitros placed around Roo's pattern:** each time he starts a new pattern (fight start, after a hit, after a death), the Nitros are placed knowing exactly where he'll jump that round.
+- **Never cornered:** there's always a free platform Roo never lands on that round, and it has two ways out (not a dead end like the back platform). This was the trap in your last clip.
+- **Still not easy:** Nitros go on the platforms off his path when they can, the spots you'd rest on, and next to your safe spots, but never so many that you're cut off. At a 6- or 7-platform pattern there's no spot off his path left, so you have to keep moving.
+- The log line for each pattern now lists the safe platforms too.
+- To try: test 3 still on, `/boss ripper1` with harder bosses on. Play through all the hits and say whether it ever feels impossible or too easy. Send the log.
