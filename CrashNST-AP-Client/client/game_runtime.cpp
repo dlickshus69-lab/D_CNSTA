@@ -13843,8 +13843,10 @@ namespace ingame
         // at him after Crash's spin (its BigRockToBoss projectile, which has the same script as his throw at Crash,
         // BossKoalaKong_Projectile_RockToCrash) is watched for a moment to learn its speed, the places in it that hold
         // that speed (or where it's headed) are found, and each is set, one at a time, to head at Crash instead, until
-        // the rock is seen to turn (the ones that don't are put back). Where it turns, how it flies, and what it does as
-        // it reaches Crash's side go to the log: this build finds the way; making the turn happen right at him comes next
+        // the rock is seen to turn (the ones that don't are put back). (V1.5.6, Eric's V1.5.5 run: it turned 3 of 4 times,
+        // each by its movement part's +0x5c, and then flew on through Crash and the floor for 2 s: that flight only hits
+        // him.) So the turn comes as the rock is 40% of the way to him, the place that turned it before first, headed for a
+        // spot in front of Crash, and there it's stopped and the rock is told it landed (its own 5da8f86k)
         struct KoalaRally
         {
             struct Candidate
@@ -13861,9 +13863,13 @@ namespace ingame
             int planned = 0, left = 0;
             bool broken = false, told_last = false, told_model = false, dumped = false, big_told = false, trial_written = false;
             // the flight at him being turned: 0 waiting for its speed, 1 trying its places, 2 turned (watched), 3 given up
+            // (V1.5.6: 4 landed where it was headed and stopped, the rock told it landed; watched)
             int step = -1;
-            double big_t0 = 0, try_t = 0;
+            double big_t0 = 0, try_t = 0, land_t = 0;
             std::array<float, 3> big_p0{}, try_p{}, aim{}, koala_at{};
+            float last_d = 1e9f;
+            unsigned land_samples = 0;
+            std::set<Address> old_flights; // (flights already turned: not taken for the next one)
             float flight_speed = 0, turn_speed = 0;
             std::vector<Candidate> candidates;
             std::size_t trying = 0;
@@ -13957,6 +13963,49 @@ namespace ingame
                         out.push_back(c);
             return out;
         }
+        // (V1.5.6) where V1.5.5's runs found the flight's speed, the one place that turned it each time: its movement part
+        // (type +0x143a528) at +0x5c, the same spot as type +0x1423ff0's +0xdc
+        Address koala_flight_speed_at(Address big)
+        {
+            for (const auto c : list(value<Address>(big + 24), 64))
+            {
+                if (typed(c, 0x143a528))
+                    return c + 0x5c;
+                if (typed(c, 0x1423ff0))
+                    return c + 0xdc;
+            }
+            return 0;
+        }
+        // a script's own message by its id: the message and where it goes (see aku_message)
+        std::pair<Address, Address> script_message(Address component, const std::string &id)
+        {
+            for (const auto delegator : list(value<Address>(value<Address>(component + 56) + 160), 128))
+            {
+                const auto message = value<Address>(delegator + 24), target = value<Address>(delegator + 32);
+                if (!typed(delegator, 0x13bc268) || !typed(message, 0x17b6578) || !typed(target, 0x13bbcb8))
+                    continue;
+                if (string(value<Address>(message + 16), 120).find("_id_" + id) != std::string::npos)
+                    return {message, target};
+            }
+            return {0, 0};
+        }
+        // the rock's own message with no values, sent the way it sends it to itself (V1.5.2 sent its kxfns6c4 so)
+        bool koala_rock_send(Address component, const std::string &id)
+        {
+            const bool sender_ok = event_hook.installed || code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0});
+            if (!sender_ok || !component || !typed(component, 0x13bbbd0))
+                return false;
+            const auto [message, target] = script_message(component, id);
+            if (!message || !field_at(message, "_sender", 32, 8))
+                return false;
+            std::array<Address, 11> node{base() + 0x13bc390, 0, message, target};
+            std::array<Address, 6> context{component};
+            koala_own_send = true;
+            reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(reinterpret_cast<Address>(node.data()), reinterpret_cast<Address>(context.data()));
+            koala_own_send = false;
+            return true;
+        }
         void koala_rally_update(const Shared &state, const std::string &boss, std::uint64_t now)
         {
             auto &r = koala_rally;
@@ -14016,19 +14065,25 @@ namespace ingame
             {
                 r.spins_seen = n;
                 if (koala_spun_rock.load() == r.rock && r.rock && r.left > 0 && !r.broken)
-                    r.step = 0, r.big = 0, r.spun_at = now, r.trial_written = false, r.candidates.clear(), r.trying = 0, r.turned_samples = 0;
+                {
+                    if (r.big)
+                        r.old_flights.insert(r.big);
+                    r.step = 0, r.big = 0, r.spun_at = now, r.trial_written = false, r.candidates.clear(), r.trying = 0, r.turned_samples = 0, r.land_samples = 0,
+                    r.last_d = 1e9f;
+                }
                 else if (koala_spun_rock.load() == r.rock && r.rock && !r.told_last && r.lines++ < 80)
                     r.told_last = true, std::cout << t << "Crash spins it back and he has no swats left: it hits him\n" << std::flush;
             }
             if (r.step < 0 || r.step == 3)
                 return;
+            // (V1.5.6) a landed flight, watched until it's gone (or the next spin)
             // the flight at him (or turned back)
             if (!r.big || !event_owner(r.big))
             {
                 if (r.big)
                 {
                     // (a place being tried went with the flight: nothing to put back)
-                    std::cout << t << (r.step == 2 ? "the turned rock's flight is over" : "the rock reached him before it was turned") << "\n" << std::flush;
+                    std::cout << t << (r.step == 2 || r.step == 4 ? "the turned rock's flight is over" : "the rock reached him before it was turned") << "\n" << std::flush;
                     r.step = -1, r.big = 0;
                     return;
                 }
@@ -14039,7 +14094,7 @@ namespace ingame
                     return;
                 }
                 for (const auto owner : event_owners())
-                    if (string(value<Address>(owner + 128)).find("BigRockToBoss") != std::string::npos && read(owner + 32, r.big_p0))
+                    if (!r.old_flights.count(owner) && string(value<Address>(owner + 128)).find("BigRockToBoss") != std::string::npos && read(owner + 32, r.big_p0))
                     {
                         r.big = owner, r.big_t0 = precise_seconds();
                         read(r.koala + 32, r.koala_at);
@@ -14080,6 +14135,26 @@ namespace ingame
                     return;
                 }
                 r.candidates = koala_flight_places(r.big, v, r.koala_at);
+                // (V1.5.6) the place that turned it in V1.5.5, first, when it holds its speed along its way
+                if (const auto known = koala_flight_speed_at(r.big))
+                {
+                    std::array<float, 3> w{};
+                    const float to_him = std::hypot(r.koala_at[0] - at[0], r.koala_at[1] - at[1], r.koala_at[2] - at[2]);
+                    if (read(known, w))
+                    {
+                        const float m = std::hypot(w[0], w[1], w[2]);
+                        const float cosine = m > 1 && to_him > 1
+                                                 ? (w[0] * (r.koala_at[0] - at[0]) + w[1] * (r.koala_at[1] - at[1]) + w[2] * (r.koala_at[2] - at[2])) / (m * to_him)
+                                                 : 0.0f;
+                        if (m > 300 && m < 6000 && cosine > 0.6f)
+                        {
+                            r.candidates.erase(std::remove_if(r.candidates.begin(), r.candidates.end(), [&](const auto &c) { return c.at == known; }), r.candidates.end());
+                            KoalaRally::Candidate c;
+                            c.at = known, c.was = w, c.ratio = m / r.flight_speed, c.about = "its movement part (the place that turned it before)";
+                            r.candidates.insert(r.candidates.begin(), c);
+                        }
+                    }
+                }
                 // (faster with each swat: half its own speed on the first, then 0.6 and 0.7)
                 r.turn_speed = r.flight_speed * (0.5f + 0.1f * static_cast<float>(r.planned - r.left));
                 std::ostringstream places;
@@ -14100,21 +14175,35 @@ namespace ingame
             // one place at a time, set to head at Crash; kept if the rock turns
             if (r.step == 1)
             {
-                const std::array<float, 3> to{crash[0] - at[0], crash[1] - at[1], crash[2] - at[2]};
+                // (V1.5.6) the turn as the rock is 40% of the way to him, headed for a landing spot: 120 in front of Crash
+                // (his way to Koala Kong) at the height a landed rock is (60 over the floor)
+                if (!r.trial_written && r.trying == 0)
+                {
+                    const float total = std::hypot(r.koala_at[0] - r.big_p0[0], r.koala_at[1] - r.big_p0[1], r.koala_at[2] - r.big_p0[2]);
+                    const float done = std::hypot(at[0] - r.big_p0[0], at[1] - r.big_p0[1], at[2] - r.big_p0[2]);
+                    if (total > 50 && done < 0.4f * total)
+                        return;
+                }
+                if (!r.trial_written)
+                {
+                    const float side = r.koala_at[1] >= crash[1] ? 1.0f : -1.0f;
+                    r.aim = {crash[0], crash[1] + 120.0f * side, std::min(crash[2], 20.0f) + 60.0f};
+                }
+                const std::array<float, 3> to{r.aim[0] - at[0], r.aim[1] - at[1], r.aim[2] - at[2]};
                 const float d = std::max(1.0f, std::hypot(to[0], to[1], to[2]));
                 if (!r.trial_written)
                 {
                     const auto &c = r.candidates[r.trying];
                     std::array<float, 3> w{};
                     if (c.position)
-                        w = crash;
+                        w = r.aim;
                     else
                     {
                         const float m = std::hypot(c.was[0], c.was[1], c.was[2]) * r.turn_speed / r.flight_speed;
                         w = {to[0] / d * m, to[1] / d * m, to[2] / d * m};
                     }
                     write(c.at, w);
-                    r.trial_written = true, r.try_t = clock, r.try_p = at, r.aim = crash;
+                    r.trial_written = true, r.try_t = clock, r.try_p = at;
                     return;
                 }
                 if (clock - r.try_t < 0.03)
@@ -14131,9 +14220,10 @@ namespace ingame
                         r.flash_until = now + 350;
                     const bool lit = glow_on(r.rock_glow, r.rock, rally_color(r.left));
                     std::cout << t << "TURNED: the rock heads back at Crash after " << c.about << " was set (" << (c.position ? "where it's headed" : "its speed") << "), at "
-                              << koala_where(at) << ", " << std::lround(mm / (clock - r.try_t)) << " a second (swat " << r.planned - r.left << " of " << r.planned << "; " << r.left
-                              << " left, the rock " << (lit ? "glows " : "would glow ") << rally_color_name(r.left) << ")\n"
+                              << koala_where(at) << ", " << std::lround(mm / (clock - r.try_t)) << " a second, for " << koala_where(r.aim) << " (swat " << r.planned - r.left << " of "
+                              << r.planned << "; " << r.left << " left, the rock " << (lit ? "glows " : "would glow ") << rally_color_name(r.left) << ")\n"
                               << std::flush;
+                    r.last_d = 1e9f;
                     return;
                 }
                 write(c.at, c.was);
@@ -14148,11 +14238,35 @@ namespace ingame
                 }
                 return;
             }
-            // turned: how it flies on (a few samples) and where it ends (see above, and the rock's own messages)
-            if (r.step == 2 && r.turned_samples < 8 && clock - r.try_t >= 0.08 * (r.turned_samples + 1))
+            // turned: on to its landing spot (V1.5.5's runs: the turned flight goes through Crash and the floor, it only hits
+            // Koala Kong), and there stopped, and the rock told it landed: its 5da8f86k, the message it sends itself as
+            // his throw lands on Crash's side (then the rock Crash can spin is made, BossRock_BounceLandCollision)
+            if (r.step == 2)
             {
-                ++r.turned_samples;
-                std::cout << t << "  the turned rock at " << koala_where(at) << ", Crash at " << koala_where(crash) << "\n" << std::flush;
+                const float d = std::hypot(r.aim[0] - at[0], r.aim[1] - at[1], r.aim[2] - at[2]);
+                if (d < 60.0f || d > r.last_d + 1.0f)
+                {
+                    const auto &c = r.candidates[r.trying];
+                    if (!c.position)
+                        write(c.at, std::array<float, 3>{0, 0, 0});
+                    const bool told = koala_rock_send(r.rock_component, "5da8f86k");
+                    r.step = 4, r.land_t = clock, r.land_samples = 0;
+                    std::cout << t << "LANDED: the turned rock stopped at " << koala_where(at) << " (" << std::lround(d) << " from its spot), Crash at " << koala_where(crash)
+                              << "; the rock " << (told ? "told it landed (5da8f86k)" : "couldn't be told it landed (its 5da8f86k wasn't found)") << "\n"
+                              << std::flush;
+                    return;
+                }
+                r.last_d = d;
+                return;
+            }
+            // landed: where it is now and then (and what appears or goes, in the research lines)
+            if (r.step == 4 && r.land_samples < 10 && clock - r.land_t >= 0.25 * (r.land_samples + 1))
+            {
+                ++r.land_samples;
+                std::cout << t << "  the landed rock's flight at " << koala_where(at) << ", the rock at "
+                          << [&] { std::array<float, 3> rock{}; return r.rock && read(r.rock + 32, rock) ? koala_where(rock) : std::string("(gone)"); }() << ", Crash at "
+                          << koala_where(crash) << "\n"
+                          << std::flush;
             }
         }
 #endif
