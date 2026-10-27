@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **The real Nitro should now land on two of Roo's platforms** with test 3 on and harder bosses on. V1.4.12's log showed the beach crates' spawners were ready, but my check turned them all down because every crate carries a checkpoint script. Fixed.
-- What to look for: do the Nitros sit on the platforms, does Roo hop through them or set them off, and do you die when you touch one? Send the log and a clip.
-- The stray beach crates stay out of his water (V1.4.12, it worked). The stutter as his fight started should be gone: I took out the one-off search through every script in the fight.
-- To try: `/roo_nitro test3` (if it isn't still on), restart, then `/boss ripper1`.
-- Same as V1.4.8 otherwise: patterns that grow with each hit, a shorter wait at high Boss Speed, a hop onto you 1 landing in 5.
+- **Roo's Nitros are there when the fight starts:** both go down while he jumps in, so they're waiting even if you skip the intro. After a death they're back in new spots at once.
+- **After each hit they move:** a green Nitro outline shows where each will land, and about 3 s later the Nitro appears and its outline goes. One won't land on you; its outline waits until you step off.
+- **Roo keeps off the Nitro platforms:** his pattern is picked around them, so he doesn't set them off. You still have to work around them.
+- To try: test 3 still on (`/roo_nitro test3` and a restart if not), then `/boss ripper1` with harder bosses on. Send the log and a clip.
+- Same as before otherwise: patterns that grow with each hit, a shorter wait at high Boss Speed, a hop onto you now and then.

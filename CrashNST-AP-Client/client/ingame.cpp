@@ -1488,6 +1488,23 @@ namespace
                 r.crisp_text(tx + shadow, ty + shadow, warning, 0xff000000, px);
                 r.crisp_text(tx, ty, warning, green, px);
             }
+        // (Testing) where Ripper Roo's next Nitros will come, until they do: a Nitro-green outline the size of a crate on each
+        // platform (shown even with the HUD hidden), pulsing
+        if (!startup_mode && scene.camera_active)
+            for (const auto &box : ingame::nitro_outlines())
+            {
+                std::array<std::array<float, 2>, 8> points{};
+                bool ok = true;
+                for (unsigned i = 0; i < 8 && ok; ++i)
+                    ok = project(scene.view_projection, box.corners[i], points[i][0], points[i][1], r.width, r.height);
+                if (!ok)
+                    continue;
+                const unsigned color = (GetTickCount64() / 250) % 2 ? box.color : 0xffb0ffb0;
+                for (unsigned i = 0; i < 8; ++i)
+                    for (unsigned bit = 1; bit <= 4; bit *= 2)
+                        if (!(i & bit))
+                            r.line(points[i][0], points[i][1], points[i | bit][0], points[i | bit][1], color);
+            }
         if (snapshot->visible && !startup_mode)
         {
             if (scene.camera_active)
