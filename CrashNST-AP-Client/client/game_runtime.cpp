@@ -13473,13 +13473,13 @@ namespace ingame
                 {
                     if (k.health >= 0)
                     {
-                        std::string near;
+                        std::string closest; // (the shorter word is a Windows macro)
                         float best = 1e9f;
                         for (const auto &[a, thing] : k.things)
                             if (read(k.koala + 32, koala); std::hypot(thing.at[0] - koala[0], thing.at[1] - koala[1]) < best)
-                                best = std::hypot(thing.at[0] - koala[0], thing.at[1] - koala[1]), near = thing.name;
+                                best = std::hypot(thing.at[0] - koala[0], thing.at[1] - koala[1]), closest = thing.name;
                         ++k.lines, std::cout << t() << "Koala Kong's health " << k.health << " -> " << health
-                                             << (near.empty() ? std::string() : " (nearest to him: " + near + ", " + std::to_string(std::lround(best)) + " away)")
+                                             << (closest.empty() ? std::string() : " (nearest to him: " + closest + ", " + std::to_string(std::lround(best)) + " away)")
                                              << (crash_known ? ", Crash at " + where(crash) : std::string()) << "\n" << std::flush;
                     }
                     k.health = health;
