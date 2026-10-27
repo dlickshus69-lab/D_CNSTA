@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iostream>
 #include "crate_catalogue.h"
+#include "game_archive.h"
 namespace
 {
     struct GemReward
@@ -308,6 +309,20 @@ void ClientRuntime::drain_crates(ClientTick &tick)
                 const auto level = level_key(zone);
                 if (!tick.seed_matches || !tick.levels.count(level))
                     continue;
+                // (Testing, /roo_nitro: N. Sanity Beach's crate layer is in Ripper Roo's arena this session, and a Nitro of
+                // his is made by one of its crates' spawners. A crate broken in a boss arena is never a box check)
+                if (ingame::level_patch_in_place())
+                {
+                    auto playing = previous_zone.zone;
+                    std::transform(playing.begin(), playing.end(), playing.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    if (playing.find("/bosses/") != std::string::npos)
+                    {
+                        static unsigned told = 0;
+                        if (told++ < 20)
+                            std::cout << "Box observer: " << event.name << " (" << event.zone << ") broken in a boss arena with Roo's patched archive in: not a box check\n" << std::flush;
+                        continue;
+                    }
+                }
                 auto spec = std::find_if(std::begin(box_specs), std::end(box_specs), [&](const auto &box) {
                     return level == box.level && event.name == box.name && event.position == box.position;
                 });

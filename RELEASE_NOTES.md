@@ -4,10 +4,9 @@ This is the **Stable build**, for playing seeds: everything finished so far. Wha
 
 Updating in the middle of a seed is fine: the client fixes work right away. The new options and logic only change seeds generated with this release's `crash_nst.apworld`.
 
-## What's new in V1.4
+## What's new in V1.5
 
-- **Harder Papu Papu, all of him** (`harder_bosses`): after a hit he slams 2 to 5 times, each slam aimed at Crash, and his spin can turn around midway. An invisible wall in front of his throne keeps Crash off his chair (drawn in red; F7 hides it). Landing on him while he's red costs a life.
-- **Boss Speed now also speeds up his slam** and shortens the time he can be hit after his red ends (4.4 s at 100% down to 2.2 s at 200%).
-- **New Bosses options:** `boss_slam_time` (how soon he slams after he stands), `boss_slam_aim` (0–100%, default 55: how far ahead of Crash he aims) and `boss_hit_window` (2 to 10 s, or by speed).
-- **Crashsanity in logic** (new seeds): each level only gets controls that can do its clear, crystal, gems and secret exit, and boxes those controls can't reach aren't box checks, so F10 stays a last resort.
-- If the game crashes, the log now says where.
+- **Harder Ripper Roo** (`harder_bosses`): he hops around random loops of platforms that get one platform longer after each hit, never landing on the same one twice in a loop, faster than the game's. Now and then he breaks off to hop right at you, even leaping over a platform to reach you.
+- **Nitros on his platforms:** big crates you can't stand next to, moved after every hit (a green outline shows each new spot first). Only you set them off: he goes through them, and his TNT doesn't. They're always placed so you're never cornered. The first time you connect with them on, the client prepares his arena and asks you to restart the game once.
+- **New Ripper Roo options:** `ripper_roo_health` (3 to 9 hits), `ripper_roo_speed`, `ripper_roo_pattern`, `ripper_roo_attack_chance`, `ripper_roo_leap`, `ripper_roo_nitros`, `ripper_roo_most_nitros` and `ripper_roo_nitro_size`. The YAML template and the player guide explain each one.
+- Papu Papu is as in V1.4: Boss Health and Boss Speed still set him, and Ripper Roo can follow them (`by_boss_health`, `by_boss_speed`).

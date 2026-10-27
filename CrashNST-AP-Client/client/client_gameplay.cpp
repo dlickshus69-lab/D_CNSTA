@@ -647,6 +647,8 @@ void ClientRuntime::update_ownership(ClientTick &tick)
             print_console(skin, false);
         if (const auto colors = crash_colors::patch_status(); !colors.empty())
             print_console(colors, false);
+        if (const auto patches = ingame::level_patch_status(); !patches.empty())
+            print_console(patches, false);
         start_sound_job([] { return ingame::startup_sound_search(standalone::state_directory() / "tnt_sound.txt"); });
     }
     if (sound_job.valid() && sound_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready)

@@ -8,6 +8,7 @@
 #include <fstream>
 #include <array>
 #include <map>
+#include <thread>
 #include "trap_rules.h"
 #include "game_sound.h"
 #include "game_archive.h"
@@ -204,6 +205,15 @@ int ClientRuntime::initialize()
 
 void ClientRuntime::handle_commands()
 {
+    {
+        std::vector<std::string> lines;
+        {
+            std::lock_guard lock(research_mutex);
+            lines.swap(research_lines);
+        }
+        for (const auto &line : lines)
+            print_console(line);
+    }
     while (!console_commands.empty())
     {
         const auto text = console_commands.front();
@@ -217,7 +227,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_slam, /boss_window, /boss_lead, /boss_bar, /bar_try (tests) | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_slam, /boss_window, /boss_lead, /boss_bar, /bar_try, /roo_files, /roo_nitro test1|test2|test3|off (tests) | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -682,6 +692,77 @@ void ClientRuntime::handle_commands()
                 print_console(target == 1   ? std::string("Bar try: none (the blue isn't stretched, to compare; it shows from the next hit or death). /bar_try off puts the stretch back.")
                               : target      ? "Bar try: " + what + " (the whole fill stretched sideways, from the next hit or death; kept until /bar_try off)."
                                             : std::string("Bar try: off (the blue is stretched to the bar's length). Tests: /bar_try none, /bar_try scale."));
+            }
+            else if (command == "/roo_files")
+            {
+                // research (V1.4.3, Testing build): the files that may bring the real Nitro into Ripper Roo's arena, see
+                // nitro_research_export; in the background (it reads three of the game's archives)
+                if (research_running.exchange(true))
+                    print_console("Roo files: already gathering them.");
+                else
+                {
+                    const auto folder = ingame::game_archives().parent_path() / L"CrashNSTAP" / L"research";
+                    print_console("Roo files: gathering them in the background (a minute or so); the game keeps going.");
+                    std::thread([this, folder]
+                                {
+                                    std::vector<std::string> lines;
+                                    try
+                                    {
+                                        lines = ingame::nitro_research_export(folder);
+                                    }
+                                    catch (const std::exception &e)
+                                    {
+                                        lines = {std::string("Roo files: failed (") + e.what() + ")"};
+                                    }
+                                    {
+                                        std::lock_guard lock(research_mutex);
+                                        research_lines.insert(research_lines.end(), lines.begin(), lines.end());
+                                    }
+                                    research_running = false;
+                                })
+                        .detach();
+                }
+            }
+            else if (command == "/roo_nitro")
+            {
+                // Testing: the real Nitro in Ripper Roo's arena. A copy of his archive with N. Sanity Beach's crate layer (the
+                // Nitro's template, and spawners to make Nitros with) and what it needs, made in the background, and the
+                // loader's plan to swap it in at the next game start; off: his own put back at the next start. (V1.4.10, Eric's
+                // V1.4.9 run: "boss doesnt load. it just stays as a black screen after loading": three tests to find why, see
+                // roo_nitro_archive)
+                const int mode = argument == "test1" ? 1 : argument == "test2" ? 2 : argument == "test3" || argument == "on" ? 3 : 0;
+                if (!mode && argument != "off")
+                {
+                    const auto status = ingame::level_patch_status();
+                    print_console((status.empty() ? std::string("Roo Nitro: not on this session.") : status) +
+                                  " Tests, each for the next game start: /roo_nitro test1 (his archive with the beach's files, nothing else changed), test2 (their crate "
+                                  "layer loaded as a plain file), test3 (as a map layer, so its spawners are made); /roo_nitro off puts his own back.");
+                }
+                else if (research_running.exchange(true))
+                    print_console("Roo Nitro: still busy with the last one.");
+                else
+                {
+                    if (mode)
+                        print_console("Roo Nitro: making test " + std::to_string(mode) + "'s copy of his arena's archive in the background (a minute or so); the game keeps going.");
+                    std::thread([this, mode]
+                                {
+                                    std::vector<std::string> lines;
+                                    try
+                                    {
+                                        lines = ingame::roo_nitro_set(mode, standalone::state_directory());
+                                    }
+                                    catch (const std::exception &e)
+                                    {
+                                        lines = {std::string("Roo Nitro: couldn't do it (") + e.what() + "). Nothing changes at the next start."};
+                                    }
+                                    {
+                                        std::lock_guard lock(research_mutex);
+                                        research_lines.insert(research_lines.end(), lines.begin(), lines.end());
+                                    }
+                                    research_running = false;
+                                })
+                        .detach();
+                }
             }
             else if (command == "/boss_bar")
             {

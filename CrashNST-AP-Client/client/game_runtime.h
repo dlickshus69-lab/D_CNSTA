@@ -56,5 +56,7 @@ namespace ingame
         float height = 0;
     };
     std::vector<WallLine> wall_outline();
+    // (Testing) where Ripper Roo's next Nitros will come, until they do: crate-sized boxes, Nitro green (empty elsewhere)
+    std::vector<LiveBox> nitro_outlines();
     std::uintptr_t crate_identity_owner(std::uintptr_t owner, const char **name);
 }

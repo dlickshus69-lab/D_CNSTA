@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cwctype>
+#include <cctype>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -416,6 +417,33 @@ namespace
         LARGE_INTEGER size{};
         return GetFileSizeEx(file, &size) ? static_cast<unsigned long long>(size.QuadPart) : 0;
     }
+    // whether the archive at `path` is one of the client's patched copies of Ripper Roo's: its names hold N. Sanity Beach's
+    // crate layer, which the game's own never does (so a copy is never taken for the game's own, whatever the records say)
+    bool patched_copy(const std::filesystem::path &path)
+    {
+        const auto file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE)
+            return false;
+        bool found = false;
+        unsigned char head[56]{};
+        if (file_at(file, 0, head, 56, false))
+        {
+            std::uint32_t magic = 0, size = 0;
+            std::uint64_t at = 0;
+            std::memcpy(&magic, head, 4), std::memcpy(&at, head + 40, 8), std::memcpy(&size, head + 48, 4);
+            if (magic == 0x1a414749 && size > 0 && size <= (64u << 20) && at <= file_size(file) && size <= file_size(file) - at)
+            {
+                std::string names(size, '\0');
+                if (file_at(file, at, names.data(), size, false))
+                {
+                    std::transform(names.begin(), names.end(), names.begin(), [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
+                    found = names.find("l101_nsanitybeach_crates.igz") != std::string::npos;
+                }
+            }
+        }
+        CloseHandle(file);
+        return found;
+    }
     void write_patched(const std::filesystem::path &path, const std::vector<PatchLine> &done)
     {
         std::error_code error;
@@ -540,6 +568,12 @@ namespace
             for (auto &[key, lines] : plan)
             {
                 const auto path = archives / lines.front().archive;
+                // (not Ripper Roo's patched copy while it's in: see level patches)
+                if (patched_copy(path))
+                {
+                    ++skipped, why = "Ripper Roo's patched archive is in (/roo_nitro off)";
+                    continue;
+                }
                 const auto file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
                 if (file == INVALID_HANDLE_VALUE)
                 {
@@ -620,6 +654,239 @@ namespace
         }
         const auto outcome = std::to_string(patched + kept) + "|" + std::to_string(restored) + "|" + std::to_string(skipped) + "|" + why;
         SetEnvironmentVariableW(L"CRASHNSTAP_COLORS", widen(outcome).c_str());
+    }
+    // Level patches (Testing, the real Nitro in Ripper Roo's arena): a level's archive swapped for a patched copy the
+    // client made (CrashNSTAP\patches\<archive>) before the game opens it, and the game's own put back exactly once it's
+    // no longer wanted, by moving files (the game's own to patches\original and back, the copy into its place). The client's plan is %LOCALAPPDATA%\CrashNSTAP\state\level_patches.txt, a line each: "archive
+    // (from the archives folder)|its size|its write time (the game's own, as the client saw it)|the copy's size|its write
+    // time". patches\installed.txt remembers what's in place ("archive|size|
+    // write time in place|the game's own size|write time"), so a Steam update or verify since is noticed and left alone.
+    // Copies keep their write times, so the stamps say which file is which. An archive with Crash colors in it is left
+    // alone. The result is left in CRASHNSTAP_LEVEL_PATCHES ("in place|put back|skipped|why") for the client.
+    struct LevelPatch
+    {
+        std::wstring archive;
+        FileStamp source, patch;
+    };
+    struct LevelInstalled
+    {
+        std::wstring archive;
+        FileStamp in_place, original;
+    };
+    bool relative_archive(const std::wstring &path)
+    {
+        return !path.empty() && path.find(L"..") == std::wstring::npos && path.find(L':') == std::wstring::npos && path[0] != L'\\' && path[0] != L'/' &&
+               lower(std::filesystem::path(path).extension().wstring()) == L".pak";
+    }
+    // `from` moved to `to` (over what's there); a rename, as both are in the game's folder
+    bool move_over(const std::filesystem::path &from, const std::filesystem::path &to)
+    {
+        std::error_code error;
+        std::filesystem::create_directories(to.parent_path(), error);
+        return MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH) != 0;
+    }
+    void apply_level_patches(const std::filesystem::path &proxy_folder, const std::filesystem::path &game_folder)
+    {
+        unsigned placed = 0, restored = 0, skipped = 0;
+        std::string why;
+        try
+        {
+            const auto patches = proxy_folder / L"CrashNSTAP" / L"patches";
+            const auto kept = patches / L"original";
+            const auto record_file = patches / L"installed.txt";
+            const auto archives = game_folder / L"archives";
+            const auto stamp_of = [](const std::string &size, const std::string &written) {
+                return FileStamp{std::strtoull(size.c_str(), nullptr, 10), std::strtoull(written.c_str(), nullptr, 10)};
+            };
+            std::map<std::wstring, LevelPatch> plan;
+            {
+                static wchar_t local[32768]{};
+                const auto count = GetEnvironmentVariableW(L"LOCALAPPDATA", local, std::size(local));
+                if (count && count < std::size(local))
+                {
+                    std::ifstream in(std::filesystem::path(local) / L"CrashNSTAP" / L"state" / L"level_patches.txt");
+                    std::string line;
+                    while (std::getline(in, line))
+                    {
+                        const auto f = split_line(narrow(trim(widen(line))));
+                        if (f.size() != 5 || !relative_archive(widen(f[0])))
+                            continue;
+                        plan[lower(widen(f[0]))] = {widen(f[0]), stamp_of(f[1], f[2]), stamp_of(f[3], f[4])};
+                    }
+                }
+            }
+            std::map<std::wstring, LevelInstalled> installed;
+            {
+                std::ifstream in(record_file);
+                std::string line;
+                while (std::getline(in, line))
+                {
+                    const auto f = split_line(narrow(trim(widen(line))));
+                    if (f.size() == 5 && relative_archive(widen(f[0])))
+                        installed[lower(widen(f[0]))] = {widen(f[0]), stamp_of(f[1], f[2]), stamp_of(f[3], f[4])};
+                }
+            }
+            // the record, on disk before anything is moved (false: it couldn't be written)
+            const auto write_record = [&]() -> bool {
+                std::error_code error;
+                std::filesystem::create_directories(patches, error);
+                std::string text;
+                for (const auto &[key, i] : installed)
+                    text += narrow(i.archive) + "|" + std::to_string(i.in_place.size) + "|" + std::to_string(i.in_place.written) + "|" + std::to_string(i.original.size) + "|" +
+                            std::to_string(i.original.written) + "\n";
+                auto temporary = record_file;
+                temporary += L".tmp";
+                const auto file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (file == INVALID_HANDLE_VALUE)
+                    return false;
+                DWORD done = 0;
+                const bool wrote = (text.empty() || (WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &done, nullptr) && done == text.size())) && FlushFileBuffers(file);
+                CloseHandle(file);
+                return wrote && MoveFileExW(temporary.c_str(), record_file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+            };
+            // 0) the game's own kept aside without a record of it (the record lost): back where it was if the game's file is
+            // gone; the record made again if a copy of ours is in its place
+            {
+                std::vector<std::filesystem::path> aside;
+                std::error_code error;
+                if (std::filesystem::is_directory(kept, error))
+                    for (std::filesystem::recursive_directory_iterator it(kept, error), end; !error && it != end; it.increment(error))
+                        if (it->is_regular_file(error))
+                            aside.push_back(it->path());
+                bool adopted = false;
+                for (const auto &backup : aside)
+                {
+                    std::error_code bad;
+                    const auto relative = std::filesystem::relative(backup, kept, bad).wstring();
+                    if (bad || !relative_archive(relative) || installed.count(lower(relative)) || patched_copy(backup))
+                        continue;
+                    const auto game = archives / relative;
+                    FileStamp now, saved;
+                    if (!stamp(backup, saved))
+                        continue;
+                    if (!stamp(game, now))
+                    {
+                        if (move_over(backup, game))
+                            ++restored;
+                    }
+                    else if (patched_copy(game))
+                        installed[lower(relative)] = {relative, now, saved}, adopted = true;
+                }
+                if (adopted)
+                    write_record();
+            }
+            if (plan.empty() && installed.empty())
+                return;
+            // (archives with Crash colors in them: left alone)
+            std::set<std::wstring> colored;
+            {
+                std::ifstream in(proxy_folder / L"CrashNSTAP" / L"skins" / L"patched.txt");
+                std::string line;
+                while (std::getline(in, line))
+                    if (const auto f = split_line(narrow(trim(widen(line)))); f.size() == 6)
+                        colored.insert(lower(widen(f[0])));
+            }
+            // 1) ours in place now: kept when the plan wants that very copy, otherwise the game's own put back. Ours: the
+            // one recorded, or any patched copy (changed since, by something else)
+            for (auto it = installed.begin(); it != installed.end();)
+            {
+                const auto game = archives / it->second.archive, backup = kept / it->second.archive;
+                FileStamp now, saved;
+                const bool there = stamp(game, now), kept_own = stamp(backup, saved) && saved == it->second.original && !patched_copy(backup);
+                const bool ours = there && (now == it->second.in_place || patched_copy(game));
+                if (there && !ours)
+                {
+                    // the game's own there again (a Steam update or verify): nothing of ours in place any more
+                    it = installed.erase(it);
+                    continue;
+                }
+                if (ours && !(now == it->second.in_place))
+                    it->second.in_place = now;
+                if (ours)
+                    if (const auto want = plan.find(it->first); want != plan.end() && want->second.patch == it->second.in_place)
+                    {
+                        ++placed;
+                        plan.erase(want);
+                        ++it;
+                        continue;
+                    }
+                // (also when the game stopped between the two moves: the game's own back where it was)
+                if (!kept_own)
+                {
+                    if (there)
+                        ++skipped, why = "the game's own " + narrow(it->second.archive) + " is missing (Steam's verify of the game files puts it back)";
+                    it = there ? std::next(it) : installed.erase(it);
+                    continue;
+                }
+                if (!move_over(backup, game))
+                {
+                    ++skipped, why = narrow(it->second.archive) + " couldn't be put back (Windows error " + std::to_string(GetLastError()) + ")";
+                    ++it;
+                    continue;
+                }
+                ++restored;
+                it = installed.erase(it);
+            }
+            write_record();
+            // 2) wanted and not in place yet: the game's own kept aside, then the copy put in
+            for (const auto &[key, p] : plan)
+            {
+                const auto game = archives / p.archive, patch = patches / p.archive, backup = kept / p.archive;
+                FileStamp now, copy;
+                if (colored.count(key))
+                {
+                    ++skipped, why = narrow(p.archive) + " has Crash colors in it";
+                    continue;
+                }
+                if (!stamp(game, now) || !(now == p.source))
+                {
+                    ++skipped, why = narrow(p.archive) + " changed since the client made its copy (make it again)";
+                    continue;
+                }
+                // (never a copy taken for the game's own, nor put aside over it)
+                if (patched_copy(game))
+                {
+                    ++skipped, why = "the " + narrow(p.archive) + " in place is a patched copy, not the game's own (Steam's verify of the game files puts it back)";
+                    continue;
+                }
+                if (!stamp(patch, copy) || !(copy == p.patch))
+                {
+                    ++skipped, why = "the patched " + narrow(p.archive) + " is missing or changed (make it again)";
+                    continue;
+                }
+                // recorded first: if the game stops in between, the next start sees what's where
+                installed[key] = {p.archive, p.patch, p.source};
+                if (!write_record())
+                {
+                    ++skipped, why = "couldn't write " + narrow(record_file.wstring()) + " (Windows error " + std::to_string(GetLastError()) + ")";
+                    installed.erase(key);
+                    continue;
+                }
+                if (!move_over(game, backup))
+                {
+                    ++skipped, why = "the game's own " + narrow(p.archive) + " couldn't be kept (Windows error " + std::to_string(GetLastError()) + ")";
+                    installed.erase(key), write_record();
+                    continue;
+                }
+                FileStamp after;
+                if (!move_over(patch, game) || !stamp(game, after) || !(after == p.patch))
+                {
+                    ++skipped, why = "the patched " + narrow(p.archive) + " couldn't be put in (Windows error " + std::to_string(GetLastError()) + ")";
+                    if (!stamp(game, after) && move_over(backup, game))
+                        installed.erase(key), write_record();
+                    continue;
+                }
+                ++placed;
+            }
+        }
+        catch (...)
+        {
+            why = "unexpected error";
+        }
+        if (!placed && !restored && !skipped && why.empty())
+            return;
+        const auto outcome = std::to_string(placed) + "|" + std::to_string(restored) + "|" + std::to_string(skipped) + "|" + why;
+        SetEnvironmentVariableW(L"CRASHNSTAP_LEVEL_PATCHES", widen(outcome).c_str());
     }
     const char *names[]{"DirectInput8Create", "DllCanUnloadNow", "DllGetClassObject",
                         "DllRegisterServer", "DllUnregisterServer", "GetdfDIJoystick"};
@@ -790,6 +1057,7 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, void *)
             {
                 const auto worn = apply_skin(std::filesystem::path(proxy).parent_path(), std::filesystem::path(host).parent_path());
                 apply_color_patches(std::filesystem::path(proxy).parent_path(), std::filesystem::path(host).parent_path(), worn);
+                apply_level_patches(std::filesystem::path(proxy).parent_path(), std::filesystem::path(host).parent_path());
             }
         }
         // the worker runs after DLL notifications release loader lock

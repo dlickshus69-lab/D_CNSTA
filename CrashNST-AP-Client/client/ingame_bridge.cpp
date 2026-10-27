@@ -71,6 +71,8 @@ BoxMarkers::BoxMarkers(DWORD pid, bool startup, unsigned marker_mode) : startup_
         shared_->hub_label_distances = ingame::default_hub_distances;
         shared_->tint_opacity = ingame::default_tint_opacity;
         shared_->slow_tilt = ingame::default_slow_tilt;
+        shared_->roo_pattern = 3, shared_->roo_attack_pct = 15, shared_->roo_leap = 1, shared_->roo_nitros = 2, shared_->roo_nitros_most = 3;
+        shared_->roo_nitro_size = 200;
         shared_->relic_min_rank = 1;
         if (const auto size = std::getenv("CRASH_NST_MARKER_SIZE"))
         {
@@ -729,6 +731,20 @@ void BoxMarkers::boss_settings(unsigned health, unsigned speed, bool rules, bool
     shared_->boss_slam_fixed_ms = slam_fixed_ms ? std::clamp(slam_fixed_ms, 250u, 900u) : 0u;
     shared_->boss_window_fixed_ms = window_fixed_ms ? std::clamp(window_fixed_ms, 500u, 10000u) : 0u;
     shared_->boss_lead_pct = std::min(lead_pct, 120u);
+    unlock();
+}
+void BoxMarkers::roo_settings(unsigned hits, unsigned speed, unsigned pattern, unsigned attack_pct, bool leap, unsigned nitros, unsigned nitros_most,
+                              unsigned nitro_size)
+{
+    lock();
+    shared_->roo_hits = hits ? std::clamp(hits, 3u, 9u) : 0u;
+    shared_->roo_speed = speed ? std::clamp(speed, 100u, 200u) : 0u;
+    shared_->roo_pattern = pattern ? std::clamp(pattern, 3u, 7u) : 0u;
+    shared_->roo_attack_pct = std::min(attack_pct, 50u);
+    shared_->roo_leap = leap ? 1u : 0u;
+    shared_->roo_nitros = std::min(nitros, 4u);
+    shared_->roo_nitros_most = std::clamp(nitros_most, shared_->roo_nitros, 4u);
+    shared_->roo_nitro_size = std::clamp(nitro_size, 100u, 200u);
     unlock();
 }
 void BoxMarkers::bar_try(unsigned target, float factor)

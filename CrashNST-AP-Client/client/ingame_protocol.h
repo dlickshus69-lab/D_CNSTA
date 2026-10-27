@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 33, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 34, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -190,6 +190,11 @@ namespace ingame
         // (V1.3.61, the YAML's boss_slam_time and boss_hit_window) his slam's time after he stands and the hit window, in ms,
         // at any boss speed; 0: by the boss speed (boss_slam_ms and boss_window_ms are then the 200% ones)
         unsigned boss_slam_fixed_ms = 0, boss_window_fixed_ms = 0;
+        // (Testing V1.4.24, the YAML's Ripper Roo options) his hits (0: by boss_health), his pace in percent (0: by
+        // boss_speed, 70% of the way), his first pattern's length (0: the game's own hops), the chance of a hop at Crash in
+        // percent of his landings, his leap over a platform at Crash (1 on), his Nitros as the fight starts and the most, and
+        // their size in percent of a crate (older seeds: as Testing V1.4.23 had them)
+        unsigned roo_hits = 0, roo_speed = 0, roo_pattern = 3, roo_attack_pct = 15, roo_leap = 1, roo_nitros = 2, roo_nitros_most = 3, roo_nitro_size = 200;
         // (V1.3.25 test, /bar_try) 0 off (the blue, HealthBar, stretched to a bigger bar's length), 1 none (not stretched,
         // to compare), 3 BarParent's sideways scale times bar_try_factor (0: the bar's growth), kept until off
         unsigned bar_try_target = 0;

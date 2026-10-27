@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <iostream>
 #include "crate_catalogue.h"
+#include "game_archive.h"
+#include <thread>
 static_assert(std::size(box_specs) <= ingame::max_boxes, "Crate catalogue exceeds bridge capacity");
 void ClientRuntime::start_sound_job(std::function<std::vector<std::string>()> job)
 {
@@ -336,6 +338,64 @@ void ClientRuntime::update_display(ClientTick &tick)
                                                        : 55u;
             box_markers->boss_settings(health, speed, rules, boss_bar_grow, masks, boss_slam_test >= 0 ? static_cast<unsigned>(boss_slam_test) : 450u,
                                        boss_window_test >= 0 ? static_cast<unsigned>(boss_window_test) : 2200u, slam_fixed, window_fixed, lead);
+            // (Testing V1.4.24, Eric: "when you add them into the YAML settings, you just add all the options that you can
+            // change. Speed, health, how many nitros you want to be able to spawn in. The odds of him attacking you") Ripper
+            // Roo's own settings: his hits (0: by boss_health), pace (0: by boss_speed), first pattern (0: the game's own
+            // hops), the chance of a hop at Crash, the leap, his Nitros as the fight starts and the most, and their size.
+            // Older seeds have none: as Testing V1.4.23 had them
+            const auto number = [&](const char *key, std::int64_t fallback, std::int64_t least, std::int64_t most) {
+                const auto &v = slot[key];
+                return static_cast<unsigned>(v.isIntegral() ? std::clamp<std::int64_t>(v.asInt64(), least, most) : fallback);
+            };
+            const unsigned nitros = number("roo_nitros", 2, 0, 4), most = std::max(nitros, number("roo_nitros_most", 3, 0, 4));
+            box_markers->roo_settings(number("roo_health", 0, 0, 9), number("roo_speed", 0, 0, 200), number("roo_pattern", 3, 0, 7), number("roo_attack", 15, 0, 50),
+                                      slot["roo_leap"].isBool() ? slot["roo_leap"].asBool() : true, nitros, most, number("roo_nitro_size", 200, 100, 200));
+            // his Nitros need his arena's file changed (a copy; the game's own is kept): for a seed that has them, made now in
+            // the background, in place from the next game start, which the player is asked for once
+            if (!roo_nitro_checked && rules && slot["roo_nitros"].isIntegral() && most > 0)
+            {
+                roo_nitro_checked = true;
+                const auto state = standalone::state_directory();
+                if (ingame::level_patch_in_place())
+                    print_console("Ripper Roo's Nitros (your YAML): his arena is ready this session.");
+                else if (ingame::roo_nitro_planned(state))
+                {
+                    const auto status = ingame::level_patch_status();
+                    print_console("Ripper Roo's Nitros (your YAML): restart the game once to have them in his fight (his arena's changed file is ready)." +
+                                      (status.empty() ? std::string() : " " + status),
+                                  true);
+                }
+                else if (research_running.exchange(true))
+                    roo_nitro_checked = false; // (a /roo_nitro or /roo_files job is running: again later)
+                else
+                {
+                    print_console("Ripper Roo's Nitros (your YAML): making the changed copy of his arena's file in the background (a minute or so); the "
+                                  "game keeps going.");
+                    std::thread([this, state]
+                                {
+                                    std::vector<std::string> lines;
+                                    try
+                                    {
+                                        lines = ingame::roo_nitro_set(3, state);
+                                    }
+                                    catch (const std::exception &e)
+                                    {
+                                        lines = {std::string("Roo Nitro: couldn't make it (") + e.what() + ")."};
+                                    }
+                                    roo_nitro_made = ingame::roo_nitro_planned(state) ? 1 : 2;
+                                    {
+                                        std::lock_guard lock(research_mutex);
+                                        research_lines.insert(research_lines.end(), lines.begin(), lines.end());
+                                    }
+                                    research_running = false;
+                                })
+                        .detach();
+                }
+            }
+            if (const int made = roo_nitro_made.exchange(0))
+                print_console(made == 1 ? "Ripper Roo's Nitros (your YAML) are ready: restart the game once to have them in his fight."
+                                        : "Ripper Roo's Nitros (your YAML) couldn't be set up (the lines above say why): his fight has none.",
+                              true);
         }
         auto collectible_checked = tick.checked;
         collectible_checked.insert(pending.begin(), pending.end());

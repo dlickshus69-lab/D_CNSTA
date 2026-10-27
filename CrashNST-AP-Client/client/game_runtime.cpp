@@ -7,6 +7,7 @@
 #include "game_pickups.h"
 #include "game_memory.h"
 #include "crate_specs.h"
+#include "game_archive.h"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -815,8 +816,9 @@ namespace ingame
         bool hard_boss_fight(const Shared &state, const std::string &boss)
         {
 #ifdef CRASH_NST_STABLE
-            // (Stable V1.3.1: harder bosses are Papu Papu's alone; every other boss is as the game has him)
-            if (boss != "B101")
+            // (Stable V1.3.1: harder bosses are Papu Papu's alone; every other boss is as the game has him. Stable V1.5:
+            // and Ripper Roo's)
+            if (boss != "B101" && boss != "B102")
                 return false;
 #endif
             return !boss.empty() && (state.boss_rules != 0 || state.boss_health > 100 || state.boss_speed > 100);
@@ -1276,6 +1278,26 @@ namespace ingame
         std::atomic_bool event_research_done{true};
         // research: every event a trap Nitro gets, with the time since it appeared, to find what sends it "home"
         std::array<std::atomic<Address>, 4> trap_event_entity{};
+        // (V1.4.15, Testing) Ripper Roo's Nitros as they are now (see roo_control), for the event hook: nothing but Crash sets
+        // them off; and the kinds of message they get, once each, for the log
+        std::array<std::atomic<Address>, 4> roo_nitro_entity{};
+        std::set<std::string> roo_nitro_events_seen;
+        std::atomic<unsigned> roo_nitro_kept{0};
+        // (V1.4.19) his Nitros whose explosion went through (a crate stays after it goes off, so this is how to tell;
+        // V1.4.18 put one back and moved it to Crash again: "It's like clips onto me, but it doesn't do anything"), under
+        // event_mutex
+        std::set<Address> roo_nitro_blown;
+        // (V1.4.17, Testing) in Ripper Roo's arena with /roo_nitro's copy in: N. Sanity Beach's crates' own level scripts
+        // get nothing (see event_sent); which scripts those are, by their class, as found; what they'd have got, once each
+        // (whether /roo_nitro's copy is in, and whether the level loaded is his: checked by event_sent itself every 100 ms
+        // from the game's level path, so a game over's reload, with no frames of the client's, is covered, and another
+        // level's crates never are)
+        std::atomic_bool roo_beach_patch{false}, roo_zone_in{false};
+        std::atomic<std::uint64_t> roo_zone_at{0};
+        std::mutex beach_meta_mutex;
+        std::unordered_map<Address, std::pair<Address, bool>> beach_meta_block; // (by graph: its name's place, and whether kept)
+        std::set<std::string> beach_blocked_seen;
+        std::atomic<unsigned> beach_blocked{0};
         std::array<std::atomic<std::uint64_t>, 4> trap_event_since{};
         // its common_Crate_Explode script sent something: it went off (the crate itself stays, so this is how to tell)
         std::array<std::atomic_bool, 4> trap_event_exploded{};
@@ -1695,6 +1717,60 @@ namespace ingame
         Address event_sent(Address event, Address context)
         {
             const auto crash = event_crash.load();
+            // (V1.4.17, Eric's V1.4.16 run: "the game crashed again when I got a game over and retried"; the log: after the
+            // game over his fight started over as meant and no Nitro was made, then the game crashed in a script (the same
+            // place as V1.4.14 and V1.4.15, the stack's last frame in the game's script runner) as the fight's intro started.
+            // N. Sanity Beach's crates (in his arena with /roo_nitro's copy) have the beach's own level scripts: its help
+            // after deaths (DDA_Section, which makes crates Aku Aku crates), checkpoints, the time trial, the box count, the
+            // stack check and the camera fade, which look for that level's things (its checkpoint, camera, box counter), and a
+            // game over is a start over after deaths. In his arena with the copy in, nothing reaches those scripts (by their
+            // class); the crates' spawners and the crates themselves still get theirs. Each kind kept from them goes to the
+            // log once)
+            if (roo_beach_patch.load())
+                if (const auto t = GetTickCount64(); t - roo_zone_at.load() >= 100)
+                {
+                    auto zone = string(value<Address>(value<Address>(base() + 0x1a64690) + 184), 120);
+                    std::transform(zone.begin(), zone.end(), zone.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    roo_zone_in = zone.find("bosses/b102") != std::string::npos, roo_zone_at = t;
+                }
+            if (roo_beach_patch.load() && roo_zone_in.load() && event && context)
+                if (const auto component = value<Address>(context))
+                {
+                    // (a game over's reload can put another graph where one was: one known by its place and its name's both)
+                    const auto meta = value<Address>(component + 56), name_at = meta ? value<Address>(meta + 16) : 0;
+                    bool block = false, known = false;
+                    {
+                        std::lock_guard lock(beach_meta_mutex);
+                        if (const auto it = beach_meta_block.find(meta); it != beach_meta_block.end() && it->second.first == name_at)
+                            known = true, block = it->second.second;
+                    }
+                    if (!known)
+                    {
+                        static const std::set<std::string> level_scripts{"Scripts.Graph.DDA_Section", "Scripts.Graph.common_Crate_Checkpoint", "Scripts.Graph.common_Crate_TimeTrial",
+                                                                         "Scripts.Graph.common_Crate_StackChecker", "Scripts.Graph.common_Crate_LevelCount",
+                                                                         "Scripts.Graph.common_CameraDistanceFadeEntity"};
+                        block = name_at && level_scripts.count(string(name_at, 120)) != 0;
+                        std::lock_guard lock(beach_meta_mutex);
+                        if (beach_meta_block.size() < 4096 || beach_meta_block.count(meta))
+                            beach_meta_block[meta] = {name_at, block};
+                    }
+                    if (block)
+                    {
+                        ++beach_blocked;
+                        auto graph = string(value<Address>(meta + 16), 120);
+                        if (graph.rfind("Scripts.Graph.", 0) == 0)
+                            graph.erase(0, 14);
+                        const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                        bool fresh = false;
+                        {
+                            std::lock_guard lock(event_mutex);
+                            fresh = beach_blocked_seen.size() < 40 && beach_blocked_seen.insert(graph + "|" + name).second;
+                        }
+                        if (fresh)
+                            std::cout << "Roo Nitro: a beach crate's " << graph << " kept from " << name << "\n" << std::flush;
+                        return 0;
+                    }
+                }
 #ifndef CRASH_NST_STABLE
             if (const auto ride = ride_research_actor.load(); ride && event && context && ride_event_lines.load() < 160)
                 if (const auto component = value<Address>(context); component && value<Address>(component + 24) == ride)
@@ -1738,6 +1814,41 @@ namespace ingame
                         // to the log, over 20 lines in the frame it exploded; that research is done.)
                         if (string(value<Address>(value<Address>(component + 56) + 16), 120) == "Scripts.Graph.common_Crate_Explode")
                             trap_event_exploded[i] = true;
+                        break;
+                    }
+                // (V1.4.15, Eric's V1.4.14 run: "So it was working. I like it. What I want now is hoping that maybe the TNT
+                // doesn't set off the nitro bombs"; and from the start: "he goes through the Nitro, but you're not allowed
+                // to"): what reaches one of Ripper Roo's Nitros' explosion script while Crash isn't touching it (more than
+                // 200 from it) doesn't go through: a TNT's blast nearby, or Roo on it, doesn't set it off; Crash touching it
+                // still does. Each kind of message one gets goes to the log once, with how far Crash and the nearest of
+                // his Big TNTs are, and whether it went through
+                for (unsigned i = 0; !blocked && target && i < roo_nitro_entity.size(); ++i)
+                    if (roo_nitro_entity[i].load() == target)
+                    {
+                        auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
+                        if (graph.rfind("Scripts.Graph.", 0) == 0)
+                            graph.erase(0, 14);
+                        std::array<float, 3> n{}, c{};
+                        const bool known = read(target + 32, n) && read(crash + 32, c);
+                        const float d = known ? std::hypot(n[0] - c[0], n[1] - c[1], n[2] - c[2]) : 0.0f;
+                        blocked = graph == "common_Crate_Explode" && known && d > 200;
+                        if (blocked)
+                            ++roo_nitro_kept;
+                        else if (graph == "common_Crate_Explode")
+                        {
+                            std::lock_guard lock(event_mutex);
+                            if (roo_nitro_blown.size() < 256)
+                                roo_nitro_blown.insert(target);
+                        }
+                        const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                        bool fresh = false;
+                        {
+                            std::lock_guard lock(event_mutex);
+                            fresh = roo_nitro_events_seen.size() < 60 && roo_nitro_events_seen.insert(graph + "|" + name).second;
+                        }
+                        if (fresh)
+                            std::cout << "Roo Nitro event: its " << graph << " gets " << name << " (Crash " << (known ? std::to_string(std::lround(d)) : std::string("?"))
+                                      << " from it): " << (blocked ? "kept from going through" : "through") << "\n" << std::flush;
                         break;
                     }
                 if (blocked)
@@ -4083,6 +4194,29 @@ namespace ingame
                     continue;
                 if (name.rfind("Crate_", 0) == 0)
                     scan.crates.push_back(at);
+                // (V1.4.16, Testing: Ripper Roo's arena with /roo_nitro's copy has no Nitro crate, and the template the memory
+                // search found after a game over could be the old fight's, freed: V1.4.14's and V1.4.15's crash, inside the
+                // spawn. Each of N. Sanity Beach's crates' time-trial script holds the Nitro's template (a handle in its data,
+                // V1.4.11's log), so it's taken from a crate of this fight)
+                if (!scan.nitro_template && level == "Boss" && name.rfind("Crate_", 0) == 0)
+                    for (const auto c : list(value<Address>(owner + 24), 64))
+                    {
+                        if (scan.nitro_template || !typed(c, 0x13bbbd0) || string(value<Address>(value<Address>(c + 56) + 16)) != "Scripts.Graph.common_Crate_TimeTrial")
+                            continue;
+                        const auto data = value<Address>(c + 16);
+                        const auto meta = typed(data, 0x13bbb10) ? value<Address>(data + 32) : 0;
+                        const unsigned count = meta ? value<unsigned>(meta + 24) : 0;
+                        const auto fields = meta ? value<Address>(meta + 40) : 0;
+                        for (unsigned i = 0; fields && count <= 256 && i < count && !scan.nitro_template; ++i)
+                        {
+                            const auto field = value<Address>(fields + i * 8);
+                            if (value<std::uint16_t>(field + 22) != 8)
+                                continue;
+                            const auto v = value<Address>(data + value<std::uint16_t>(field + 24));
+                            if (const auto e = resolve(v) ? resolve(v) : v; nitro_template_valid(e))
+                                scan.nitro_template = e;
+                        }
+                    }
                 // the Nitro's template, from a Nitro crate's spawner
                 if (!scan.nitro_template && kind_of(name) == "Crate_Nitro")
                     for (const auto c : list(value<Address>(owner + 24), 64))
@@ -4105,8 +4239,13 @@ namespace ingame
                 if (skip)
                     continue;
                 const auto scripts = owner_scripts(owner);
-                if (scripts.find("LevelCount") != std::string::npos || scripts.find("Count") != std::string::npos ||
-                    scripts.find("Checkpoint") != std::string::npos)
+                // (Testing: in a boss arena nothing counts boxes, and Ripper Roo's has no spawner of its own: there, with
+                // /roo_nitro's patched archive, a plain crate's from N. Sanity Beach's crate layer may be borrowed)
+                // (V1.4.13, V1.4.12's log: every crate has common_Crate_Checkpoint on it, so V1.4.12 took none; a checkpoint
+                // crate is named Crate_Checkpoint, never Crate_Basic)
+                const bool arena_crate = level == "Boss" && kind_of(name) == "Crate_Basic";
+                if (!arena_crate && (scripts.find("LevelCount") != std::string::npos || scripts.find("Count") != std::string::npos ||
+                                     scripts.find("Checkpoint") != std::string::npos))
                     continue;
                 for (const auto c : list(value<Address>(owner + 24), 64))
                     if (spawner_method(c, owner, true))
@@ -6650,7 +6789,9 @@ namespace ingame
         std::map<std::string, int> game_hits;
         bool boss_hits_changed = false; // a HitCount was changed this game session (it's put back at 100%)
         // (V1.3.21: grow says whether the notches grow too, /boss_bar; the health is ours either way)
-        void tune_boss_health(BossTuning &t, const std::string &boss, Address owner, const std::string &name, Address c, unsigned percent, bool grow)
+        // (`hits_wanted`, V1.4.24: a boss's own hit count from the YAML, Ripper Roo's ripper_roo_health; 0: by `percent`)
+        void tune_boss_health(BossTuning &t, const std::string &boss, Address owner, const std::string &name, Address c, unsigned percent, bool grow,
+                              unsigned hits_wanted = 0)
         {
             const auto data = value<Address>(c + 16);
             if (!typed(data, 0x13bbb10))
@@ -6682,7 +6823,7 @@ namespace ingame
             // V1.3.40 rounded the game's hits times the percent, so 9 came at 170% already)
             const int top = std::max(original, std::min(9, original * 2));
             const int extra = std::max(0, static_cast<int>(percent) - 100) * (top - original) / 100;
-            const int hits = eligible ? std::clamp(original + extra, original, top) : original;
+            const int hits = !eligible ? original : hits_wanted ? std::clamp(static_cast<int>(hits_wanted), original, 9) : std::clamp(original + extra, original, top);
             const int notches = grow ? hits : original;
             const int max_health = value<int>(c + max_at);
             if (const int was = value<int>(data + hit_at); was != notches)
@@ -11645,6 +11786,1738 @@ namespace ingame
             }
             std::cout << out.str() << "\n" << std::flush;
         }
+        // (V1.4.14, Testing) where Ripper Roo's next Nitros will come, outlined until they do (see roo_control); read by the
+        // renderer's thread through nitro_outlines
+        std::mutex roo_outline_mutex;
+        std::vector<std::array<float, 3>> roo_outline_spots;
+        float roo_outline_scale = 1; // (V1.4.18: the size of his Nitros, see roo_control)
+        // V1.4.1 research, Testing build (Eric, after Papu Papu: "we're only doing the first one" (Crash 1's Ripper Roo):
+        // "random patterns. Every time you die, it's not the same pattern. Nitro's on platform" ("some of the platforms are
+        // blocked off by Nitro ... you're still able to hit them, but you just gotta work around ... he goes through the
+        // Nitro, but you're not allowed to"); "two patterns per health or increment. So he'll do one or the other. Maybe
+        // he'll like do one of the pattern twice"; a little faster, "but not to where it's impossible"; no fake-outs for
+        // now). Only reads, but for one Nitro: what the fight is made of, to find where his pattern comes from. Once, 4 s
+        // in: everything in the arena (name, place, scripts) and the lists his own scripts hold; each of his hops, from
+        // where to where (the places he lands on, numbered as they're first seen: the platforms), how long in the air and
+        // how long he waited before it, and where Crash was; every crate (TNT, Nitro) as it appears and goes. With the
+        // boss rules on, one Nitro is made on a platform he has landed on twice, far from Crash: what he does with it
+        struct RooSpot
+        {
+            std::array<float, 3> at{};
+            unsigned landings = 0;
+        };
+        struct RooCrate
+        {
+            std::string name;
+            std::array<float, 3> at{};
+            std::uint64_t since = 0;
+        };
+        struct RooResearch
+        {
+            Address roo = 0;
+            std::uint64_t entered = 0, next_find = 0, next_crates = 0, still_since = 0, moved_at = 0, landed_at = 0, nitro_next = 0;
+            std::array<float, 3> last{}, from{};
+            float peak = 0;
+            bool known = false, moving = false, listed = false, dumped = false, nitro_done = false, templates_told = false;
+            unsigned hops = 0, lines = 0, crate_lines = 0, list_lines = 0, nitro_tries = 0, visits = 0;
+            int from_spot = -1;
+            std::vector<RooSpot> spots;
+            std::string sequence;
+            std::map<Address, RooCrate> crates;
+            std::set<std::string> nitro_whys;
+            // (V1.4.2) his stages: each a BossStage_0N whose stage script hops him over its list of platforms in order, one
+            // stage after another as he's hit (his AI's stage counter), and what's done with them
+            struct Stage
+            {
+                Address owner = 0, c = 0, data = 0, entries = 0;
+                unsigned on_at = 0, index_at = 0, jump_at = 0, count = 0, timer_at = 0;
+                int last_index = -1;
+                bool reversed = false, was_on = false;
+                std::string name, order;
+            };
+            std::vector<Stage> stages;
+            Address ai = 0, hop_turn = 0;
+            unsigned counter_at = 0, react_at = 0, fight_at = 0, wait_at = 0, control_lines = 0, watch_lines = 0, cycles = 0;
+            bool counter_fixed = false, stages_found = false;
+            std::uint64_t next_stages = 0;
+            std::map<Address, float> game_floats, pace_set; // (his pace's settings as the game had them, and as set)
+            std::set<Address> pace_wild;
+            Matrix air{};
+            bool air_known = false;
+            unsigned timer_lines = 0;
+            // (V1.4.5) his platforms: every stage's list entries (each a handle to one of his platforms) as one pool, and his
+            // platforms by place; (V1.4.7) the pattern the stage on hops him round, and the place in it each of its 4 entries
+            // stands for (an entry onto Crash: the place before it)
+            std::vector<Address> slots, pool_original;
+            std::vector<int> slot_stage;
+            std::map<Address, int> platform_of;
+            std::vector<std::array<float, 3>> platforms;
+            std::vector<int> pattern;
+            std::array<int, 4> entry_pos{-1, -1, -1, -1};
+            std::array<bool, 4> entry_detour{};
+            int pattern_stage = -1;
+            unsigned fight_hits = 0;
+            bool prepared = false;
+            bool pool_ready = false, pool_told = false, pool_changed = false, landed_event = false;
+            int active = -1;
+            std::uint64_t crash_hop_at = 0;
+            unsigned stage_hops = 0, crash_hops = 0, desync_lines = 0;
+            std::string stage_walk;
+            // (V1.4.9) the real Nitro: the platforms his Nitros go on, each one's crate (0: none now), and what's been told;
+            // (V1.4.14) when each is to come, and the next stage's plan for them
+            std::vector<int> nitro_platforms, nitro_plan;
+            std::vector<Address> nitro_crates;
+            std::vector<std::uint64_t> nitro_made_at, nitro_due;
+            std::set<Address> nitro_gone;
+            bool nitro_plan_new = false, nitro_plan_after_hit = false, nitro_warm = false;
+            // (V1.4.17) his next hop's platform, and which Nitros are an outline while he's at theirs
+            int next_target = -1, hop_from = -1; // (V1.4.22: and the platform he last landed on)
+            std::vector<bool> nitro_hidden;
+            unsigned hide_lines = 0;
+            // (V1.4.18) each Nitro's last distance from him (coming or going), how far out one becomes an outline as he
+            // comes, Crash struck by one (when, and how far it went: 1 moved to him, 2 set off), and its bigger look
+            std::vector<float> nitro_last_d;
+            float hide_at = 140;
+            std::vector<std::uint64_t> nitro_struck_at;
+            std::vector<int> nitro_strike_step;
+            unsigned strike_lines = 0;
+            // (V1.4.19) how they're drawn bigger: 0 trying their physics bodies (what the game copies to their look each
+            // frame), 1 that works, 2 it doesn't (their own size, with their bigger box outlined); its checks
+            int look_method = 0;
+            unsigned look_ok = 0, look_bad = 0;
+            // (V1.4.20) the places tried for it, one at a time (0 the entity's transform's matrix, 1 its model part's
+            // floats, 2 the entity's floats, 3 a matrix in its model part), and when the first Nitro was seen
+            struct LookTry
+            {
+                int kind = 0;
+                unsigned at = 0, count = 0;
+            };
+            std::vector<LookTry> look_tries;
+            std::size_t look_try = 0;
+            bool look_researched = false;
+            std::uint64_t look_since = 0;
+            std::set<Address> nitro_moved;
+            int nitro_making = -1;
+            std::uint64_t nitro_making_since = 0;
+            bool nitro_layer_told = false, spawners_told = false;
+            unsigned nitro_lines = 0;
+            std::uint64_t beach_next = 0;
+            std::set<Address> beach_moved;
+            std::vector<std::pair<std::string, Address>> watch_ints, watch_bytes;
+            std::map<Address, int> watch_last;
+        } roo_research;
+        std::string roo_xyz(const std::array<float, 3> &v)
+        {
+            return "(" + std::to_string(std::lround(v[0])) + ", " + std::to_string(std::lround(v[1])) + ", " + std::to_string(std::lround(v[2])) + ")";
+        }
+        bool roo_lower_has(std::string text, const char *word)
+        {
+            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return text.find(word) != std::string::npos;
+        }
+        bool roo_where(Address entity, std::array<float, 3> &at)
+        {
+            Matrix m{};
+            if (!entity_matrix(entity, m))
+                return false;
+            at = {m[12], m[13], m[14]};
+            return true;
+        }
+        // the platform (a place he landed on) nearest `at` within 80 to the side, or -1
+        int roo_spot_near(const std::array<float, 3> &at)
+        {
+            auto &r = roo_research;
+            int best = -1;
+            float best_d = 80;
+            for (std::size_t i = 0; i < r.spots.size(); ++i)
+                if (const float d = std::hypot(r.spots[i].at[0] - at[0], r.spots[i].at[1] - at[1]); d < best_d)
+                    best = static_cast<int>(i), best_d = d;
+            return best;
+        }
+        std::string roo_spot_text(int spot)
+        {
+            return spot < 0 ? std::string("off the platforms") : "platform " + std::to_string(spot + 1);
+        }
+        // the lists an object's fields point to (its type's fields by name), each with up to 16 of what's in it
+        void roo_dump_lists(Address object, Address meta, const std::string &who)
+        {
+            auto &r = roo_research;
+            const unsigned count = value<unsigned>(meta + 24), size = value<std::uint16_t>(meta + 90);
+            const auto fields = value<Address>(meta + 40);
+            for (unsigned i = 0; fields && count <= 512 && i < count && r.list_lines < 160; ++i)
+            {
+                const auto field = value<Address>(fields + i * 8);
+                const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                if (bytes != 8 || (size && offset + 8 > size + 0x40u))
+                    continue;
+                const auto p = value<Address>(object + offset);
+                if (p < 0x10000 || p > 0x7ffffffeffffULL || !readable(p, 40))
+                    continue;
+                const unsigned n = value<unsigned>(p + 16), capacity = value<unsigned>(p + 20);
+                const auto entries = value<Address>(p + 32);
+                if (!n || n > 4096 || capacity < n || capacity > 65536 || !entries || !readable(entries, std::min(n, 16u) * 8))
+                    continue;
+                std::ostringstream line;
+                line << "Roo research: " << who << " " << string(value<Address>(field + 48), 64) << " @" << hex(offset) << ": a list of " << n
+                     << " (" << object_brief(p, 0x40, 1) << "):";
+                for (unsigned k = 0; k < std::min(n, 16u); ++k)
+                {
+                    const auto e = value<Address>(entries + k * 8);
+                    const auto brief = object_brief(e, 0x100, 3);
+                    line << " [" << k << "] ";
+                    if (brief.empty())
+                        line << "0x" << std::hex << e << std::dec;
+                    else
+                        line << brief;
+                }
+                // (as numbers too, for a list of numbers or places kept in it)
+                std::array<float, 12> f{};
+                std::array<int, 12> w{};
+                if (read(entries, f) && read(entries, w))
+                {
+                    line << " | as numbers:";
+                    for (unsigned k = 0; k < 12; ++k)
+                        line << " " << w[k] << "/" << f[k];
+                }
+                ++r.list_lines;
+                std::cout << line.str() << "\n";
+            }
+        }
+        // (V1.4.2) a list's entries: the list itself, or what its handle or pointer leads to, as the game's lists are laid
+        // out (count +16, room +20, entries +32); how it was found, for the log
+        bool roo_list_find(Address v, Address &entries, unsigned &count, std::string &how)
+        {
+            const std::array<std::pair<Address, const char *>, 3> tries{{{v, "itself"}, {resolve(v), "its handle"}, {readable(v, 8) ? value<Address>(v) : 0, "its pointer"}}};
+            for (const auto &[at, what] : tries)
+            {
+                if (at < 0x10000 || at > 0x7ffffffeffffULL || !readable(at, 40))
+                    continue;
+                const unsigned n = value<unsigned>(at + 16), room = value<unsigned>(at + 20);
+                const auto e = value<Address>(at + 32);
+                if (n >= 2 && n <= 16 && room >= n && room <= 64 && e && readable(e, n * 8))
+                {
+                    entries = e, count = n, how = what;
+                    return true;
+                }
+            }
+            return false;
+        }
+        // where a list's entry is: the thing itself or what its handle leads to, if it's on his arena's floor
+        bool roo_entry_where(Address e, std::array<float, 3> &at)
+        {
+            // (V1.4.4: what its handle leads to first, and only a place from a real transform: V1.4.2 read the handle's own
+            // words as one and named every platform front-middle)
+            for (const auto thing : {resolve(e), e})
+            {
+                if (thing < 0x10000 || thing > 0x7ffffffeffffULL || !readable(thing, 48))
+                    continue;
+                // (V1.4.5, V1.4.4's log: what an entry's handle leads to is a waypoint (+0x13aada0) with its place at +20)
+                std::array<float, 3> p{};
+                Matrix m{};
+                if (typed(thing, 0x13aada0))
+                    read(thing + 20, p);
+                else if (entity_matrix(thing, m) && value<Address>(thing + 48))
+                    p = {m[12], m[13], m[14]};
+                else
+                    continue;
+                if (std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]) && std::abs(p[0]) < 2000 && std::abs(p[1]) < 2000 && p[2] > -100 && p[2] < 400)
+                {
+                    at = p;
+                    return true;
+                }
+            }
+            return false;
+        }
+        // his arena's platforms by where they are: 3 across (left, middle, right) and 3 deep (front, middle, back; Crash
+        // starts at the front)
+        std::string roo_platform_name(const std::array<float, 3> &at)
+        {
+            const char *row = at[1] < 110 ? "front" : at[1] < 520 ? "middle" : "back";
+            const char *column = at[0] < -200 ? "left" : at[0] > 190 ? "right" : "middle";
+            return std::string(row) + "-" + column;
+        }
+        std::string roo_stage_order(const RooResearch::Stage &st)
+        {
+            std::string order;
+            for (unsigned k = 0; k < st.count; ++k)
+            {
+                std::array<float, 3> at{};
+                order += (k ? ", " : "") + (roo_entry_where(value<Address>(st.entries + k * 8), at) ? roo_platform_name(at) : std::string("?"));
+            }
+            return order;
+        }
+        // (V1.4.2, Eric's V1.4.1 run: "at one point, he, like, stopped moving for a bit, like, after I hit him three times
+        // ... once I hit him again, he started moving again. But he went back to, like, his original pattern"; the log: he
+        // has three stages, BossStage_01 to 03, each hopping him over its list of 4 platforms in order, over and over (the
+        // first: middle-middle, front-left, middle-middle, front-right), his AI's stage counter going up by one at each hit
+        // (2.2 s on, once his hit is over) and the next stage starting: with 6 hits, after the third no stage was left and
+        // he stood 11 s, until a TNT got him again; what he wants: "two patterns per health or increment. So he'll do one
+        // or the other. Maybe he'll like do one of the pattern twice", "Every time you die, it's not the same pattern"):
+        // - with more hits than stages, the counter goes back to the first stage after the last one's hit, so he always
+        //   has one (1, 2, 3, 1, 2, 3 ...);
+        // - with the boss rules on, each time a stage starts its list over (and as it starts), it goes one way round or
+        //   the other, at random: the same platforms and hops, the other way (its entries after the first in reverse:
+        //   entries only swapped within the list, so the game's own count of them is as it was);
+        // - with Boss Speed above 100%, his hops (the stages' hop time, 0.581 s) and his wait after each landing (his hop
+        //   turn's 0.7 s) are shorter, 35% faster at 200% (from the game's own values, kept)
+        // and his AI's and his stages' whole-number and on/off settings go to the log as they change (600 lines)
+        void roo_control(const Shared &state, std::uint64_t now)
+        {
+            auto &r = roo_research;
+            if (!r.roo)
+                return;
+            // (his AI and his stages, once he's there; again if they're made again)
+            if ((!r.stages_found || !event_owner(r.ai ? value<Address>(r.ai + 24) : 0)) && now >= r.next_stages)
+            {
+                r.next_stages = now + 1000;
+                // (V1.4.15, Eric's V1.4.14 run: "it crashed when I got game over and restarted the boss again"; the log: a
+                // game over loads his level again, every object of the fight made anew, but the boss is still B102, so his
+                // stages' list entries (the pool) and the Nitros were the old fight's, and "no pattern of 3 fits" came from
+                // reading freed memory, then the game crashed (+0xdf3979, reading 0x2) after V1.4.14 wrote into it: when his
+                // stages are looked for again with ones found before, all of that starts over, nothing written to the old)
+                if (r.pool_told || r.stages_found)
+                {
+                    r.slots.clear(), r.pool_original.clear(), r.slot_stage.clear(), r.platform_of.clear(), r.platforms.clear();
+                    r.pattern.clear(), r.entry_pos = {-1, -1, -1, -1}, r.entry_detour = {}, r.pattern_stage = -1, r.fight_hits = 0;
+                    r.prepared = false, r.pool_ready = false, r.pool_told = false, r.pool_changed = false, r.active = -1, r.stage_hops = 0;
+                    r.stage_walk.clear(), r.counter_fixed = false;
+                    r.game_floats.clear(), r.pace_set.clear(), r.pace_wild.clear();
+                    r.nitro_platforms.clear(), r.nitro_plan.clear(), r.nitro_crates.clear(), r.nitro_made_at.clear(), r.nitro_due.clear();
+                    r.nitro_plan_new = false, r.nitro_making = -1, r.nitro_warm = false, r.nitro_moved.clear(), r.nitro_gone.clear(), r.beach_moved.clear();
+                    r.nitro_whys.clear(), r.nitro_hidden.clear(), r.next_target = -1;
+                    r.nitro_last_d.clear(), r.nitro_struck_at.clear(), r.nitro_strike_step.clear();
+                    {
+                        std::lock_guard lock(event_mutex);
+                        roo_nitro_blown.clear();
+                    }
+                    {
+                        std::lock_guard lock(beach_meta_mutex);
+                        beach_meta_block.clear();
+                    }
+                    for (auto &e : roo_nitro_entity)
+                        e = 0;
+                    {
+                        std::lock_guard lock(roo_outline_mutex);
+                        roo_outline_spots.clear();
+                    }
+                    {
+                        std::lock_guard lock(nitro_scan_mutex);
+                        nitro_level_info = {};
+                    }
+                    {
+                        std::lock_guard lock(nitro_find_mutex);
+                        nitro_find = {};
+                    }
+                    nitro_spawn_state = {}; // (a spawn the old fight had going: its spawner's gone with it)
+                    std::cout << "Roo control: his fight's objects were made anew (a game over): everything found again\n" << std::flush;
+                }
+                r.stages.clear(), r.ai = 0, r.hop_turn = 0, r.watch_ints.clear(), r.watch_bytes.clear(), r.watch_last.clear();
+                for (const auto &[c, script] : entity_scripts(r.roo))
+                {
+                    const auto meta = value<Address>(c + 56);
+                    if (script == "BossRipperRoo_AiBossManager")
+                    {
+                        r.ai = c, r.counter_at = field_offset(meta, "InternalStore__internalCounter_id_jkfq0yq8", 4);
+                        r.react_at = field_offset(meta, "Bool_id_2bqbieq0", 1), r.fight_at = field_offset(meta, "isBossFightOn_id_cag0puz2", 1);
+                    }
+                    else if (script == "BossRipperRoo_HopTurnHandler")
+                        r.hop_turn = c, r.wait_at = field_offset(meta, "Float_id_xx7td88g", 4);
+                }
+                for (const auto owner : event_owners())
+                {
+                    const auto name = string(value<Address>(owner + 128));
+                    if (name.rfind("BossStage_", 0) != 0)
+                        continue;
+                    for (const auto &[c, script] : entity_scripts(owner))
+                    {
+                        if (script != "BossRipperRoo_StageHandler")
+                            continue;
+                        RooResearch::Stage st;
+                        st.owner = owner, st.c = c, st.name = name;
+                        const auto meta = value<Address>(c + 56);
+                        st.on_at = field_offset(meta, "Bool_id_xqbcbtlk", 1), st.index_at = field_offset(meta, "Int_id_e1snv0nq", 4);
+                        st.timer_at = field_offset(meta, "InternalStore__timer_id_s7cz8gdi", 8);
+                        const auto data = value<Address>(c + 16);
+                        if (data && typed(data, 0x13bbb10))
+                        {
+                            const auto dmeta = value<Address>(data + 32);
+                            st.data = data, st.jump_at = field_offset(dmeta, "Float_id_fs7pt9lr_metaField", 4);
+                            const unsigned list_at = field_offset(dmeta, "Waypoint_List_id_0pasx98y", 8);
+                            const auto v = list_at ? value<Address>(data + list_at) : 0;
+                            std::string how;
+                            if (v && roo_list_find(v, st.entries, st.count, how))
+                                st.order = roo_stage_order(st);
+                            // (V1.4.4 research: what a list entry's handle leads to)
+                            if (st.entries && r.stages.empty())
+                            {
+                                const auto e = value<Address>(st.entries), thing = resolve(e);
+                                std::ostringstream w;
+                                w << "Roo research: a platform entry 0x" << std::hex << e << " leads to 0x" << thing << " [" << object_brief(thing, 0x100, 4) << "]:";
+                                for (unsigned k = 0; thing && readable(thing, 0x100) && k < 32; ++k)
+                                    w << " " << value<Address>(thing + k * 8);
+                                std::cout << w.str() << std::dec << "\n";
+                            }
+                            // (research: the list's own words, and what its handle leads to)
+                            std::ostringstream raw;
+                            raw << "Roo research: " << name << "'s platform list (data +" << std::hex << list_at << ") 0x" << v << ":";
+                            for (unsigned k = 0; v && readable(v, 0x60) && k < 12; ++k)
+                                raw << " " << value<Address>(v + k * 8);
+                            if (const auto target = v ? resolve(v) : 0; target && readable(target, 0x60))
+                            {
+                                raw << " | its handle leads to 0x" << target << ":";
+                                for (unsigned k = 0; k < 12; ++k)
+                                    raw << " " << value<Address>(target + k * 8);
+                            }
+                            raw << std::dec << (st.entries ? " | found " + std::to_string(st.count) + " entries (" + how + "): " + st.order : std::string(" | no entries found"));
+                            std::cout << raw.str() << "\n";
+                        }
+                        r.stages.push_back(st);
+                        // (the watch: his stages' whole numbers and on/off settings)
+                        const unsigned count = value<unsigned>(meta + 24), size = value<std::uint16_t>(meta + 90);
+                        const auto fields = value<Address>(meta + 40);
+                        for (unsigned i = 0; fields && count <= 256 && i < count; ++i)
+                        {
+                            const auto field = value<Address>(fields + i * 8);
+                            const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                            if (value<Address>(field) == base() + 0x17afe98 || offset < 0x40 || offset + bytes > size)
+                                continue;
+                            const auto label = name + " " + string(value<Address>(field + 48), 64);
+                            if (bytes == 4)
+                                r.watch_ints.emplace_back(label, c + offset);
+                            else if (bytes == 1)
+                                r.watch_bytes.emplace_back(label, c + offset);
+                        }
+                    }
+                }
+                std::sort(r.stages.begin(), r.stages.end(), [](const auto &a, const auto &b) { return a.name < b.name; });
+                if (r.ai)
+                {
+                    const auto meta = value<Address>(r.ai + 56);
+                    const unsigned count = value<unsigned>(meta + 24), size = value<std::uint16_t>(meta + 90);
+                    const auto fields = value<Address>(meta + 40);
+                    for (unsigned i = 0; fields && count <= 256 && i < count; ++i)
+                    {
+                        const auto field = value<Address>(fields + i * 8);
+                        const unsigned offset = value<std::uint16_t>(field + 24), bytes = value<std::uint16_t>(field + 22);
+                        if (value<Address>(field) == base() + 0x17afe98 || offset < 0x40 || offset + bytes > size)
+                            continue;
+                        const auto label = "his AI " + string(value<Address>(field + 48), 64);
+                        if (bytes == 4)
+                            r.watch_ints.emplace_back(label, r.ai + offset);
+                        else if (bytes == 1)
+                            r.watch_bytes.emplace_back(label, r.ai + offset);
+                    }
+                    // (research: his AI's list of stages)
+                    const auto dmeta = value<Address>(value<Address>(r.ai + 16) + 32);
+                    const unsigned list_at = field_offset(dmeta, "Entity_List_id_07dn438y", 8);
+                    const auto v = list_at ? value<Address>(value<Address>(r.ai + 16) + list_at) : 0;
+                    Address entries = 0;
+                    unsigned n = 0;
+                    std::string how;
+                    std::ostringstream line;
+                    line << "Roo research: his AI's list of stages 0x" << std::hex << v << std::dec;
+                    if (v && roo_list_find(v, entries, n, how))
+                    {
+                        line << ": " << n << " (" << how << "):";
+                        for (unsigned k = 0; k < n; ++k)
+                        {
+                            const auto e = value<Address>(entries + k * 8);
+                            std::string named;
+                            for (const auto thing : {e, resolve(e)})
+                                if (thing >= 0x10000 && readable(thing, 0x90) && named.empty())
+                                    named = string(value<Address>(thing + 128), 64);
+                            line << " " << (named.empty() ? object_brief(e, 0x100, 2) : named);
+                        }
+                    }
+                    else
+                        line << ": no entries found";
+                    std::cout << line.str() << "\n";
+                }
+                r.stages_found = r.ai && r.counter_at && !r.stages.empty();
+                std::cout << "Roo control: his AI " << (r.ai ? "found" : "not found") << " (stage counter " << (r.counter_at ? "found" : "not found") << "), " << r.stages.size()
+                          << " stages:";
+                for (const auto &st : r.stages)
+                    std::cout << " " << st.name << " [" << (st.entries ? st.order : std::string("no list")) << "]";
+                std::cout << "\n" << std::flush;
+            }
+            if (!r.stages_found)
+                return;
+            // the watch
+            for (const auto &[label, at] : r.watch_ints)
+            {
+                const int v = value<int>(at);
+                if (const auto it = r.watch_last.find(at); it != r.watch_last.end() && it->second != v && r.watch_lines < 600)
+                    ++r.watch_lines, std::cout << "Roo watch +" << seconds(now - r.entered) << ": " << label << " " << it->second << " -> " << v << "\n";
+                r.watch_last[at] = v;
+            }
+            for (const auto &[label, at] : r.watch_bytes)
+            {
+                const int v = value<unsigned char>(at);
+                if (const auto it = r.watch_last.find(at); it != r.watch_last.end() && it->second != v && r.watch_lines < 600)
+                    ++r.watch_lines, std::cout << "Roo watch +" << seconds(now - r.entered) << ": " << label << " " << it->second << " -> " << v << "\n";
+                r.watch_last[at] = v;
+            }
+            const bool fight = value<unsigned char>(r.ai + r.fight_at) != 0, react = r.react_at && value<unsigned char>(r.ai + r.react_at) != 0;
+            const bool any_on = std::any_of(r.stages.begin(), r.stages.end(), [](const auto &st) { return st.on_at && value<unsigned char>(st.c + st.on_at); });
+            // more hits than stages: after the last stage's hit, the first one again
+            if (!react)
+                r.counter_fixed = false;
+            else if (fight && !any_on && !r.counter_fixed)
+            {
+                r.counter_fixed = true;
+                const int counter = value<int>(r.ai + r.counter_at);
+                const int health = health_getter_ok() ? actor_health(r.roo) : 0;
+                if (counter >= static_cast<int>(r.stages.size()) && health > 0)
+                {
+                    write(r.ai + r.counter_at, 0);
+                    if (r.control_lines < 60)
+                        ++r.control_lines, std::cout << "Roo control: hit on his last stage (" << counter << ") with " << health / 100 << " hits left: his next is the first stage again\n";
+                }
+            }
+            // (V1.4.7, Eric's V1.4.6 run: "I like it. So what I think we should do is that we should make his pattern scale
+            // up ... First, it'll go to three, like a three random pattern ... bottom left, middle, and then up top right or
+            // something like that. Something random. It'll be three, and it'll stick to those three ... And then it'll go to
+            // four patterns. It'll be a new different four pattern. Not where it's just completely random ... once it gets
+            // hit again, it'll be five, and then so on and so forth ... but he should be able to like sometimes jump at you
+            // and then go back to his pattern"): with the boss rules on, each stage hops him round one pattern, over and
+            // over, until he's hit: 3 platforms and one more for each hit he's taken this fight (3, 4, 5 ...; picked at
+            // random as the stage starts, so a death brings a new 3), every hop between neighboring platforms (diagonals
+            // too), each platform once while it has 7 or fewer (more: some twice, never straight back). His platform lists
+            // are one pool (12 entries, handles to 7 platforms) whose entries are only ever swapped, so the game's own count
+            // of each is as it was. A stage's list has 4 entries, so the pattern is fed into it as he goes: as he lands, the
+            // entry two ahead of the one he's on gets the platform it's to be, and the one three ahead too when the pool has
+            // it. V1.4.6's rule holds (the game works out his turn for a hop as the hop before it starts, reading the entry
+            // after next): an entry is only changed when it's neither the one he's on nor the next. Now and then (1 landing
+            // in 5 since V1.4.8, 8 s apart at least, from his third hop of a stage), the entry two ahead is the platform Crash is on
+            // instead, when it's next to the platforms before and after it, and his pattern goes on after it.
+            static std::mt19937 rng{std::random_device{}()};
+            const bool rules = state.boss_rules != 0;
+            const auto cell = [&](int id) { const auto &q = r.platforms[id]; return std::pair<int, int>{q[0] < -200 ? -1 : q[0] > 190 ? 1 : 0, q[1] < 110 ? 0 : q[1] < 520 ? 1 : 2}; };
+            const auto neighbors = [&](int a, int b) {
+                if (a < 0 || b < 0 || a == b)
+                    return false;
+                const auto [ca, ra] = cell(a);
+                const auto [cb, rb] = cell(b);
+                return std::abs(ca - cb) <= 1 && std::abs(ra - rb) <= 1;
+            };
+            // (V1.4.22) two apart in a straight line, a platform between: the front left and right, the middle left and
+            // right, the front and back middle; the one between, or -1
+            const auto skipped = [&](int a, int b) {
+                if (a < 0 || b < 0 || a == b)
+                    return -1;
+                const auto [ca, ra] = cell(a);
+                const auto [cb, rb] = cell(b);
+                if (!((std::abs(ca - cb) == 2 && ra == rb) || (std::abs(ra - rb) == 2 && ca == cb)))
+                    return -1;
+                for (std::size_t q = 0; q < r.platforms.size(); ++q)
+                    if (cell(static_cast<int>(q)) == std::pair<int, int>{(ca + cb) / 2, (ra + rb) / 2})
+                        return static_cast<int>(q);
+                return -1;
+            };
+            const auto platform_near = [&](const std::array<float, 3> &at) {
+                int best = -1;
+                float best_d = 120;
+                for (std::size_t i = 0; i < r.platforms.size(); ++i)
+                    if (const float d = std::hypot(r.platforms[i][0] - at[0], r.platforms[i][1] - at[1]); d < best_d)
+                        best = static_cast<int>(i), best_d = d;
+                return best;
+            };
+            const auto platform_name = [&](int id) { return id < 0 ? std::string("?") : roo_platform_name(r.platforms[id]); };
+            const auto slot_platform = [&](std::size_t k) {
+                const auto it = r.platform_of.find(value<Address>(r.slots[k]));
+                return it == r.platform_of.end() ? -1 : it->second;
+            };
+            // (the pool, once his stages are found)
+            if (!r.pool_ready && !r.pool_told)
+            {
+                bool ok = true;
+                for (std::size_t i = 0; i < r.stages.size() && ok; ++i)
+                {
+                    const auto &st = r.stages[i];
+                    if (!st.entries || st.count != 4)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    for (unsigned k = 0; k < st.count; ++k)
+                    {
+                        const auto h = value<Address>(st.entries + k * 8);
+                        std::array<float, 3> at{};
+                        if (!roo_entry_where(h, at))
+                        {
+                            ok = false;
+                            break;
+                        }
+                        int id = -1;
+                        for (std::size_t q = 0; q < r.platforms.size(); ++q)
+                            if (std::hypot(r.platforms[q][0] - at[0], r.platforms[q][1] - at[1]) < 50)
+                                id = static_cast<int>(q);
+                        if (id < 0)
+                            r.platforms.push_back(at), id = static_cast<int>(r.platforms.size() - 1);
+                        if (const auto it = r.platform_of.find(h); it != r.platform_of.end() && it->second != id)
+                            ok = false;
+                        r.platform_of[h] = id;
+                        r.slots.push_back(st.entries + k * 8), r.pool_original.push_back(h), r.slot_stage.push_back(static_cast<int>(i));
+                    }
+                }
+                r.pool_told = true;
+                r.pool_ready = ok && !r.slots.empty() && r.platforms.size() >= 4;
+                std::ostringstream line;
+                line << "Roo control: his platforms " << (r.pool_ready ? "ready" : "not all found (his patterns are the game's own)") << ": " << r.slots.size() << " entries over "
+                     << r.platforms.size() << " platforms (";
+                for (std::size_t q = 0; q < r.platforms.size(); ++q)
+                    line << (q ? ", " : "") << platform_name(static_cast<int>(q));
+                line << ")";
+                std::cout << line.str() << "\n";
+            }
+            // (with the rules off: every entry back where the game had it)
+            if (r.pool_ready && !rules && r.pool_changed)
+            {
+                for (std::size_t k = 0; k < r.slots.size(); ++k)
+                    write(r.slots[k], r.pool_original[k]);
+                r.pool_changed = false, r.pattern.clear(), r.pattern_stage = -1;
+            }
+            const auto stage_slot = [&](int stage, unsigned k) { return static_cast<std::size_t>(stage) * 4 + k; };
+            const auto handle_platform = [&](Address h) {
+                const auto it = r.platform_of.find(h);
+                return it == r.platform_of.end() ? -1 : it->second;
+            };
+            // (on a copy of the pool: entry `at` made platform `want`, swapped with an entry not in `keep`)
+            const auto put = [&](std::vector<Address> &values, std::size_t at, int want, const std::set<std::size_t> &keep) {
+                if (handle_platform(values[at]) == want)
+                    return true;
+                for (std::size_t j = 0; j < values.size(); ++j)
+                    if (j != at && !keep.count(j) && handle_platform(values[j]) == want)
+                    {
+                        std::swap(values[at], values[j]);
+                        return true;
+                    }
+                return false;
+            };
+            const auto pool_values = [&]() {
+                std::vector<Address> values(r.slots.size());
+                for (std::size_t k = 0; k < r.slots.size(); ++k)
+                    values[k] = value<Address>(r.slots[k]);
+                return values;
+            };
+            const auto commit = [&](const std::vector<Address> &values) {
+                for (std::size_t k = 0; k < r.slots.size(); ++k)
+                    if (value<Address>(r.slots[k]) != values[k])
+                        write(r.slots[k], values[k]);
+                r.pool_changed = true;
+            };
+            // a pattern of `length` platforms at random, and where in it he starts: next to `from` (any, unknown); none of the
+            // `blocked` ones (V1.4.14: with Nitros on them)
+            const auto make_pattern = [&](unsigned length, int from, unsigned &start, const std::vector<bool> *blocked = nullptr) {
+                const int n = static_cast<int>(r.platforms.size());
+                const auto open = [&](int x) { return !blocked || !(*blocked)[static_cast<std::size_t>(x)]; };
+                int count = 0;
+                for (int x = 0; x < n; ++x)
+                    count += open(x) ? 1 : 0;
+                std::vector<std::vector<int>> found;
+                if (count < 3)
+                    return std::vector<int>{};
+                if (length <= static_cast<unsigned>(count))
+                {
+                    // every loop over `length` different platforms, each once (from its lowest platform, both ways round)
+                    std::vector<int> path;
+                    std::vector<bool> used(static_cast<std::size_t>(n));
+                    std::function<void()> walk = [&] {
+                        if (found.size() >= 4000)
+                            return;
+                        if (path.size() == length)
+                        {
+                            if (neighbors(path.back(), path.front()))
+                                found.push_back(path);
+                            return;
+                        }
+                        for (int x = path.front() + 1; x < n; ++x)
+                            if (open(x) && !used[static_cast<std::size_t>(x)] && neighbors(path.back(), x))
+                            {
+                                used[static_cast<std::size_t>(x)] = true, path.push_back(x);
+                                walk();
+                                used[static_cast<std::size_t>(x)] = false, path.pop_back();
+                            }
+                    };
+                    for (int a = 0; a < n; ++a)
+                        if (open(a))
+                        {
+                            path = {a}, used.assign(static_cast<std::size_t>(n), false), used[static_cast<std::size_t>(a)] = true;
+                            walk();
+                        }
+                }
+                else
+                {
+                    // longer than his platforms: walks round them at random, never straight back, none more than twice,
+                    // all but one of them in it at least
+                    std::vector<int> starts;
+                    for (int x = 0; x < n; ++x)
+                        if (open(x))
+                            starts.push_back(x);
+                    for (unsigned tries = 0; tries < 8000 && found.size() < 120; ++tries)
+                    {
+                        std::vector<int> p{starts[rng() % starts.size()]};
+                        std::vector<int> seen(static_cast<std::size_t>(n));
+                        seen[static_cast<std::size_t>(p[0])] = 1;
+                        bool ok = true;
+                        while (ok && p.size() < length)
+                        {
+                            std::vector<int> next;
+                            for (int x = 0; x < n; ++x)
+                                if (open(x) && neighbors(p.back(), x) && (p.size() < 2 || x != p[p.size() - 2]) && seen[static_cast<std::size_t>(x)] < 2)
+                                    next.push_back(x);
+                            if (next.empty())
+                                ok = false;
+                            else
+                            {
+                                const int x = next[rng() % next.size()];
+                                p.push_back(x), ++seen[static_cast<std::size_t>(x)];
+                            }
+                        }
+                        const auto m = p.size();
+                        ok = ok && neighbors(p[m - 1], p[0]) && p[m - 1] != p[1] && p[m - 2] != p[0] &&
+                             std::count_if(seen.begin(), seen.end(), [](int c) { return c > 0; }) >= count - 1;
+                        if (ok)
+                            found.push_back(p);
+                    }
+                }
+                std::vector<std::pair<std::size_t, unsigned>> fits;
+                for (std::size_t k = 0; k < found.size(); ++k)
+                    for (unsigned s = 0; s < found[k].size(); ++s)
+                        if (from < 0 || neighbors(from, found[k][s]))
+                            fits.emplace_back(k, s);
+                if (fits.empty())
+                    return std::vector<int>{};
+                const auto pick = fits[rng() % fits.size()];
+                start = pick.second;
+                return found[pick.first];
+            };
+            const auto pattern_text = [&](const std::vector<int> &p, unsigned start) {
+                std::string text;
+                for (std::size_t k = 0; k < p.size(); ++k)
+                    text += (k ? ", " : "") + platform_name(p[(start + k) % p.size()]);
+                return text;
+            };
+            std::array<float, 3> roo_at{};
+            const int roo_on = r.pool_ready && roo_where(r.roo, roo_at) ? platform_near(roo_at) : -1;
+            const bool landed = r.landed_event;
+            r.landed_event = false;
+            if (landed && roo_on >= 0)
+                r.hop_from = roo_on;
+            int on_stage = -1;
+            for (std::size_t i = 0; i < r.stages.size(); ++i)
+                if (r.stages[i].on_at && value<unsigned char>(r.stages[i].c + r.stages[i].on_at))
+                    on_stage = static_cast<int>(i);
+            if (on_stage != r.active)
+            {
+                // (where the stage took him, as it ends)
+                if (r.active >= 0 && !r.stage_walk.empty() && r.control_lines < 120)
+                    ++r.control_lines, std::cout << "Roo control: " << r.stages[static_cast<std::size_t>(r.active)].name << " took him:" << r.stage_walk << " (" << r.stage_hops << " hops)\n";
+                r.stage_hops = 0, r.stage_walk.clear();
+            }
+            if (on_stage >= 0 && on_stage != r.active)
+                r.prepared = false;
+            r.active = on_stage;
+            const bool nitro_mode = rules && ingame::level_patch_in_place();
+            if (r.pool_ready && rules && r.slots.size() == r.stages.size() * 4)
+            {
+                // no stage on: the next one's pattern, starting next to where he'll be, its first three platforms in its list
+                if (on_stage < 0 && !r.prepared && (!fight || react))
+                {
+                    const int counter = value<int>(r.ai + r.counter_at);
+                    const int n = static_cast<int>(r.stages.size());
+                    const int next = fight ? ((counter % n) + n) % n : 0;
+                    const int from = fight ? roo_on : platform_near({377, 313, 76}); // (after a death he starts on the middle right)
+                    r.fight_hits = fight ? r.fight_hits + 1 : 0;
+                    // (V1.4.17, Eric's V1.4.16 run: "make sure he doesn't never like jump in the same spot for his pattern": at most
+                    // 7, each platform once)
+                    // (V1.4.24: from the YAML's ripper_roo_pattern, 3 to 7; games_own (0): his own hops, no pattern of ours)
+                    const unsigned first = state.roo_pattern ? std::clamp(state.roo_pattern, 3u, 7u) : 0u;
+                    const unsigned length = first ? std::min(first + r.fight_hits, 7u) : 0u;
+                    unsigned start = 0;
+                    // (V1.4.14, Eric's V1.4.13 run, the real Nitro there at last: "I kind of wish where they spawn the second
+                    // battle starts ... And then whenever you hit him, the nitro bombs will spawn at a different place, but it
+                    // will show you an outline where it's gonna spawn in"): with /roo_nitro's copy in, the platforms the
+                    // Nitros go on are picked as each stage starts: not where he is, nor where Crash is (as the fight starts,
+                    // not where they start: the middle right and front middle), after a hit away from where they were if it
+                    // can be. (V1.4.16, Eric's V1.4.15 run: "the TNT isn't set off to nitro, which is good ... fix the nitro him
+                    // being able to clip through the nitro bomb without hitting him ... because I want to add more nitro bombs
+                    // the more you hit him, but not like where it's kind of impossible ... he has more routes, and I want to add
+                    // more basically nitros where you're gonna have to like maybe jump sideways": he goes through them (a Nitro
+                    // only goes off with Crash at it, see the event hook), so his patterns use every platform again (V1.4.14 kept
+                    // them off the Nitros' platforms); 2 Nitros, 3 from the second hit, 4 from the fourth: 3 platforms at least
+                    // always free)
+                    std::vector<int> nitros;
+                    std::string safe_text;
+                    const auto pattern = length ? make_pattern(length, from, start) : std::vector<int>{};
+                    if (nitro_mode)
+                    {
+                        std::array<float, 3> crash{};
+                        // (V1.4.18: his platform if he's on its edge too, beyond platform_near's 120)
+                        int crash_on = -1;
+                        if (player() && roo_where(player(), crash))
+                        {
+                            float best = 200;
+                            for (std::size_t q = 0; q < r.platforms.size(); ++q)
+                                if (const float d = std::hypot(r.platforms[q][0] - crash[0], r.platforms[q][1] - crash[1]); d < best)
+                                    best = d, crash_on = static_cast<int>(q);
+                        }
+                        std::vector<int> can, again;
+                        for (std::size_t q = 0; q < r.platforms.size(); ++q)
+                        {
+                            const auto name = platform_name(static_cast<int>(q));
+                            if (static_cast<int>(q) == from || static_cast<int>(q) == crash_on || (!fight && (name == "front-middle" || name == "middle-right")))
+                                continue;
+                            (std::find(r.nitro_platforms.begin(), r.nitro_platforms.end(), static_cast<int>(q)) == r.nitro_platforms.end() ? can : again).push_back(static_cast<int>(q));
+                        }
+                        std::shuffle(can.begin(), can.end(), rng), std::shuffle(again.begin(), again.end(), rng);
+                        can.insert(can.end(), again.begin(), again.end());
+                        // (V1.4.17, Eric's V1.4.16 run: "let's not make the Nitro box impossible. Like when you do add more,
+                        // let's not make it impossible": 2, 3 from the third hit, never more; the platforms left free all
+                        // reachable from each other by a straight jump (front to back or side to side), Crash's among them)
+                        // (V1.4.24: the YAML's ripper_roo_nitros as the fight starts, one more every 3 hits, up to
+                        // ripper_roo_most_nitros; V1.4.17 to V1.4.23 had 2 and 3)
+                        const unsigned most = std::max(std::min(state.roo_nitros, 4u), std::min(state.roo_nitros_most, 4u));
+                        const std::size_t want = std::min<std::size_t>(std::min(state.roo_nitros, 4u) + r.fight_hits / 3, most);
+                        const auto straight = [&](int a, int b) {
+                            const auto [ca, ra] = cell(a);
+                            const auto [cb, rb] = cell(b);
+                            return std::abs(ca - cb) + std::abs(ra - rb) == 1;
+                        };
+                        const auto fair = [&](const std::vector<int> &picked) {
+                            std::vector<int> free;
+                            for (std::size_t q = 0; q < r.platforms.size(); ++q)
+                                if (std::find(picked.begin(), picked.end(), static_cast<int>(q)) == picked.end())
+                                    free.push_back(static_cast<int>(q));
+                            if (free.empty() || (crash_on >= 0 && std::find(free.begin(), free.end(), crash_on) == free.end()))
+                                return false;
+                            std::vector<int> reached{free.front()};
+                            for (std::size_t k = 0; k < reached.size(); ++k)
+                                for (const int x : free)
+                                    if (std::find(reached.begin(), reached.end(), x) == reached.end() && straight(reached[k], x))
+                                        reached.push_back(x);
+                            return reached.size() == free.size();
+                        };
+                        // (V1.4.21, Eric's V1.4.20 run, the Nitros twice the size at last: "Now we just gotta make it where we're
+                        // not stuck ... the game knows [his] pattern for that time that he's fighting. Unless he dies, it's
+                        // different ... the nitro should know where he's gonna be jumping, and so we shouldn't get blocked off.
+                        // Where it becomes impossible, but not easy either"; his clip: after hit 2 his pattern of 5 left only the
+                        // middle left and back middle off his path, and Crash was cornered at the back, whose one way out is the
+                        // middle): the Nitros are picked with this stage's pattern in hand, every way of placing them weighed
+                        // (from the most Nitros down): besides the above, a platform off his path and free must be left when his
+                        // path doesn't take them all ("safe"); one safe platform with two ways out (not a dead end like the back)
+                        // above all else; then Nitros off his path (they take the places Crash would rest: not easy), Nitros next
+                        // to a safe platform or Crash's, and not where they just were (V1.4.22: far above the last two); ties at
+                        // random
+                        const std::size_t count = r.platforms.size();
+                        std::vector<bool> on_path(count), was(count);
+                        for (const int x : pattern)
+                            if (x >= 0 && static_cast<std::size_t>(x) < count)
+                                on_path[static_cast<std::size_t>(x)] = true;
+                        for (const int x : r.nitro_platforms)
+                            if (x >= 0 && static_cast<std::size_t>(x) < count)
+                                was[static_cast<std::size_t>(x)] = true;
+                        const auto off_path = static_cast<std::size_t>(std::count(on_path.begin(), on_path.end(), false));
+                        std::uniform_real_distribution<float> tie(0.0f, 0.9f);
+                        float best_score = -1e9f;
+                        std::vector<int> best, best_safe;
+                        for (std::size_t n = std::min(want, can.size()); n > 0 && nitros.empty(); --n)
+                        {
+                            for (unsigned mask = 0; mask < (1u << can.size()); ++mask)
+                            {
+                                std::size_t bits = 0;
+                                for (unsigned m = mask; m; m &= m - 1)
+                                    ++bits;
+                                if (bits != n)
+                                    continue;
+                                std::vector<int> picked;
+                                for (std::size_t i = 0; i < can.size(); ++i)
+                                    if (mask & (1u << i))
+                                        picked.push_back(can[i]);
+                                if (!fair(picked))
+                                    continue;
+                                std::vector<bool> nitro(count);
+                                for (const int x : picked)
+                                    nitro[static_cast<std::size_t>(x)] = true;
+                                std::vector<int> safe;
+                                for (std::size_t q = 0; q < count; ++q)
+                                    if (!nitro[q] && !on_path[q])
+                                        safe.push_back(static_cast<int>(q));
+                                if (off_path > 0 && safe.empty())
+                                    continue;
+                                const auto ways_out = [&](int q) {
+                                    int ways = 0;
+                                    for (std::size_t x = 0; x < count; ++x)
+                                        ways += !nitro[x] && straight(q, static_cast<int>(x)) ? 1 : 0;
+                                    return ways;
+                                };
+                                const bool open_safe = std::any_of(safe.begin(), safe.end(), [&](int q) { return ways_out(q) >= 2; });
+                                float score = open_safe ? 10.0f : 0.0f;
+                                for (const int x : picked)
+                                {
+                                    const auto q = static_cast<std::size_t>(x);
+                                    score += on_path[q] ? 0.0f : 3.0f;
+                                    if (std::any_of(safe.begin(), safe.end(), [&](int y) { return straight(x, y); }) || (crash_on >= 0 && straight(x, crash_on)))
+                                        score += 1.0f;
+                                    // (V1.4.22, Eric's V1.4.21 run: "is it normal that one of the nitro [bombs] will stay in place
+                                    // ... the top middle one just staying in the same spot while the other one was moving": the
+                                    // back middle, a dead end and often off his path, kept winning; and from V1.4.13: "whenever
+                                    // you hit him, the nitro bombs will spawn at a different place": -4, so one stays only when
+                                    // the rules above leave nothing else)
+                                    if (was[q])
+                                        score -= 4.0f;
+                                }
+                                score += tie(rng);
+                                if (score > best_score)
+                                    best_score = score, best = picked, best_safe = safe;
+                            }
+                            // (the most Nitros any placement allows: the best of those)
+                            nitros = best;
+                        }
+                        for (const int x : best_safe)
+                            safe_text += (safe_text.empty() ? "" : ", ") + platform_name(x);
+                        r.nitro_plan = nitros, r.nitro_plan_new = true, r.nitro_plan_after_hit = fight;
+                    }
+                    bool set = false, fourth = false;
+                    if (!pattern.empty())
+                    {
+                        auto values = pool_values();
+                        std::set<std::size_t> keep;
+                        set = true;
+                        for (unsigned k = 0; k < 3 && set; ++k)
+                            set = put(values, stage_slot(next, k), pattern[(start + k) % length], keep), keep.insert(stage_slot(next, k));
+                        fourth = set && put(values, stage_slot(next, 3), pattern[(start + 3) % length], keep);
+                        if (set)
+                        {
+                            commit(values);
+                            r.next_target = pattern[start];
+                            r.pattern = pattern, r.pattern_stage = next, r.entry_detour = {};
+                            r.entry_pos = {static_cast<int>(start), static_cast<int>((start + 1) % length), static_cast<int>((start + 2) % length),
+                                           fourth ? static_cast<int>((start + 3) % length) : -1};
+                        }
+                    }
+                    if (!set)
+                        r.pattern.clear(), r.pattern_stage = -1;
+                    r.prepared = true;
+                    if (r.control_lines < 120)
+                    {
+                        std::string nitro_text;
+                        for (const int x : nitros)
+                            nitro_text += (nitro_text.empty() ? "" : " and ") + platform_name(x);
+                        ++r.control_lines, std::cout << "Roo control: " << r.stages[static_cast<std::size_t>(next)].name << " ("
+                                                     << (r.fight_hits ? "after hit " + std::to_string(r.fight_hits) : std::string("the fight's start")) << "): "
+                                                     << (set    ? "a pattern of " + std::to_string(length) + ": " + pattern_text(pattern, start)
+                                                         : length ? "no pattern of " + std::to_string(length) + " fits (the game's own)"
+                                                                  : std::string("his own hops (the YAML's games_own)"))
+                                                     << " (from " << platform_name(from) << ")"
+                                                     << (nitro_mode ? (nitros.empty() ? std::string(", no Nitros") : ", Nitros on " + nitro_text + (safe_text.empty() ? std::string(" (nowhere off his path)") : " (safe: " + safe_text + ")")) : std::string()) << "\n";
+                    }
+                }
+                if (on_stage >= 0 && landed)
+                {
+                    ++r.stage_hops;
+                    if (r.stage_walk.size() < 900)
+                        r.stage_walk += " " + platform_name(roo_on);
+                }
+                if (on_stage >= 0 && landed && on_stage == r.pattern_stage && !r.pattern.empty())
+                {
+                    auto &st = r.stages[static_cast<std::size_t>(on_stage)];
+                    const int index = st.index_at ? value<int>(st.c + st.index_at) : -1;
+                    const auto length = static_cast<int>(r.pattern.size());
+                    // the entry he's on: the stage's index, or the one before it once it's moved on (0.2 s after he lands)
+                    int i = -1;
+                    for (const int k : {index, index - 1})
+                        if (index >= 0 && i < 0 && roo_on >= 0 && slot_platform(stage_slot(on_stage, static_cast<unsigned>((k + 4) % 4))) == roo_on)
+                            i = (k + 4) % 4;
+                    if (i < 0)
+                    {
+                        if (r.desync_lines < 12)
+                            ++r.desync_lines, std::cout << "Roo control: he landed on " << platform_name(roo_on) << ", not where " << st.name << "'s list has him (entry " << index
+                                                        << "): his pattern waits for the next landing\n";
+                    }
+                    else
+                    {
+                        const auto a = static_cast<unsigned>(i + 1) % 4, b = static_cast<unsigned>(i + 2) % 4, c = static_cast<unsigned>(i + 3) % 4;
+                        const int next_on = slot_platform(stage_slot(on_stage, a));
+                        r.next_target = next_on;
+                        // where the next one is in the pattern (found again if it isn't what's there)
+                        int t1 = r.entry_pos[a];
+                        if (t1 < 0 || t1 >= length || (!r.entry_detour[a] && r.pattern[static_cast<std::size_t>(t1)] != next_on))
+                        {
+                            t1 = -1;
+                            for (int t = 0; t < length && t1 < 0; ++t)
+                                if (r.pattern[static_cast<std::size_t>(t)] == next_on)
+                                    t1 = t;
+                            for (int t = 0; t < length && t1 < 0; ++t)
+                                if (neighbors(next_on, r.pattern[static_cast<std::size_t>((t + 1) % length)]))
+                                    t1 = t;
+                            if (r.desync_lines < 12)
+                                ++r.desync_lines, std::cout << "Roo control: " << st.name << "'s pattern found again from " << platform_name(next_on) << "\n";
+                        }
+                        if (t1 >= 0)
+                        {
+                            auto values = pool_values();
+                            std::set<std::size_t> keep{stage_slot(on_stage, static_cast<unsigned>(i)), stage_slot(on_stage, a)};
+                            const int after = (t1 + 1) % length, want_b = r.pattern[static_cast<std::size_t>(after)];
+                            // now and then, the one after next is onto Crash, between the next and its own
+                            bool onto_crash = false;
+                            int on_crash = -1;
+                            std::array<float, 3> crash{};
+                            // (V1.4.22, Eric's V1.4.21 run: "when he tries to attack you, his randomness, maybe he can skip one
+                            // platform and jump to the other": onto Crash two platforms away in a straight line too, over the
+                            // one between, and back to his pattern the same way if need be)
+                            bool skip = false;
+                            // (V1.4.23, Eric's V1.4.22 run: "I think it good. maybe make the odds 6.5. just make sure it doesn't
+                            // like always seems like he's always trying to attack you ... keep it in the middle, but slightly
+                            // towards where he's trying to attack you": 1 in 6.5 (2 in 13), was 1 in 5; 8 s apart at least)
+                            // (V1.4.24: the YAML's ripper_roo_attack_chance, in percent of his landings; 15 by default)
+                            if (r.stage_hops >= 2 && now - r.crash_hop_at >= 8000 && rng() % 1000 < std::min(state.roo_attack_pct, 50u) * 10 && player() &&
+                                roo_where(player(), crash))
+                            {
+                                on_crash = platform_near(crash);
+                                // (V1.4.24: the leap only with the YAML's ripper_roo_leap on)
+                                const auto reach = [&](int x, int y) { return neighbors(x, y) || (state.roo_leap && skipped(x, y) >= 0); };
+                                if (on_crash >= 0 && on_crash != next_on && on_crash != roo_on && on_crash != want_b &&
+                                    on_crash != r.pattern[static_cast<std::size_t>((after + 1) % length)] && reach(next_on, on_crash) && reach(on_crash, want_b))
+                                    onto_crash = put(values, stage_slot(on_stage, b), on_crash, keep), skip = skipped(next_on, on_crash) >= 0;
+                            }
+                            if (onto_crash || put(values, stage_slot(on_stage, b), want_b, keep))
+                            {
+                                keep.insert(stage_slot(on_stage, b));
+                                const int b_pos = onto_crash ? t1 : after, c_pos = (b_pos + 1) % length;
+                                const bool c_set = put(values, stage_slot(on_stage, c), r.pattern[static_cast<std::size_t>(c_pos)], keep);
+                                commit(values);
+                                r.entry_pos[a] = t1;
+                                r.entry_pos[b] = b_pos, r.entry_detour[b] = onto_crash;
+                                r.entry_pos[c] = c_set ? c_pos : -1, r.entry_detour[c] = false;
+                                if (onto_crash)
+                                {
+                                    r.crash_hop_at = now, ++r.crash_hops;
+                                    if (r.control_lines < 120)
+                                        ++r.control_lines, std::cout << "Roo control: his hop after next is onto Crash, on " << platform_name(on_crash)
+                                                                     << (skip ? " (over " + platform_name(skipped(next_on, on_crash)) + ")" : std::string()) << ", then back to his pattern\n";
+                                }
+                            }
+                            else if (r.desync_lines < 12)
+                                ++r.desync_lines, std::cout << "Roo control: the pool has no " << platform_name(want_b) << " to give " << st.name << "\n";
+                        }
+                    }
+                }
+            }
+            // (V1.4.9, Testing, Eric: "Nitro's on platform", "some of the platforms are blocked off by Nitro, but we'll make it
+            // where you're still able to hit them, but you just gotta work around ... he goes through the Nitro, but you're
+            // not allowed to"; "You should do the real nitro, just like the nitro trap"): with /roo_nitro's patched archive in
+            // place (N. Sanity Beach's crate layer in his arena: the Nitro's template, and its crates' spawners to make one
+            // with; his arena has none) and the boss rules on, a real Nitro on two of his platforms, made the way the Nitro
+            // Trap makes its own (a plain crate's spawner from the layer borrowed for it), put back on its platform if the
+            // game moves it. (V1.4.14, Eric's V1.4.13 run: "Metros are spawning. I kind of wish where they spawn the second
+            // battle starts. So when you if you skip it, it's already there. Not just spawn in one like slowly. And then
+            // whenever you hit him, the nitro bombs will spawn at a different place, but it will show you an outline where
+            // it's gonna spawn in, and it'll take like a few seconds before it does spawn in. And that outline would
+            // disappear when it does spawn in"): their platforms are picked with each stage's pattern (see the stage prep,
+            // which keeps him off them); as the fight starts (or starts again after a death) they come at once, the level
+            // looked at and the Nitro's template looked for as soon as he's there, and both made in a row; after a hit the
+            // Nitros not on the new platforms go (far below), and the new ones come 3 s later, a Nitro-green outline where
+            // each will be until it's there (drawn by the client); one set off comes back 3 s later the same way. A Nitro
+            // never comes on a platform he or Crash is on: its outline waits. What the layer brought and what becomes of
+            // each, to the log
+            if (nitro_mode && r.pool_ready)
+            {
+                const auto nitro_spot = [&](int id) {
+                    auto at = r.platforms[static_cast<std::size_t>(id)];
+                    if (!(at[2] > 40 && at[2] < 120))
+                        at[2] = 76;
+                    return at;
+                };
+                // (V1.4.18, Eric's V1.4.17 run: "is there a way we can make the hitbox with a nitro bigger just for this
+                // level? Because I can still stand on the edge, and I want it to be where it's, you just can't stand on that
+                // platform until the nitro switches. Yeah, can we just make the [Nitro] bigger?"; his platforms' tops are
+                // some 2.2 crates across): his Nitros twice a crate's size, drawn so (its look's matrix, each frame it's off)
+                // and as deadly: Crash in that box sets it off (the Nitro goes to him, as when he touches one)
+                // (V1.4.24: the YAML's ripper_roo_nitro_size, 100 to 200 percent of a crate)
+                const float nitro_scale = std::clamp(state.roo_nitro_size, 100u, 200u) / 100.0f;
+                const auto in_box = [](const std::array<float, 3> &at, const std::array<float, 3> &spot, float half) {
+                    return std::abs(at[0] - spot[0]) < half && std::abs(at[1] - spot[1]) < half;
+                };
+                // (V1.4.18) its look twice the size. V1.4.18 set its model's matrix, which the game sets back every frame
+                // (twice the size only in the pause menu); V1.4.19 its physics body's (Eric's V1.4.19 run: "no, it doesn't
+                // look bigger"; the log: "0 of 60 checks, the bodies set 2 times": the body kept it, the look didn't
+                // follow). (V1.4.20) the game's own big crate here, his Big TNT, is looked at once: how big its model is
+                // drawn, and where in it and its model part that size is kept; then each place a Nitro's look may come from
+                // is tried in turn (its transform's matrix, the floats where the Big TNT keeps its size, matrices in its
+                // model part), each checked 20 times (its model drawn twice the size at least 14 of them) and put back if
+                // not. What's found, and what each try did, goes to the log
+                const auto axis = [](const Matrix &m) { return std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]); };
+                const auto affine = [&](const Matrix &m) {
+                    return std::all_of(m.begin(), m.end(), [](float f) { return std::isfinite(f); }) && std::abs(m[3]) < 0.001f && std::abs(m[7]) < 0.001f &&
+                           std::abs(m[11]) < 0.001f && std::abs(m[15] - 1) < 0.001f && axis(m) > 0.01f && axis(m) < 100;
+                };
+                const auto model_part = [](Address entity) -> Address {
+                    const auto c = value<Address>(entity + 176);
+                    return (typed(c, 0x144bff0) || typed(c, 0x15aee18)) && value<Address>(c + 32) == entity ? c : 0;
+                };
+                const auto drawn = [&](Address entity) {
+                    Matrix m{};
+                    const auto model = crate_model(entity);
+                    return model && read(model + 48, m) && affine(m) ? axis(m) : 0.0f;
+                };
+                // a try's place in this crate, set to `size` (true: it's there and was set or already so)
+                const auto set_try = [&](Address entity, const RooResearch::LookTry &t, float size) {
+                    if (t.kind == 0 || t.kind == 3)
+                    {
+                        const auto holder = t.kind == 0 ? value<Address>(entity + 48) : model_part(entity);
+                        const auto at = holder ? holder + (t.kind == 0 ? 32 : t.at) : 0;
+                        Matrix m{};
+                        if (!at || !read(at, m) || !affine(m))
+                            return false;
+                        bool changed = false;
+                        for (unsigned row = 0; row < 3; ++row)
+                            if (const float l = std::sqrt(m[row * 4] * m[row * 4] + m[row * 4 + 1] * m[row * 4 + 1] + m[row * 4 + 2] * m[row * 4 + 2]);
+                                l > 0.01f && std::abs(l - size) > 0.01f)
+                            {
+                                for (unsigned col = 0; col < 3; ++col)
+                                    m[row * 4 + col] *= size / l;
+                                changed = true;
+                            }
+                        if (changed)
+                            write(at, m);
+                        return true;
+                    }
+                    const auto holder = t.kind == 1 ? model_part(entity) : entity;
+                    if (!holder)
+                        return false;
+                    for (unsigned i = 0; i < t.count; ++i)
+                    {
+                        const float f = value<float>(holder + t.at + 4 * i);
+                        if (!(f > 0.01f && f < 100))
+                            return false;
+                        if (std::abs(f - size) > 0.001f)
+                            write(holder + t.at + 4 * i, size);
+                    }
+                    return true;
+                };
+                const auto try_name = [](const RooResearch::LookTry &t) {
+                    std::ostringstream out;
+                    out << (t.kind == 0 ? "its transform's matrix" : t.kind == 1 ? "its model part's float" : t.kind == 2 ? "its own float" : "its model part's matrix");
+                    if (t.kind != 0)
+                        out << " at +0x" << std::hex << t.at << std::dec << (t.count > 1 ? " (" + std::to_string(t.count) + ")" : std::string());
+                    return out.str();
+                };
+                const auto look = [&](Address e, std::uint64_t at_time) {
+                    if (r.look_method == 2 || nitro_scale < 1.01f)
+                        return;
+                    if (!r.look_researched)
+                    {
+                        if (!r.look_since)
+                            r.look_since = at_time;
+                        Address big = 0;
+                        for (const auto owner : event_owners())
+                            if (string(value<Address>(owner + 128)).find("BigTNT") != std::string::npos)
+                            {
+                                big = crate_model(owner) ? owner : crate_entity(owner);
+                                if (big && crate_model(big))
+                                    break;
+                                big = 0;
+                            }
+                        if (!big && at_time - r.look_since < 4000)
+                            return;
+                        r.look_researched = true;
+                        const auto describe = [&](Address entity) {
+                            std::ostringstream out;
+                            Matrix t{};
+                            const auto transform = value<Address>(entity + 48);
+                            out << "drawn " << drawn(entity) << "x, transform at +0x30 "
+                                << (transform && read(transform + 32, t) && affine(t) ? "with axes " + std::to_string(axis(t)) : std::string("none"));
+                            const auto part = model_part(entity);
+                            out << ", model part " << (part ? hex(static_cast<unsigned>(value<Address>(part) - base())) : std::string("not found"));
+                            if (part)
+                            {
+                                out << ":";
+                                for (unsigned off = 8; off < 0x100; off += 4)
+                                    if (const float f = value<float>(part + off); std::isfinite(f) && f != 0 && std::abs(f) > 1e-4f && std::abs(f) < 1e5f)
+                                        out << " +" << std::hex << off << std::dec << "=" << f;
+                            }
+                            return out.str();
+                        };
+                        std::cout << "Roo Nitro look: a Nitro " << describe(e) << "\n" << std::flush;
+                        if (const auto transform = value<Address>(e + 48))
+                        {
+                            Matrix t{};
+                            if (read(transform + 32, t) && affine(t))
+                                r.look_tries.push_back({0, 0, 1});
+                        }
+                        if (big)
+                        {
+                            std::cout << "Roo Nitro look: his Big TNT " << describe(big) << "\n" << std::flush;
+                            const float size = drawn(big);
+                            if (size > 0 && std::abs(size - 1) > 0.05f)
+                                for (const int kind : {1, 2})
+                                {
+                                    const auto from = kind == 1 ? model_part(big) : big, to = kind == 1 ? model_part(e) : e;
+                                    std::string where;
+                                    for (unsigned off = 8; from && to && off < 0x300; off += 4)
+                                        if (std::abs(value<float>(from + off) - size) < 0.002f)
+                                        {
+                                            where += " +" + hex(off).substr(1);
+                                            if (std::abs(value<float>(to + off) - 1) < 0.002f)
+                                            {
+                                                if (!r.look_tries.empty() && r.look_tries.back().kind == kind && r.look_tries.back().at + 4 * r.look_tries.back().count == off &&
+                                                    r.look_tries.back().count < 3)
+                                                    ++r.look_tries.back().count;
+                                                else
+                                                    r.look_tries.push_back({kind, off, 1});
+                                            }
+                                        }
+                                    std::cout << "Roo Nitro look: his Big TNT's " << (kind == 1 ? "model part" : "own") << " floats at its size (" << size << "):"
+                                              << (where.empty() ? std::string(" none") : where) << "\n" << std::flush;
+                                }
+                        }
+                        else
+                            std::cout << "Roo Nitro look: no Big TNT found in 4 s\n" << std::flush;
+                        if (const auto part = model_part(e))
+                            for (unsigned off = 16; off + 64 <= 0x200; off += 16)
+                            {
+                                Matrix m{};
+                                if (read(part + off, m) && affine(m) && std::abs(axis(m) - 1) < 0.01f)
+                                    r.look_tries.push_back({3, off, 1});
+                            }
+                        std::string list;
+                        for (const auto &t : r.look_tries)
+                            list += (list.empty() ? "" : ", ") + try_name(t);
+                        std::cout << "Roo Nitro look: " << r.look_tries.size() << " places to try" << (list.empty() ? std::string() : ": " + list) << "\n" << std::flush;
+                        r.look_try = 0, r.look_ok = 0, r.look_bad = 0;
+                        if (r.look_tries.empty())
+                        {
+                            r.look_method = 2;
+                            std::cout << "Roo Nitro look: nothing to try: drawn its own size\n" << std::flush;
+                            return;
+                        }
+                    }
+                    const auto &t = r.look_tries[r.look_try];
+                    if (!set_try(e, t, nitro_scale) || r.look_method == 1)
+                        return;
+                    ++(std::abs(drawn(e) - nitro_scale) < 0.05f ? r.look_ok : r.look_bad);
+                    if (r.look_ok + r.look_bad < 20)
+                        return;
+                    const bool works = r.look_ok >= 14;
+                    std::cout << "Roo Nitro look: " << try_name(t) << ": drawn " << nitro_scale << "x " << r.look_ok << " of 20 times" << (works ? ": that's it" : ": put back") << "\n" << std::flush;
+                    if (works)
+                    {
+                        r.look_method = 1;
+                        return;
+                    }
+                    for (const auto other : r.nitro_crates)
+                        if (other && live_crate(other))
+                            set_try(other, t, 1.0f);
+                    r.look_ok = 0, r.look_bad = 0;
+                    if (++r.look_try >= r.look_tries.size())
+                    {
+                        r.look_method = 2;
+                        std::cout << "Roo Nitro look: none of them worked: drawn its own size\n" << std::flush;
+                    }
+                };
+                // (as soon as he's there: the level's spawners and the Nitro's template looked for, on their own threads)
+                if (!r.nitro_warm)
+                    r.nitro_warm = true, nitro_level_scan("Boss");
+                if (!r.nitro_layer_told && now - r.entered >= 5000)
+                {
+                    r.nitro_layer_told = true;
+                    unsigned crates = 0;
+                    std::map<std::string, unsigned> kinds;
+                    for (const auto owner : event_owners())
+                    {
+                        const auto name = string(value<Address>(owner + 128));
+                        if (name.rfind("Crate_", 0) != 0 || name.find("Spawned") != std::string::npos)
+                            continue;
+                        ++crates, ++kinds[kind_of(name)];
+                    }
+                    std::ostringstream line;
+                    line << "Roo Nitro: N. Sanity Beach's crate layer in his arena: " << crates << " crates (";
+                    bool first = true;
+                    for (const auto &[kind, count] : kinds)
+                        line << (first ? "" : ", ") << count << " " << kind, first = false;
+                    line << ")";
+                    std::cout << line.str() << "\n" << std::flush;
+                }
+                // the one being made: there once the Nitro Trap's spawn has made it
+                if (r.nitro_making >= 0 && !nitro_spawn_state.component)
+                {
+                    const auto k = static_cast<std::size_t>(r.nitro_making);
+                    if (k < r.nitro_crates.size() && trap_nitro.entity && trap_nitro.appeared >= r.nitro_making_since && live_crate(trap_nitro.entity))
+                    {
+                        r.nitro_crates[k] = trap_nitro.entity, r.nitro_made_at[k] = now;
+                        if (r.nitro_lines < 80)
+                            ++r.nitro_lines, std::cout << "Roo Nitro: one on " << platform_name(r.nitro_platforms[k]) << ", at " << roo_xyz(trap_nitro.at) << "\n" << std::flush;
+                    }
+                    else
+                    {
+                        if (k < r.nitro_due.size())
+                            r.nitro_due[k] = now + 1000;
+                        if (r.nitro_lines < 80)
+                            ++r.nitro_lines, std::cout << "Roo Nitro: none came on " << (k < r.nitro_platforms.size() ? platform_name(r.nitro_platforms[k]) : std::string("?")) << "\n" << std::flush;
+                    }
+                    r.nitro_making = -1;
+                }
+                // a new plan (the stage prep): Nitros not on its platforms go, its platforms' come (at once as a fight starts,
+                // 3 s later after a hit)
+                if (r.nitro_plan_new && r.nitro_making < 0 && !nitro_spawn_state.component)
+                {
+                    r.nitro_plan_new = false;
+                    std::vector<Address> crates(r.nitro_plan.size(), 0);
+                    std::vector<std::uint64_t> due(r.nitro_plan.size(), now + (r.nitro_plan_after_hit ? 3000 : 0)), made(r.nitro_plan.size(), 0);
+                    std::vector<bool> still_hidden(r.nitro_plan.size(), false); // (V1.4.18: one kept while he's at it stays an outline)
+                    for (std::size_t k = 0; k < r.nitro_crates.size(); ++k)
+                    {
+                        const auto e = r.nitro_crates[k];
+                        std::array<float, 3> at{};
+                        bool blown = false;
+                        {
+                            // (V1.4.19: one that went off is never kept: a new one comes)
+                            std::lock_guard lock(event_mutex);
+                            blown = roo_nitro_blown.erase(e) > 0;
+                        }
+                        if (!e || blown || !live_crate(e) || !read(e + 32, at))
+                            continue;
+                        const auto kept = std::find(r.nitro_plan.begin(), r.nitro_plan.end(), r.nitro_platforms[k]);
+                        if (kept != r.nitro_plan.end())
+                        {
+                            const auto j = static_cast<std::size_t>(kept - r.nitro_plan.begin());
+                            crates[j] = e, due[j] = 0, made[j] = r.nitro_made_at[k];
+                            still_hidden[j] = k < r.nitro_hidden.size() && r.nitro_hidden[k];
+                        }
+                        else
+                            set_entity_position(e, {at[0], at[1], -6000.0f}), r.nitro_gone.insert(e);
+                    }
+                    for (std::size_t j = 0; j < crates.size(); ++j)
+                        if (crates[j] && !still_hidden[j])
+                            set_entity_position(crates[j], nitro_spot(r.nitro_plan[j]));
+                    r.nitro_platforms = r.nitro_plan, r.nitro_crates = crates, r.nitro_due = due, r.nitro_made_at = made;
+                    r.nitro_hidden = still_hidden;
+                    r.nitro_last_d.assign(crates.size(), 1e9f), r.nitro_struck_at.assign(crates.size(), 0), r.nitro_strike_step.assign(crates.size(), 0);
+                    std::string names;
+                    for (const int q : r.nitro_platforms)
+                        names += (names.empty() ? "" : " and ") + platform_name(q);
+                    if (r.nitro_lines < 80)
+                        ++r.nitro_lines, std::cout << "Roo Nitro: his Nitros go on " << (names.empty() ? std::string("no platform (no pattern fits around one)") : names)
+                                                   << (r.nitro_plan_after_hit ? ", outlined, in 3 s" : ", now") << "\n" << std::flush;
+                }
+                std::array<float, 3> crash{};
+                const bool crash_known = player() && roo_where(player(), crash);
+                for (std::size_t k = 0; k < r.nitro_crates.size(); ++k)
+                {
+                    const auto e = r.nitro_crates[k];
+                    if (!e)
+                        continue;
+                    const auto spot = nitro_spot(r.nitro_platforms[k]);
+                    std::array<float, 3> at{};
+                    bool blown = false;
+                    {
+                        std::lock_guard lock(event_mutex);
+                        blown = roo_nitro_blown.erase(e) > 0;
+                    }
+                    if (blown || !live_crate(e) || !read(e + 32, at))
+                    {
+                        // gone: set off (by whom?), or the fight made over; back in 3 s, outlined. (V1.4.19: one that went off
+                        // stays a crate in the game's memory: what's left of it is left alone)
+                        if (r.nitro_lines < 80)
+                            ++r.nitro_lines, std::cout << "Roo Nitro: the one on " << platform_name(r.nitro_platforms[k]) << (blown ? " went off" : " is gone") << " after " << seconds(now - r.nitro_made_at[k])
+                                                       << " (Ripper Roo " << std::lround(std::hypot(roo_at[0] - spot[0], roo_at[1] - spot[1])) << " from it"
+                                                       << (crash_known ? ", Crash " + std::to_string(std::lround(std::hypot(crash[0] - spot[0], crash[1] - spot[1]))) : std::string())
+                                                       << "; his health " << (health_getter_ok() ? std::to_string(actor_health(r.roo) / 100) + " hits" : std::string("?")) << ")\n" << std::flush;
+                        r.nitro_crates[k] = 0, r.nitro_due[k] = now + 3000;
+                        if (k < r.nitro_hidden.size())
+                            r.nitro_hidden[k] = false;
+                        if (k < r.nitro_struck_at.size())
+                            r.nitro_struck_at[k] = 0, r.nitro_strike_step[k] = 0;
+                        continue;
+                    }
+                    if (r.nitro_last_d.size() < r.nitro_crates.size())
+                        r.nitro_last_d.resize(r.nitro_crates.size(), 1e9f);
+                    if (r.nitro_struck_at.size() < r.nitro_crates.size())
+                        r.nitro_struck_at.resize(r.nitro_crates.size(), 0), r.nitro_strike_step.resize(r.nitro_crates.size(), 0);
+                    const int q = r.nitro_platforms[k];
+                    const float d = std::hypot(roo_at[0] - spot[0], roo_at[1] - spot[1]), last = r.nitro_last_d[k];
+                    r.nitro_last_d[k] = d;
+                    // (V1.4.18) Crash struck by it: it was moved to him (his touch sets it off, as when he runs into one); still
+                    // there 0.3 s on, it's set off; still there 2 s on, nothing came of it and it goes back
+                    if (r.nitro_struck_at[k])
+                    {
+                        const auto since = now - r.nitro_struck_at[k];
+                        if (since >= 300 && r.nitro_strike_step[k] == 1)
+                        {
+                            std::string how;
+                            r.nitro_strike_step[k] = 2;
+                            const bool off = set_off_trap_nitro(e, how);
+                            if (r.strike_lines < 12)
+                                ++r.strike_lines, std::cout << "Roo Nitro: the one on " << platform_name(q) << " still whole 0.3 s after it went to Crash: "
+                                                            << (off ? "set off (" + how + " )" : "couldn't set it off (" + how + ")") << "\n" << std::flush;
+                        }
+                        if (since < 2000)
+                            continue;
+                        r.nitro_struck_at[k] = 0, r.nitro_strike_step[k] = 0;
+                        if (r.strike_lines < 12)
+                            ++r.strike_lines, std::cout << "Roo Nitro: the one on " << platform_name(q) << " still whole 2 s after it went to Crash: back on its platform\n" << std::flush;
+                        set_entity_position(e, spot);
+                        continue;
+                    }
+                    // (V1.4.17, Eric's V1.4.16 run: "when he's on the outline of the Nitro, or on a Nitro, I think it should
+                    // just turn into an outline. But the second he leaves that outline Nitro box, it goes immediately back into
+                    // a Nitro"; the log: a Nitro is solid to him: his hop onto one's platform took 1.5 s and ended back where
+                    // he started, then he hopped in place): while he's at it the Nitro is moved far below and its outline drawn
+                    // instead. (V1.4.18, Eric's V1.4.17 run: "can you make sure it's [not] pretty noticeable where he's gonna
+                    // jump ... it should be exactly as he's about to land on the nitro box. That's when the outline disappears.
+                    // And then the second he's basically out of the frame of the outline of the nitro box, that's when it
+                    // reappears"; V1.4.17 made it an outline as he landed on the platform before, the whole wait there): an
+                    // outline as he comes within 140 of it (the last third of his hop, some 0.1 s before he lands), back once
+                    // he's 150 from it, out of its box; and one hidden stays an outline while Crash is at its platform: never
+                    // back on top of him. If he's already down at a crate's height over it as it goes, it goes 40 sooner after
+                    const bool hidden = k < r.nitro_hidden.size() && r.nitro_hidden[k];
+                    const bool crash_near = crash_known && in_box(crash, spot, 38 * nitro_scale + 40);
+                    // (V1.4.22: on a hop over a platform, its Nitro stays as it is, him far above it; on the platform he
+                    // leaps to, it goes twice as far out, his leap twice as fast)
+                    const int over_q = r.next_target >= 0 && r.hop_from >= 0 ? skipped(r.hop_from, r.next_target) : -1;
+                    const float hide_from = over_q >= 0 && q == r.next_target ? r.hide_at * 2 : r.hide_at;
+                    const bool away = hidden ? d < 150 || crash_near : q != over_q && (d < 60 || (d < hide_from && d < last - 0.5f));
+                    if (away != hidden)
+                    {
+                        if (r.nitro_hidden.size() < r.nitro_crates.size())
+                            r.nitro_hidden.resize(r.nitro_crates.size());
+                        r.nitro_hidden[k] = away;
+                        set_entity_position(e, away ? std::array<float, 3>{spot[0], spot[1], -6000.0f} : spot);
+                        const float above = roo_at[2] - spot[2];
+                        if (r.nitro_lines < 80 && r.hide_lines++ < 16)
+                            ++r.nitro_lines, std::cout << "Roo Nitro: the one on " << platform_name(q)
+                                                       << (away ? " an outline as he comes (" + std::to_string(std::lround(d)) + " from it, " + std::to_string(std::lround(above)) + " above its platform)"
+                                                                : std::string(" back now he's off it")) << "\n" << std::flush;
+                        if (away && d < 90 && above < 76 + 20 && r.hide_at < 260)
+                        {
+                            r.hide_at += 40;
+                            std::cout << "Roo Nitro: he was already down at it: from now on an outline from " << r.hide_at << " away\n" << std::flush;
+                        }
+                        continue;
+                    }
+                    if (hidden)
+                        continue;
+                    // (V1.4.18) Crash in its bigger box, on his platform's top or in a jump below the box's top
+                    if (crash_known && in_box(crash, spot, 38 * nitro_scale + 18) && crash[2] > spot[2] - 40 && crash[2] < spot[2] + 76 * nitro_scale + 10)
+                    {
+                        r.nitro_struck_at[k] = now, r.nitro_strike_step[k] = 1;
+                        if (r.strike_lines < 12)
+                            ++r.strike_lines, std::cout << "Roo Nitro: Crash at the one on " << platform_name(q) << " (" << std::lround(std::hypot(crash[0] - spot[0], crash[1] - spot[1]))
+                                                        << " from it, " << std::lround(crash[2] - spot[2]) << " up): it goes to him\n" << std::flush;
+                        set_entity_position(e, crash);
+                        continue;
+                    }
+                    // moved by the game (a borrowed spawner's crate can go "home" to it): back on its platform
+                    if (std::hypot(at[0] - spot[0], at[1] - spot[1]) > 20)
+                    {
+                        if (r.nitro_moved.insert(e).second && r.nitro_lines < 80)
+                            ++r.nitro_lines, std::cout << "Roo Nitro: the game moved the one on " << platform_name(r.nitro_platforms[k]) << " to " << roo_xyz(at) << ": put back\n" << std::flush;
+                        set_entity_position(e, spot);
+                    }
+                    look(e, now);
+                }
+                // the next one due (both in a row), with nobody on its platform
+                if (r.nitro_making < 0 && !nitro_spawn_state.component && !r.nitro_plan_new && now >= r.nitro_next)
+                    for (std::size_t k = 0; k < r.nitro_crates.size(); ++k)
+                    {
+                        // (V1.4.18: nor where he'd be at it, nor where Crash would be in its bigger box)
+                        const int q = r.nitro_platforms[k];
+                        const auto spot = nitro_spot(q);
+                        if (r.nitro_crates[k] || now < r.nitro_due[k] || std::hypot(roo_at[0] - spot[0], roo_at[1] - spot[1]) < 150 ||
+                            (crash_known && in_box(crash, spot, 38 * nitro_scale + 40)))
+                            continue;
+                        nitro_level_scan("Boss");
+                        std::string why;
+                        r.nitro_making_since = GetTickCount64();
+                        if (nitro_spawn(why, &spot, 0, true))
+                            r.nitro_making = static_cast<int>(k), ++r.nitro_tries;
+                        else
+                        {
+                            if (r.nitro_whys.insert(why).second && r.nitro_whys.size() <= 12)
+                                std::cout << "Roo Nitro: can't make one yet: " << why << "\n" << std::flush;
+                            r.nitro_next = now + 250;
+                        }
+                        break;
+                    }
+                // (the event hook's list of them)
+                for (std::size_t k = 0; k < roo_nitro_entity.size(); ++k)
+                    roo_nitro_entity[k] = k < r.nitro_crates.size() ? r.nitro_crates[k] : 0;
+                // the outlines: platforms waiting for their Nitro
+                {
+                    std::vector<std::array<float, 3>> spots;
+                    for (std::size_t k = 0; k < r.nitro_crates.size(); ++k)
+                        if (!r.nitro_crates[k] || (k < r.nitro_hidden.size() && r.nitro_hidden[k]))
+                            spots.push_back(nitro_spot(r.nitro_platforms[k]));
+                    std::lock_guard lock(roo_outline_mutex);
+                    roo_outline_spots = std::move(spots), roo_outline_scale = nitro_scale;
+                }
+                // (V1.4.12, Eric's V1.4.11 run: "they just spawned regular boxes, but it's in the water, not on the platform":
+                // the beach's crates come where they are on the beach, a few of them in his arena's water (its first ones, at
+                // y -142 to 122): any of them in his arena is moved far below it, out of sight and reach)
+                if (now >= r.beach_next)
+                {
+                    r.beach_next = now + 250;
+                    for (const auto owner : event_owners())
+                    {
+                        const auto name = string(value<Address>(owner + 128));
+                        if (name.rfind("Crate_", 0) != 0 || name.find("_Spawned_gen_Spawned_Entity") == std::string::npos ||
+                            name.find("AwarenessHelper") != std::string::npos || name.find("Nitro") != std::string::npos)
+                            continue;
+                        std::array<float, 3> at{};
+                        if (!read(owner + 32, at) || std::abs(at[0]) > 1500 || at[1] < -1200 || at[1] > 1800 || at[2] < -2000 || at[2] > 900)
+                            continue;
+                        if (r.beach_moved.insert(owner).second && r.nitro_lines < 80)
+                            ++r.nitro_lines, std::cout << "Roo Nitro: the beach's " << name.substr(0, name.find("_Spawned")) << " at " << roo_xyz(at) << " is in his arena: moved below it\n" << std::flush;
+                        set_entity_position(owner, {at[0], at[1], -6000.0f});
+                    }
+                }
+            }
+            else if (r.nitro_warm)
+            {
+                // (the rules off: no outlines, nothing kept from them)
+                for (auto &e : roo_nitro_entity)
+                    e = 0;
+                std::lock_guard lock(roo_outline_mutex);
+                roo_outline_spots.clear();
+            }
+            // his pace at a boss speed: hops and the wait after each landing shorter
+            const unsigned speed = std::clamp(state.boss_speed, 100u, 200u);
+            // (V1.4.16, Eric's V1.4.15 run: "he just needs to be a little faster": 50% faster at 200%, was 35%; V1.4.22, Eric's
+            // V1.4.21 run: "can we maybe speed him up a little bit? Yeah, we just need to speed him up a little bit": 70%)
+            // (V1.4.24: the YAML's ripper_roo_speed, his pace in percent, when it's set; by_boss_speed: as above)
+            const float pace = state.roo_speed ? std::clamp(state.roo_speed, 100u, 200u) / 100.0f : 1.0f + 0.7f * static_cast<float>(speed - 100) / 100.0f;
+            // (set only where it holds the game's own value or ours: one that changes by itself, a countdown, is left alone)
+            const auto paced = [&](Address at, const char *what)
+            {
+                const float now_value = value<float>(at);
+                if (!std::isfinite(now_value) || now_value <= 0 || now_value > 10 || r.pace_wild.count(at))
+                    return;
+                auto it = r.game_floats.find(at);
+                if (it == r.game_floats.end())
+                    it = r.game_floats.emplace(at, now_value).first;
+                const float game = it->second, want = game / pace, had = r.pace_set.count(at) ? r.pace_set[at] : game;
+                if (std::abs(now_value - want) <= 1e-4f)
+                    return;
+                if (std::abs(now_value - game) > 1e-4f && std::abs(now_value - had) > 1e-4f)
+                {
+                    r.pace_wild.insert(at);
+                    if (r.control_lines < 60)
+                        ++r.control_lines, std::cout << "Roo control: his " << what << " changes by itself (" << game << " -> " << now_value << "): left alone\n";
+                    return;
+                }
+                write(at, want), r.pace_set[at] = want;
+                if (r.control_lines < 60)
+                    ++r.control_lines, std::cout << "Roo control: his " << what << " at " << std::lround(pace * 100) << "% of his pace: " << game << " s -> " << want << " s\n";
+            };
+            for (const auto &st : r.stages)
+                if (st.data && st.jump_at)
+                    paced(st.data + st.jump_at, (st.name + "'s hop time").c_str());
+            // (V1.4.8, Eric's V1.4.7 run: "I don't know if his speed is fast. It doesn't look, to me it doesn't look fast";
+            // the log: 0.40 s in the air at 200%, but still 0.64 s between hops, as at 100%. His hop turn's 0.7 s is set
+            // again as he lands from the three times in its data, 0.1, 0.2 and 0.4 s: those are shorter too)
+            if (const auto data = r.hop_turn ? value<Address>(r.hop_turn + 16) : 0; data && typed(data, 0x13bbb10))
+            {
+                const auto dmeta = value<Address>(data + 32);
+                for (const char *name : {"Float_id_tg4ry7rj", "Float_id_kmfljugp", "Float_id_z8tas0xm"})
+                    if (const unsigned at = field_offset(dmeta, name, 4))
+                        paced(data + at, ("turn before a hop (" + std::string(name).substr(9) + ")").c_str());
+            }
+            // (V1.4.4: not his hop turn's 0.7 s: the game sets it again at each landing, and his wait stayed 0.7 s in Eric's
+            // V1.4.2 run; his stage's timer is looked at as he lands instead, see roo_research_update)
+            std::cout << std::flush;
+        }
+        void roo_research_update(const Shared &state, const std::string &boss, std::uint64_t now)
+        {
+            auto &r = roo_research;
+            // (V1.4.17: the beach crates' level scripts get nothing in his arena with the copy in, see event_sent)
+            if (boss == "B102" && !roo_beach_patch.load() && ingame::level_patch_in_place())
+                roo_beach_patch = true;
+            if (boss != "B102")
+            {
+                if (r.entered)
+                    r = {};
+                return;
+            }
+            if (!r.entered)
+            {
+                r.entered = now, r.next_find = now + 1000;
+                std::cout << "Roo research: Ripper Roo's fight (B102): the arena 4 s in, then each hop and crate\n" << std::flush;
+            }
+            // (him, found again when his objects are made again: after a death the fight starts over)
+            if ((!r.roo || !event_owner(r.roo)) && now >= r.next_find)
+            {
+                r.next_find = now + 1000;
+                const auto had = r.roo;
+                r.roo = 0;
+                for (const auto owner : event_owners())
+                {
+                    const auto name = string(value<Address>(owner + 128));
+                    if (name.find("Roo") == std::string::npos || name.find("pawn") != std::string::npos)
+                        continue;
+                    const auto scripts = owner_scripts(owner);
+                    if (scripts.find("common_BossHealthHandler") != std::string::npos)
+                    {
+                        r.roo = owner;
+                        ++r.visits;
+                        std::cout << "Roo research: him: " << name << " (" << scripts << ")" << (had || r.visits > 1 ? ", made again: the fight starts over" : "") << "\n" << std::flush;
+                        if (r.visits > 1)
+                            r.sequence += " |";
+                        r.known = false, r.moving = false;
+                        break;
+                    }
+                }
+            }
+            // once, 4 s in: everything in the arena, and the lists his own scripts hold
+            if (!r.listed && now - r.entered >= 4000)
+            {
+                r.listed = true;
+                std::vector<std::pair<std::string, std::string>> rows;
+                for (const auto owner : event_owners())
+                {
+                    std::array<float, 3> at{};
+                    const bool placed = roo_where(owner, at);
+                    rows.emplace_back(string(value<Address>(owner + 128)), (placed ? roo_xyz(at) : std::string("(no place)")) + ": " + owner_scripts(owner));
+                }
+                std::sort(rows.begin(), rows.end());
+                std::cout << "Roo research: the arena has " << rows.size() << " things:\n";
+                unsigned shown = 0;
+                for (const auto &[name, rest] : rows)
+                    if (shown++ < 160)
+                        std::cout << "Roo research:   " << (name.empty() ? std::string("(unnamed)") : name) << " at " << rest << "\n";
+                std::cout << std::flush;
+            }
+            // (V1.4.10 to V1.4.12 research, the templates the fight's scripts make things from: his Big TNT's only point to
+            // themselves (its crate handler's _entity), so his drops can't make a Nitro that way; taken out, as it read every
+            // script's settings in one frame)
+            if (r.roo && !r.dumped && now - r.entered >= 4000)
+            {
+                r.dumped = true;
+                const auto name = string(value<Address>(r.roo + 128));
+                for (const auto &[c, script] : entity_scripts(r.roo))
+                {
+                    if (script.rfind("common_", 0) == 0 && script != "common_BossJumpToPosition")
+                        continue;
+                    roo_dump_lists(c, value<Address>(c + 56), name + " " + script);
+                    if (const auto data = value<Address>(c + 16); data && typed(data, 0x13bbb10))
+                        roo_dump_lists(data, value<Address>(data + 32), name + " " + script + " data");
+                }
+                std::cout << std::flush;
+            }
+            // each hop: he moves (more than 0.8 a frame), then stays put for 0.12 s
+            std::array<float, 3> at{};
+            if (r.roo && roo_where(r.roo, at))
+            {
+                if (!r.known)
+                    r.known = true, r.last = at, r.landed_at = now;
+                const float d = std::hypot(at[0] - r.last[0], at[1] - r.last[1], at[2] - r.last[2]);
+                if (d > 0.8f)
+                {
+                    if (!r.moving)
+                        r.moving = true, r.from = r.last, r.moved_at = now, r.peak = r.last[2], r.from_spot = roo_spot_near(r.last), r.air_known = false;
+                    // (V1.4.4: which way he faces at the top of his hop)
+                    if (at[2] >= r.peak)
+                        r.air_known = entity_matrix(r.roo, r.air);
+                    r.peak = std::max(r.peak, at[2]), r.still_since = 0;
+                }
+                else if (r.moving)
+                {
+                    if (!r.still_since)
+                        r.still_since = now;
+                    else if (now - r.still_since >= 120)
+                    {
+                        r.moving = false;
+                        int spot = roo_spot_near(at);
+                        if (spot < 0)
+                            r.spots.push_back({at, 0}), spot = static_cast<int>(r.spots.size() - 1);
+                        ++r.spots[spot].landings, ++r.hops;
+                        r.sequence += " " + std::to_string(spot + 1);
+                        std::array<float, 3> crash{};
+                        const bool crash_known = player() && roo_where(player(), crash);
+                        if (r.lines < 220)
+                        {
+                            ++r.lines;
+                            std::ostringstream line;
+                            line << std::fixed << std::setprecision(2) << "Roo research: hop " << r.hops << " +" << (now - r.entered) / 1000.0 << " s: " << roo_spot_text(r.from_spot)
+                                 << " -> " << roo_spot_text(spot) << " (" << std::lround(std::hypot(at[0] - r.from[0], at[1] - r.from[1])) << " across, "
+                                 << std::lround(r.peak - std::max(r.from[2], at[2])) << " up, " << (r.still_since - r.moved_at) / 1000.0 << " s in the air, after "
+                                 << (r.moved_at - r.landed_at) / 1000.0 << " s still), at " << roo_xyz(at);
+                            if (crash_known)
+                                line << "; Crash on " << roo_spot_text(roo_spot_near(crash)) << ", " << std::lround(std::hypot(crash[0] - at[0], crash[1] - at[1])) << " from him";
+                            // (V1.4.4, Eric's V1.4.2 run: "sometimes he just he has a pattern, but he like jumps backwards"):
+                            // which way his body faced at the top of the hop, from the way he hopped (his own x and y axes)
+                            if (const float hx = at[0] - r.from[0], hy = at[1] - r.from[1]; r.air_known && std::hypot(hx, hy) > 50)
+                            {
+                                const float hop = std::atan2(hy, hx) * 57.29578f;
+                                const auto off = [&](float x, float y) { return static_cast<int>(std::lround(std::remainder(std::atan2(y, x) * 57.29578f - hop, 360.0f))); };
+                                line << "; at its top his x axis " << off(r.air[0], r.air[1]) << " and his y axis " << off(r.air[4], r.air[5]) << " degrees from the way he hopped";
+                            }
+                            for (const auto &st : r.stages)
+                                if (st.on_at && value<unsigned char>(st.c + st.on_at) && st.timer_at)
+                                    if (const auto timer = value<Address>(st.c + st.timer_at); timer && readable(timer, 0x60) && r.timer_lines < 40)
+                                    {
+                                        ++r.timer_lines;
+                                        line << "; " << st.name << "'s timer:";
+                                        for (unsigned k = 0; k < 24; ++k)
+                                            line << " " << value<float>(timer + k * 4);
+                                    }
+                            std::cout << line.str() << "\n";
+                            if (r.hops % 12 == 0)
+                            {
+                                std::cout << "Roo research: where he landed so far (| a new fight):" << r.sequence << "\nRoo research: the platforms:";
+                                for (std::size_t i = 0; i < r.spots.size(); ++i)
+                                    std::cout << " " << i + 1 << " " << roo_xyz(r.spots[i].at) << " x" << r.spots[i].landings;
+                                std::cout << "\n";
+                            }
+                            std::cout << std::flush;
+                        }
+                        r.landed_at = now, r.landed_event = true;
+                    }
+                }
+                r.last = at;
+            }
+            // every crate as it appears and goes, 4 a second
+            if (now >= r.next_crates)
+            {
+                r.next_crates = now + 250;
+                std::set<Address> here;
+                for (const auto owner : event_owners())
+                {
+                    const auto name = string(value<Address>(owner + 128));
+                    if (!roo_lower_has(name, "crate") && !roo_lower_has(name, "tnt") && !roo_lower_has(name, "nitro"))
+                        continue;
+                    here.insert(owner);
+                    if (r.crates.count(owner))
+                        continue;
+                    RooCrate c{name, {}, now};
+                    roo_where(owner, c.at);
+                    r.crates[owner] = c;
+                    if (r.crate_lines < 300)
+                    {
+                        ++r.crate_lines;
+                        std::array<float, 3> crash{};
+                        const bool crash_known = player() && roo_where(player(), crash);
+                        std::cout << "Roo research: +" << seconds(now - r.entered) << " " << name << " appears at " << roo_xyz(c.at) << " (" << roo_spot_text(roo_spot_near(c.at)) << ")"
+                                  << (crash_known ? ", " + std::to_string(std::lround(std::hypot(crash[0] - c.at[0], crash[1] - c.at[1]))) + " from Crash" : std::string()) << "\n"
+                                  << std::flush;
+                    }
+                }
+                for (auto it = r.crates.begin(); it != r.crates.end();)
+                {
+                    if (here.count(it->first))
+                    {
+                        ++it;
+                        continue;
+                    }
+                    if (r.crate_lines < 300)
+                        ++r.crate_lines, std::cout << "Roo research: +" << seconds(now - r.entered) << " " << it->second.name << " gone (" << roo_spot_text(roo_spot_near(it->second.at))
+                                                   << ", after " << seconds(now - it->second.since) << ")\n"
+                                                   << std::flush;
+                    it = r.crates.erase(it);
+                }
+            }
+            roo_control(state, now); // (V1.4.2)
+        }
         void update_boss_tuning(const Shared &state, const std::string &boss)
         {
             auto &t = boss_tuning;
@@ -11662,6 +13535,20 @@ namespace ingame
                 wall_shown = false;                         // (V1.3.79: and drawn, see wall_outline)
                 t = {};
                 t.level = boss, t.entered = now;
+                roo_research = {}; // (V1.4.1: each visit from scratch)
+                {
+                    std::lock_guard lock(roo_outline_mutex);
+                    roo_outline_spots.clear();
+                }
+                for (auto &e : roo_nitro_entity)
+                    e = 0;
+                // (V1.4.17: the beach crates' guard only in his arena: never in another level, where those scripts are a
+                // level's own crates', its checkpoints and box count)
+                roo_zone_in = false, roo_zone_at = 0;
+                {
+                    std::lock_guard lock(beach_meta_mutex);
+                    beach_meta_block.clear();
+                }
                 // (V1.3.28) Papu Papu's stomps from here on only
                 papu_entity = 0, papu_bounce_node = 0, papu_bounce_component = 0, papu_bounce_message = 0, papu_beaten_blocks = 0;
                 probe_count_at = 0, probe_timer_at = 0, probe_state_at = 0, probe_damage_at = 0, probe_lines = 0, other_probe_lines = 0;
@@ -11693,6 +13580,7 @@ namespace ingame
                 t.steer_on = false, papu_steer_off(), papu_slam_off();
             if (boss == "B101")
                 papu_rule(t, state, now);
+            roo_research_update(state, boss, now); // (V1.4.1)
             stretch_bar_fill(t, state, now);
             if (now < t.next)
                 return;
@@ -11734,8 +13622,10 @@ namespace ingame
                         (state.boss_rules || boss_immune_changed))
                         papu_immunity(t, c, name, state.boss_rules != 0, now);
                     // (also at 100%: a count changed for an earlier fight goes back)
-                    if (script == "common_BossHealthHandler" && (health != 100 || boss_hits_changed))
-                        tune_boss_health(t, boss, owner, name, c, health, state.boss_bar_grow != 0);
+                    // (V1.4.24: Ripper Roo's hits from the YAML's ripper_roo_health, with harder bosses on)
+                    const unsigned own_hits = boss == "B102" && state.boss_rules && name.find("RipperRoo") != std::string::npos ? state.roo_hits : 0;
+                    if (script == "common_BossHealthHandler" && (health != 100 || boss_hits_changed || own_hits))
+                        tune_boss_health(t, boss, owner, name, c, health, state.boss_bar_grow != 0, own_hits);
                     else if (speed != 100 || boss_pace_changed)
                         tune_boss_speed(t, c, name, script, speed);
                     if (boss == "B101" && script == "BossPapuPapu_AiHandler" && t.papu_ai != c)
@@ -11784,10 +13674,11 @@ namespace ingame
             {
                 const auto boss = boss_zone_key();
 #ifdef CRASH_NST_STABLE
-                // (Stable V1.3.1: harder bosses are Papu Papu's alone, and none of the boss work runs in other boss fights)
-                const auto papu = boss == "B101" ? boss : std::string();
-                update_boss_research(papu);
-                update_boss_tuning(state, papu);
+                // (Stable V1.3.1: harder bosses are Papu Papu's alone, and none of the boss work runs in other boss fights;
+                // Stable V1.5: Ripper Roo's too)
+                const auto done = boss == "B101" || boss == "B102" ? boss : std::string();
+                update_boss_research(done);
+                update_boss_tuning(state, done);
 #else
                 update_boss_research(boss);
                 update_boss_tuning(state, boss);
@@ -15983,6 +17874,22 @@ namespace ingame
             wall.points.push_back(point(cf + round * std::cos(end * i / 12), cl + round * std::sin(end * i / 12)));
         lines.push_back(std::move(wall));
         return lines;
+    }
+    // (Testing) Ripper Roo's coming Nitros, as boxes the size of a crate on their platforms, Nitro green
+    std::vector<LiveBox> nitro_outlines()
+    {
+        std::vector<LiveBox> boxes;
+        std::lock_guard lock(roo_outline_mutex);
+        for (const auto &at : roo_outline_spots)
+        {
+            LiveBox box;
+            for (unsigned i = 0; i < 8; ++i)
+                box.corners[i] = {at[0] + ((i & 1) ? 38.0f : -38.0f) * roo_outline_scale, at[1] + ((i & 2) ? 38.0f : -38.0f) * roo_outline_scale,
+                                  at[2] + ((i & 4) ? 76.0f * roo_outline_scale : 0.0f)};
+            box.color = 0xff30ff50;
+            boxes.push_back(box);
+        }
+        return boxes;
     }
     bool gimmick_stage()
     {
