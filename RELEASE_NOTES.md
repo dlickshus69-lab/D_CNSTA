@@ -4,7 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Koala Kong research:** in his fight, everything he throws and drops and his mine carts go to the log as they move, along with his health as it changes. This is so I can build the rally where he swats your rock back.
-- **`/invincible on` / `off`** (test): Crash takes no hits from enemies, bosses, Nitros or explosions. Falling into a pit, water or lava still kills.
-- **Test commands cleaned up:** `/boss_slam`, `/boss_window`, `/boss_lead`, `/boss_bar`, `/bar_try`, `/roo_files` and `/aku_give` are gone. `/roo_nitro` is now just `on` or `off`.
-- To try: `/invincible on`, then `/boss koala`. Spin rocks back at him (F10 gives you Spin), land a few hits, let carts and TNT go by, and send the log.
+- **Koala Kong's health bar lasts until his last hit.** The game builds his bar with his usual 4 notches before the client can raise his hits, so each notch now stands for 2 of his 8 hits instead of the bar vanishing halfway. The log also checks how to draw all 8 notches next.
+- **Koala Kong's rally (first try, harder bosses on):** when you spin his big rock back, he swats it back at you 2 or 3 times before it can hit him. He flashes gold on each swat, and the rock glows by the swats he has left: red 3, orange 2, yellow 1, green when the next spin will hit him.
+- If a swat doesn't bring the rock back, his swats stop for that visit and the log says why. Faster rocks with each swat come once the swat itself works.
+- To try: `/invincible on`, then `/boss koala`. Spin his big rocks back a few times, watch the bar and the colors, and send the log plus a clip.
