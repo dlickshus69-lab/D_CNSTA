@@ -4,7 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Roo a bit faster:** 1.7x at 200% Boss Speed (was 1.5x). His hops take 0.34 s, and his pause before each one 0.41 s.
-- **Nitros move after every hit:** the back-middle one in your clip stayed put because it kept scoring as the best spot. Now a Nitro only stays where it was if there's truly no other place that keeps the rules.
-- **He can leap over a platform to attack you:** when he goes for you and you're two platforms away in a straight line, he can jump over the one in between. A Nitro on the platform he jumps over stays a Nitro.
-- To try: test 3 still on, `/boss ripper1` with harder bosses on. Watch for his long leap at you (the log says "over ..." when it happens) and check that the speed feels right. Send the log and a clip.
+- **Roo attacks a little less often:** his hop at you now comes 1 in 6.5 landings (was 1 in 5), still at least 8 s apart. In your last run he went for you about every 12 s; now it's about every 13 s.
+- His leap over a platform worked in your run: it happened 3 times, over the middle-middle each time.
+- **Ripper Roo is done** apart from turning the Nitro into a harder-bosses YAML option, which comes next.
+- Before going back to the Stable build: run `/roo_nitro off` and restart the game once on Testing.

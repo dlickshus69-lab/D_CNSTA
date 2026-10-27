@@ -12769,7 +12769,10 @@ namespace ingame
                             // platform and jump to the other": onto Crash two platforms away in a straight line too, over the
                             // one between, and back to his pattern the same way if need be)
                             bool skip = false;
-                            if (r.stage_hops >= 2 && now - r.crash_hop_at >= 8000 && rng() % 5 == 0 && player() && roo_where(player(), crash))
+                            // (V1.4.23, Eric's V1.4.22 run: "I think it good. maybe make the odds 6.5. just make sure it doesn't
+                            // like always seems like he's always trying to attack you ... keep it in the middle, but slightly
+                            // towards where he's trying to attack you": 1 in 6.5 (2 in 13), was 1 in 5; 8 s apart at least)
+                            if (r.stage_hops >= 2 && now - r.crash_hop_at >= 8000 && rng() % 13 < 2 && player() && roo_where(player(), crash))
                             {
                                 on_crash = platform_near(crash);
                                 const auto reach = [&](int x, int y) { return neighbors(x, y) || skipped(x, y) >= 0; };
