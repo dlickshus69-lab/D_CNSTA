@@ -11787,6 +11787,7 @@ namespace ingame
         // renderer's thread through nitro_outlines
         std::mutex roo_outline_mutex;
         std::vector<std::array<float, 3>> roo_outline_spots;
+        float roo_outline_scale = 1; // (V1.4.18: the size of his Nitros, see roo_control)
 #ifndef CRASH_NST_STABLE
         // V1.4.1 research, Testing build (Eric, after Papu Papu: "we're only doing the first one" (Crash 1's Ripper Roo):
         // "random patterns. Every time you die, it's not the same pattern. Nitro's on platform" ("some of the platforms are
@@ -11871,6 +11872,15 @@ namespace ingame
             int next_target = -1;
             std::vector<bool> nitro_hidden;
             unsigned hide_lines = 0;
+            // (V1.4.18) each Nitro's last distance from him (coming or going), how far out one becomes an outline as he
+            // comes, Crash struck by one (when, and how far it went: 1 moved to him, 2 set off), and its bigger look
+            std::vector<float> nitro_last_d;
+            float hide_at = 140;
+            std::vector<std::uint64_t> nitro_struck_at;
+            std::vector<int> nitro_strike_step;
+            unsigned strike_lines = 0, look_checks = 0, look_writes = 0;
+            std::uint64_t look_first = 0;
+            bool look_told = false, look_none_told = false;
             std::set<Address> nitro_moved;
             int nitro_making = -1;
             std::uint64_t nitro_making_since = 0;
@@ -12060,6 +12070,7 @@ namespace ingame
                     r.nitro_platforms.clear(), r.nitro_plan.clear(), r.nitro_crates.clear(), r.nitro_made_at.clear(), r.nitro_due.clear();
                     r.nitro_plan_new = false, r.nitro_making = -1, r.nitro_warm = false, r.nitro_moved.clear(), r.nitro_gone.clear(), r.beach_moved.clear();
                     r.nitro_whys.clear(), r.nitro_hidden.clear(), r.next_target = -1;
+                    r.nitro_last_d.clear(), r.nitro_struck_at.clear(), r.nitro_strike_step.clear();
                     {
                         std::lock_guard lock(beach_meta_mutex);
                         beach_meta_block.clear();
@@ -12504,7 +12515,15 @@ namespace ingame
                     if (nitro_mode)
                     {
                         std::array<float, 3> crash{};
-                        const int crash_on = player() && roo_where(player(), crash) ? platform_near(crash) : -1;
+                        // (V1.4.18: his platform if he's on its edge too, beyond platform_near's 120)
+                        int crash_on = -1;
+                        if (player() && roo_where(player(), crash))
+                        {
+                            float best = 200;
+                            for (std::size_t q = 0; q < r.platforms.size(); ++q)
+                                if (const float d = std::hypot(r.platforms[q][0] - crash[0], r.platforms[q][1] - crash[1]); d < best)
+                                    best = d, crash_on = static_cast<int>(q);
+                        }
                         std::vector<int> can, again;
                         for (std::size_t q = 0; q < r.platforms.size(); ++q)
                         {
@@ -12693,6 +12712,15 @@ namespace ingame
                         at[2] = 76;
                     return at;
                 };
+                // (V1.4.18, Eric's V1.4.17 run: "is there a way we can make the hitbox with a nitro bigger just for this
+                // level? Because I can still stand on the edge, and I want it to be where it's, you just can't stand on that
+                // platform until the nitro switches. Yeah, can we just make the [Nitro] bigger?"; his platforms' tops are
+                // some 2.2 crates across): his Nitros twice a crate's size, drawn so (its look's matrix, each frame it's off)
+                // and as deadly: Crash in that box sets it off (the Nitro goes to him, as when he touches one)
+                constexpr float nitro_scale = 2.0f;
+                const auto in_box = [](const std::array<float, 3> &at, const std::array<float, 3> &spot, float half) {
+                    return std::abs(at[0] - spot[0]) < half && std::abs(at[1] - spot[1]) < half;
+                };
                 // (as soon as he's there: the level's spawners and the Nitro's template looked for, on their own threads)
                 if (!r.nitro_warm)
                     r.nitro_warm = true, nitro_level_scan("Boss");
@@ -12742,6 +12770,7 @@ namespace ingame
                     r.nitro_plan_new = false;
                     std::vector<Address> crates(r.nitro_plan.size(), 0);
                     std::vector<std::uint64_t> due(r.nitro_plan.size(), now + (r.nitro_plan_after_hit ? 3000 : 0)), made(r.nitro_plan.size(), 0);
+                    std::vector<bool> still_hidden(r.nitro_plan.size(), false); // (V1.4.18: one kept while he's at it stays an outline)
                     for (std::size_t k = 0; k < r.nitro_crates.size(); ++k)
                     {
                         const auto e = r.nitro_crates[k];
@@ -12753,15 +12782,17 @@ namespace ingame
                         {
                             const auto j = static_cast<std::size_t>(kept - r.nitro_plan.begin());
                             crates[j] = e, due[j] = 0, made[j] = r.nitro_made_at[k];
+                            still_hidden[j] = k < r.nitro_hidden.size() && r.nitro_hidden[k];
                         }
                         else
                             set_entity_position(e, {at[0], at[1], -6000.0f}), r.nitro_gone.insert(e);
                     }
                     for (std::size_t j = 0; j < crates.size(); ++j)
-                        if (crates[j])
+                        if (crates[j] && !still_hidden[j])
                             set_entity_position(crates[j], nitro_spot(r.nitro_plan[j]));
                     r.nitro_platforms = r.nitro_plan, r.nitro_crates = crates, r.nitro_due = due, r.nitro_made_at = made;
-                    r.nitro_hidden.assign(crates.size(), false);
+                    r.nitro_hidden = still_hidden;
+                    r.nitro_last_d.assign(crates.size(), 1e9f), r.nitro_struck_at.assign(crates.size(), 0), r.nitro_strike_step.assign(crates.size(), 0);
                     std::string names;
                     for (const int q : r.nitro_platforms)
                         names += (names.empty() ? "" : " and ") + platform_name(q);
@@ -12770,7 +12801,7 @@ namespace ingame
                                                    << (r.nitro_plan_after_hit ? ", outlined, in 3 s" : ", now") << "\n" << std::flush;
                 }
                 std::array<float, 3> crash{};
-                const int crash_on = player() && roo_where(player(), crash) ? platform_near(crash) : -1;
+                const bool crash_known = player() && roo_where(player(), crash);
                 for (std::size_t k = 0; k < r.nitro_crates.size(); ++k)
                 {
                     const auto e = r.nitro_crates[k];
@@ -12784,35 +12815,88 @@ namespace ingame
                         if (r.nitro_lines < 80)
                             ++r.nitro_lines, std::cout << "Roo Nitro: the one on " << platform_name(r.nitro_platforms[k]) << " is gone after " << seconds(now - r.nitro_made_at[k])
                                                        << " (Ripper Roo " << std::lround(std::hypot(roo_at[0] - spot[0], roo_at[1] - spot[1])) << " from it"
-                                                       << (crash_on >= 0 ? ", Crash " + std::to_string(std::lround(std::hypot(crash[0] - spot[0], crash[1] - spot[1]))) : std::string())
+                                                       << (crash_known ? ", Crash " + std::to_string(std::lround(std::hypot(crash[0] - spot[0], crash[1] - spot[1]))) : std::string())
                                                        << "; his health " << (health_getter_ok() ? std::to_string(actor_health(r.roo) / 100) + " hits" : std::string("?")) << ")\n" << std::flush;
                         r.nitro_crates[k] = 0, r.nitro_due[k] = now + 3000;
                         if (k < r.nitro_hidden.size())
                             r.nitro_hidden[k] = false;
+                        if (k < r.nitro_struck_at.size())
+                            r.nitro_struck_at[k] = 0, r.nitro_strike_step[k] = 0;
+                        continue;
+                    }
+                    if (r.nitro_last_d.size() < r.nitro_crates.size())
+                        r.nitro_last_d.resize(r.nitro_crates.size(), 1e9f);
+                    if (r.nitro_struck_at.size() < r.nitro_crates.size())
+                        r.nitro_struck_at.resize(r.nitro_crates.size(), 0), r.nitro_strike_step.resize(r.nitro_crates.size(), 0);
+                    const int q = r.nitro_platforms[k];
+                    const float d = std::hypot(roo_at[0] - spot[0], roo_at[1] - spot[1]), last = r.nitro_last_d[k];
+                    r.nitro_last_d[k] = d;
+                    // (V1.4.18) Crash struck by it: it was moved to him (his touch sets it off, as when he runs into one); still
+                    // there 0.3 s on, it's set off; still there 2 s on, nothing came of it and it goes back
+                    if (r.nitro_struck_at[k])
+                    {
+                        const auto since = now - r.nitro_struck_at[k];
+                        if (since >= 300 && r.nitro_strike_step[k] == 1)
+                        {
+                            std::string how;
+                            r.nitro_strike_step[k] = 2;
+                            const bool off = set_off_trap_nitro(e, how);
+                            if (r.strike_lines < 12)
+                                ++r.strike_lines, std::cout << "Roo Nitro: the one on " << platform_name(q) << " still whole 0.3 s after it went to Crash: "
+                                                            << (off ? "set off (" + how + " )" : "couldn't set it off (" + how + ")") << "\n" << std::flush;
+                        }
+                        if (since < 2000)
+                            continue;
+                        r.nitro_struck_at[k] = 0, r.nitro_strike_step[k] = 0;
+                        if (r.strike_lines < 12)
+                            ++r.strike_lines, std::cout << "Roo Nitro: the one on " << platform_name(q) << " still whole 2 s after it went to Crash: back on its platform\n" << std::flush;
+                        set_entity_position(e, spot);
                         continue;
                     }
                     // (V1.4.17, Eric's V1.4.16 run: "when he's on the outline of the Nitro, or on a Nitro, I think it should
                     // just turn into an outline. But the second he leaves that outline Nitro box, it goes immediately back into
                     // a Nitro"; the log: a Nitro is solid to him: his hop onto one's platform took 1.5 s and ended back where
-                    // he started, then he hopped in place): while his next hop is to its platform, he's on it, or he's over it,
-                    // the Nitro is moved far below and its outline drawn instead; back the moment he's off it
-                    // (and one hidden stays an outline while Crash is on its platform: never back on top of him)
-                    const int q = r.nitro_platforms[k];
-                    const bool over = std::hypot(roo_at[0] - spot[0], roo_at[1] - spot[1]) < 170;
+                    // he started, then he hopped in place): while he's at it the Nitro is moved far below and its outline drawn
+                    // instead. (V1.4.18, Eric's V1.4.17 run: "can you make sure it's [not] pretty noticeable where he's gonna
+                    // jump ... it should be exactly as he's about to land on the nitro box. That's when the outline disappears.
+                    // And then the second he's basically out of the frame of the outline of the nitro box, that's when it
+                    // reappears"; V1.4.17 made it an outline as he landed on the platform before, the whole wait there): an
+                    // outline as he comes within 140 of it (the last third of his hop, some 0.1 s before he lands), back once
+                    // he's 150 from it, out of its box; and one hidden stays an outline while Crash is at its platform: never
+                    // back on top of him. If he's already down at a crate's height over it as it goes, it goes 40 sooner after
                     const bool hidden = k < r.nitro_hidden.size() && r.nitro_hidden[k];
-                    const bool away = q == r.next_target || q == roo_on || over || (hidden && q == crash_on);
+                    const bool crash_near = crash_known && in_box(crash, spot, 38 * nitro_scale + 40);
+                    const bool away = hidden ? d < 150 || crash_near : d < 60 || (d < r.hide_at && d < last - 0.5f);
                     if (away != hidden)
                     {
                         if (r.nitro_hidden.size() < r.nitro_crates.size())
                             r.nitro_hidden.resize(r.nitro_crates.size());
                         r.nitro_hidden[k] = away;
                         set_entity_position(e, away ? std::array<float, 3>{spot[0], spot[1], -6000.0f} : spot);
-                        if (r.nitro_lines < 80 && r.hide_lines++ < 12)
-                            ++r.nitro_lines, std::cout << "Roo Nitro: the one on " << platform_name(q) << (away ? " an outline while he comes to it" : " back now he's off it") << "\n" << std::flush;
+                        const float above = roo_at[2] - spot[2];
+                        if (r.nitro_lines < 80 && r.hide_lines++ < 16)
+                            ++r.nitro_lines, std::cout << "Roo Nitro: the one on " << platform_name(q)
+                                                       << (away ? " an outline as he comes (" + std::to_string(std::lround(d)) + " from it, " + std::to_string(std::lround(above)) + " above its platform)"
+                                                                : std::string(" back now he's off it")) << "\n" << std::flush;
+                        if (away && d < 90 && above < 76 + 20 && r.hide_at < 260)
+                        {
+                            r.hide_at += 40;
+                            std::cout << "Roo Nitro: he was already down at it: from now on an outline from " << r.hide_at << " away\n" << std::flush;
+                        }
                         continue;
                     }
                     if (hidden)
                         continue;
+                    // (V1.4.18) Crash in its bigger box, on his platform's top or in a jump below the box's top
+                    if (crash_known && in_box(crash, spot, 38 * nitro_scale + 18) && crash[2] > spot[2] - 40 && crash[2] < spot[2] + 76 * nitro_scale + 10)
+                    {
+                        r.nitro_struck_at[k] = now, r.nitro_strike_step[k] = 1;
+                        if (r.strike_lines < 12)
+                            ++r.strike_lines, std::cout << "Roo Nitro: Crash at the one on " << platform_name(q) << " (" << std::lround(std::hypot(crash[0] - spot[0], crash[1] - spot[1]))
+                                                        << " from it, " << std::lround(crash[2] - spot[2]) << " up): it goes to him\n" << std::flush;
+                        set_entity_position(e, crash);
+                        continue;
+                    }
                     // moved by the game (a borrowed spawner's crate can go "home" to it): back on its platform
                     if (std::hypot(at[0] - spot[0], at[1] - spot[1]) > 20)
                     {
@@ -12820,16 +12904,54 @@ namespace ingame
                             ++r.nitro_lines, std::cout << "Roo Nitro: the game moved the one on " << platform_name(r.nitro_platforms[k]) << " to " << roo_xyz(at) << ": put back\n" << std::flush;
                         set_entity_position(e, spot);
                     }
+                    // (V1.4.18) its look twice the size: the 3 axes of its model's matrix (from its base, so it grows up and out),
+                    // set again whenever they aren't; how often that's needed goes to the log once
+                    if (const auto model = crate_model(e))
+                    {
+                        Matrix m{};
+                        if (read(model + 48, m) && std::all_of(m.begin(), m.end(), [](float f) { return std::isfinite(f); }) && std::abs(m[15] - 1) < 0.001f)
+                        {
+                            std::array<float, 3> length{};
+                            bool sane = true, off = false;
+                            for (unsigned row = 0; row < 3; ++row)
+                            {
+                                length[row] = std::sqrt(m[row * 4] * m[row * 4] + m[row * 4 + 1] * m[row * 4 + 1] + m[row * 4 + 2] * m[row * 4 + 2]);
+                                sane = sane && length[row] > 0.01f && length[row] < 100;
+                                off = off || std::abs(length[row] - nitro_scale) > 0.01f;
+                            }
+                            ++r.look_checks;
+                            if (sane && off)
+                            {
+                                for (unsigned row = 0; row < 3; ++row)
+                                    for (unsigned col = 0; col < 3; ++col)
+                                        m[row * 4 + col] *= nitro_scale / length[row];
+                                write(model + 48, m);
+                                ++r.look_writes;
+                                if (!r.look_first)
+                                    r.look_first = now, r.look_checks = 1, r.look_writes = 1;
+                            }
+                        }
+                    }
+                    else if (!r.look_none_told)
+                        r.look_none_told = true, std::cout << "Roo Nitro: no model found for the one on " << platform_name(q) << ": drawn its own size\n" << std::flush;
+                }
+                if (!r.look_told && r.look_first && now - r.look_first >= 2000)
+                {
+                    r.look_told = true;
+                    std::cout << "Roo Nitro: drawn " << nitro_scale << "x: its look set " << r.look_writes << " times in " << r.look_checks << " checks over 2 s"
+                              << (r.look_writes * 2 > r.look_checks ? " (the game sets it back: set again each frame)" : " (the game keeps it)") << "\n" << std::flush;
                 }
                 // the next one due (both in a row), with nobody on its platform
                 if (r.nitro_making < 0 && !nitro_spawn_state.component && !r.nitro_plan_new && now >= r.nitro_next)
                     for (std::size_t k = 0; k < r.nitro_crates.size(); ++k)
                     {
+                        // (V1.4.18: nor where he'd be at it, nor where Crash would be in its bigger box)
                         const int q = r.nitro_platforms[k];
-                        if (r.nitro_crates[k] || now < r.nitro_due[k] || q == roo_on || q == crash_on)
+                        const auto spot = nitro_spot(q);
+                        if (r.nitro_crates[k] || now < r.nitro_due[k] || std::hypot(roo_at[0] - spot[0], roo_at[1] - spot[1]) < 150 ||
+                            (crash_known && in_box(crash, spot, 38 * nitro_scale + 40)))
                             continue;
                         nitro_level_scan("Boss");
-                        const auto spot = nitro_spot(q);
                         std::string why;
                         r.nitro_making_since = GetTickCount64();
                         if (nitro_spawn(why, &spot, 0, true))
@@ -12852,7 +12974,7 @@ namespace ingame
                         if (!r.nitro_crates[k] || (k < r.nitro_hidden.size() && r.nitro_hidden[k]))
                             spots.push_back(nitro_spot(r.nitro_platforms[k]));
                     std::lock_guard lock(roo_outline_mutex);
-                    roo_outline_spots = std::move(spots);
+                    roo_outline_spots = std::move(spots), roo_outline_scale = nitro_scale;
                 }
                 // (V1.4.12, Eric's V1.4.11 run: "they just spawned regular boxes, but it's in the water, not on the platform":
                 // the beach's crates come where they are on the beach, a few of them in his arena's water (its first ones, at
@@ -17486,7 +17608,8 @@ namespace ingame
         {
             LiveBox box;
             for (unsigned i = 0; i < 8; ++i)
-                box.corners[i] = {at[0] + ((i & 1) ? 38.0f : -38.0f), at[1] + ((i & 2) ? 38.0f : -38.0f), at[2] + ((i & 4) ? 76.0f : 0.0f)};
+                box.corners[i] = {at[0] + ((i & 1) ? 38.0f : -38.0f) * roo_outline_scale, at[1] + ((i & 2) ? 38.0f : -38.0f) * roo_outline_scale,
+                                  at[2] + ((i & 4) ? 76.0f * roo_outline_scale : 0.0f)};
             box.color = 0xff30ff50;
             boxes.push_back(box);
         }

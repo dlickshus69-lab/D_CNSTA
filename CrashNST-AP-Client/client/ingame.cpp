@@ -1489,8 +1489,9 @@ namespace
                 r.crisp_text(tx, ty, warning, green, px);
             }
         // (Testing) where Ripper Roo's next Nitros will come, until they do: a Nitro-green outline the size of a crate on each
-        // platform (shown even with the HUD hidden), pulsing
-        if (!startup_mode && scene.camera_active)
+        // platform (shown even with the HUD hidden), pulsing. (V1.4.18, Eric's V1.4.17 clip: one stayed on the black screen
+        // after Crash died: only while he can move)
+        if (!startup_mode && scene.camera_active && snapshot->player_ready)
             for (const auto &box : ingame::nitro_outlines())
             {
                 std::array<std::array<float, 2>, 8> points{};
