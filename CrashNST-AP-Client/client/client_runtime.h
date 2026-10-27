@@ -189,6 +189,10 @@ class ClientRuntime
     std::mutex research_mutex;
     std::vector<std::string> research_lines;
     std::atomic_bool research_running{false};
+    // (Testing V1.4.24) a seed with Ripper Roo's Nitros: his arena's file checked once a session; the background copy's
+    // result, for a line shown in the game
+    bool roo_nitro_checked = false;
+    std::atomic_int roo_nitro_made{0}; // 1 made, 2 couldn't
     bool boss_bar_grow = true; // /boss_bar (test; V1.3.22: grow by default, asked for)
     unsigned routing_start_count = 0, routing_secret_return_count = 0;
     std::string routing_error;

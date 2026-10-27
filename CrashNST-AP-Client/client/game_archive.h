@@ -55,6 +55,9 @@ namespace ingame
     // made now, in the background), in
     // `state_folder`; it takes effect at the next game start. Console lines; throws with a reason when it can't
     std::vector<std::string> roo_nitro_set(int mode, const std::filesystem::path &state_folder);
+    // (Testing V1.4.24) whether the loader's plan in `state_folder` has Ripper Roo's changed archive (in place, or for the
+    // next game start)
+    bool roo_nitro_planned(const std::filesystem::path &state_folder);
     // what the loader did with level patches as this game started, as a console line (empty: nothing to say)
     std::string level_patch_status();
     // whether Roo's patched archive is in place this session

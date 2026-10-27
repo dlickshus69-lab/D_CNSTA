@@ -6798,7 +6798,9 @@ namespace ingame
         std::map<std::string, int> game_hits;
         bool boss_hits_changed = false; // a HitCount was changed this game session (it's put back at 100%)
         // (V1.3.21: grow says whether the notches grow too, /boss_bar; the health is ours either way)
-        void tune_boss_health(BossTuning &t, const std::string &boss, Address owner, const std::string &name, Address c, unsigned percent, bool grow)
+        // (`hits_wanted`, V1.4.24: a boss's own hit count from the YAML, Ripper Roo's ripper_roo_health; 0: by `percent`)
+        void tune_boss_health(BossTuning &t, const std::string &boss, Address owner, const std::string &name, Address c, unsigned percent, bool grow,
+                              unsigned hits_wanted = 0)
         {
             const auto data = value<Address>(c + 16);
             if (!typed(data, 0x13bbb10))
@@ -6830,7 +6832,7 @@ namespace ingame
             // V1.3.40 rounded the game's hits times the percent, so 9 came at 170% already)
             const int top = std::max(original, std::min(9, original * 2));
             const int extra = std::max(0, static_cast<int>(percent) - 100) * (top - original) / 100;
-            const int hits = eligible ? std::clamp(original + extra, original, top) : original;
+            const int hits = !eligible ? original : hits_wanted ? std::clamp(static_cast<int>(hits_wanted), original, 9) : std::clamp(original + extra, original, top);
             const int notches = grow ? hits : original;
             const int max_health = value<int>(c + max_at);
             if (const int was = value<int>(data + hit_at); was != notches)
@@ -12539,7 +12541,9 @@ namespace ingame
                     r.fight_hits = fight ? r.fight_hits + 1 : 0;
                     // (V1.4.17, Eric's V1.4.16 run: "make sure he doesn't never like jump in the same spot for his pattern": at most
                     // 7, each platform once)
-                    const unsigned length = std::min(3u + r.fight_hits, 7u);
+                    // (V1.4.24: from the YAML's ripper_roo_pattern, 3 to 7; games_own (0): his own hops, no pattern of ours)
+                    const unsigned first = state.roo_pattern ? std::clamp(state.roo_pattern, 3u, 7u) : 0u;
+                    const unsigned length = first ? std::min(first + r.fight_hits, 7u) : 0u;
                     unsigned start = 0;
                     // (V1.4.14, Eric's V1.4.13 run, the real Nitro there at last: "I kind of wish where they spawn the second
                     // battle starts ... And then whenever you hit him, the nitro bombs will spawn at a different place, but it
@@ -12555,7 +12559,7 @@ namespace ingame
                     // always free)
                     std::vector<int> nitros;
                     std::string safe_text;
-                    const auto pattern = make_pattern(length, from, start);
+                    const auto pattern = length ? make_pattern(length, from, start) : std::vector<int>{};
                     if (nitro_mode)
                     {
                         std::array<float, 3> crash{};
@@ -12581,7 +12585,10 @@ namespace ingame
                         // (V1.4.17, Eric's V1.4.16 run: "let's not make the Nitro box impossible. Like when you do add more,
                         // let's not make it impossible": 2, 3 from the third hit, never more; the platforms left free all
                         // reachable from each other by a straight jump (front to back or side to side), Crash's among them)
-                        const std::size_t want = std::min<std::size_t>(2 + (r.fight_hits >= 3 ? 1 : 0), 3);
+                        // (V1.4.24: the YAML's ripper_roo_nitros as the fight starts, one more every 3 hits, up to
+                        // ripper_roo_most_nitros; V1.4.17 to V1.4.23 had 2 and 3)
+                        const unsigned most = std::max(std::min(state.roo_nitros, 4u), std::min(state.roo_nitros_most, 4u));
+                        const std::size_t want = std::min<std::size_t>(std::min(state.roo_nitros, 4u) + r.fight_hits / 3, most);
                         const auto straight = [&](int a, int b) {
                             const auto [ca, ra] = cell(a);
                             const auto [cb, rb] = cell(b);
@@ -12709,8 +12716,9 @@ namespace ingame
                             nitro_text += (nitro_text.empty() ? "" : " and ") + platform_name(x);
                         ++r.control_lines, std::cout << "Roo control: " << r.stages[static_cast<std::size_t>(next)].name << " ("
                                                      << (r.fight_hits ? "after hit " + std::to_string(r.fight_hits) : std::string("the fight's start")) << "): "
-                                                     << (set ? "a pattern of " + std::to_string(length) + ": " + pattern_text(pattern, start)
-                                                             : "no pattern of " + std::to_string(length) + " fits (the game's own)")
+                                                     << (set    ? "a pattern of " + std::to_string(length) + ": " + pattern_text(pattern, start)
+                                                         : length ? "no pattern of " + std::to_string(length) + " fits (the game's own)"
+                                                                  : std::string("his own hops (the YAML's games_own)"))
                                                      << " (from " << platform_name(from) << ")"
                                                      << (nitro_mode ? (nitros.empty() ? std::string(", no Nitros") : ", Nitros on " + nitro_text + (safe_text.empty() ? std::string(" (nowhere off his path)") : " (safe: " + safe_text + ")")) : std::string()) << "\n";
                     }
@@ -12772,10 +12780,13 @@ namespace ingame
                             // (V1.4.23, Eric's V1.4.22 run: "I think it good. maybe make the odds 6.5. just make sure it doesn't
                             // like always seems like he's always trying to attack you ... keep it in the middle, but slightly
                             // towards where he's trying to attack you": 1 in 6.5 (2 in 13), was 1 in 5; 8 s apart at least)
-                            if (r.stage_hops >= 2 && now - r.crash_hop_at >= 8000 && rng() % 13 < 2 && player() && roo_where(player(), crash))
+                            // (V1.4.24: the YAML's ripper_roo_attack_chance, in percent of his landings; 15 by default)
+                            if (r.stage_hops >= 2 && now - r.crash_hop_at >= 8000 && rng() % 1000 < std::min(state.roo_attack_pct, 50u) * 10 && player() &&
+                                roo_where(player(), crash))
                             {
                                 on_crash = platform_near(crash);
-                                const auto reach = [&](int x, int y) { return neighbors(x, y) || skipped(x, y) >= 0; };
+                                // (V1.4.24: the leap only with the YAML's ripper_roo_leap on)
+                                const auto reach = [&](int x, int y) { return neighbors(x, y) || (state.roo_leap && skipped(x, y) >= 0); };
                                 if (on_crash >= 0 && on_crash != next_on && on_crash != roo_on && on_crash != want_b &&
                                     on_crash != r.pattern[static_cast<std::size_t>((after + 1) % length)] && reach(next_on, on_crash) && reach(on_crash, want_b))
                                     onto_crash = put(values, stage_slot(on_stage, b), on_crash, keep), skip = skipped(next_on, on_crash) >= 0;
@@ -12833,7 +12844,8 @@ namespace ingame
                 // platform until the nitro switches. Yeah, can we just make the [Nitro] bigger?"; his platforms' tops are
                 // some 2.2 crates across): his Nitros twice a crate's size, drawn so (its look's matrix, each frame it's off)
                 // and as deadly: Crash in that box sets it off (the Nitro goes to him, as when he touches one)
-                constexpr float nitro_scale = 2.0f;
+                // (V1.4.24: the YAML's ripper_roo_nitro_size, 100 to 200 percent of a crate)
+                const float nitro_scale = std::clamp(state.roo_nitro_size, 100u, 200u) / 100.0f;
                 const auto in_box = [](const std::array<float, 3> &at, const std::array<float, 3> &spot, float half) {
                     return std::abs(at[0] - spot[0]) < half && std::abs(at[1] - spot[1]) < half;
                 };
@@ -12902,7 +12914,7 @@ namespace ingame
                     return out.str();
                 };
                 const auto look = [&](Address e, std::uint64_t at_time) {
-                    if (r.look_method == 2)
+                    if (r.look_method == 2 || nitro_scale < 1.01f)
                         return;
                     if (!r.look_researched)
                     {
@@ -13283,7 +13295,8 @@ namespace ingame
             const unsigned speed = std::clamp(state.boss_speed, 100u, 200u);
             // (V1.4.16, Eric's V1.4.15 run: "he just needs to be a little faster": 50% faster at 200%, was 35%; V1.4.22, Eric's
             // V1.4.21 run: "can we maybe speed him up a little bit? Yeah, we just need to speed him up a little bit": 70%)
-            const float pace = 1.0f + 0.7f * static_cast<float>(speed - 100) / 100.0f;
+            // (V1.4.24: the YAML's ripper_roo_speed, his pace in percent, when it's set; by_boss_speed: as above)
+            const float pace = state.roo_speed ? std::clamp(state.roo_speed, 100u, 200u) / 100.0f : 1.0f + 0.7f * static_cast<float>(speed - 100) / 100.0f;
             // (set only where it holds the game's own value or ours: one that changes by itself, a countdown, is left alone)
             const auto paced = [&](Address at, const char *what)
             {
@@ -13305,7 +13318,7 @@ namespace ingame
                 }
                 write(at, want), r.pace_set[at] = want;
                 if (r.control_lines < 60)
-                    ++r.control_lines, std::cout << "Roo control: his " << what << " at " << speed << "% boss speed: " << game << " s -> " << want << " s\n";
+                    ++r.control_lines, std::cout << "Roo control: his " << what << " at " << std::lround(pace * 100) << "% of his pace: " << game << " s -> " << want << " s\n";
             };
             for (const auto &st : r.stages)
                 if (st.data && st.jump_at)
@@ -13624,8 +13637,10 @@ namespace ingame
                         (state.boss_rules || boss_immune_changed))
                         papu_immunity(t, c, name, state.boss_rules != 0, now);
                     // (also at 100%: a count changed for an earlier fight goes back)
-                    if (script == "common_BossHealthHandler" && (health != 100 || boss_hits_changed))
-                        tune_boss_health(t, boss, owner, name, c, health, state.boss_bar_grow != 0);
+                    // (V1.4.24: Ripper Roo's hits from the YAML's ripper_roo_health, with harder bosses on)
+                    const unsigned own_hits = boss == "B102" && state.boss_rules && name.find("RipperRoo") != std::string::npos ? state.roo_hits : 0;
+                    if (script == "common_BossHealthHandler" && (health != 100 || boss_hits_changed || own_hits))
+                        tune_boss_health(t, boss, owner, name, c, health, state.boss_bar_grow != 0, own_hits);
                     else if (speed != 100 || boss_pace_changed)
                         tune_boss_speed(t, c, name, script, speed);
                     if (boss == "B101" && script == "BossPapuPapu_AiHandler" && t.papu_ai != c)

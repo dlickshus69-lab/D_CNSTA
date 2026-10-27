@@ -658,18 +658,23 @@ class CrashEyebrowsColor(CrashColor):
 
 
 class HarderBosses(Toggle):
-    """Harder bosses. For now only Papu Papu (Crash 1's first boss); every other boss stays as the game has him.
+    """Harder bosses. For now Papu Papu and Ripper Roo (Crash 1's first two bosses); every other boss stays as the game
+    has him.
 
     Papu Papu's red rule: he glows red at the start of the fight and after each hit, until the slam that follows his next
     spin. Landing on him while he's red doesn't count as a hit: Crash bounces off and gets hurt (an Aku Aku mask takes it,
-    or Crash dies). He also gets the health and speed set below. Without this, those settings do nothing."""
+    or Crash dies). He also gets the health and speed set below.
+
+    Ripper Roo hops around random patterns that grow with each hit, now and then hops straight at Crash, and can have
+    Nitro crates on his platforms (the Ripper Roo settings below). Without this, all of these settings do nothing."""
 
     display_name = "Harder Bosses"
 
 
 class BossHealth(Range):
     """How much health a harder boss has, in percent of the game's (needs Harder Bosses). One more hit every 25%: Papu
-    Papu has 5 hits at 100, 6 at 125, 7 at 150, 8 at 175 and 9 at 200. His health bar gets a notch for each hit."""
+    Papu has 5 hits at 100, 6 at 125, 7 at 150, 8 at 175 and 9 at 200. His health bar gets a notch for each hit. Ripper
+    Roo has his own setting (Ripper Roo Health), which can follow this one."""
 
     display_name = "Boss Health"
     range_start = 100
@@ -681,7 +686,7 @@ class BossSpeed(Range):
     """How fast a harder boss fights, in percent of the game's (needs Harder Bosses): Papu Papu spins faster (each hit
     still speeds him up, gentler near the top so the end stays beatable), waits less before his spins, slams sooner after
     he stands (unless Boss Slam Time sets it) and can be hit for less time once his red ends (unless Boss Hit Window sets
-    it)."""
+    it). Ripper Roo has his own setting (Ripper Roo Speed), which can follow this one."""
 
     display_name = "Boss Speed"
     range_start = 100
@@ -729,6 +734,106 @@ class HarderBossesAkuAku(Toggle):
     waits, and masks from crates and items there come in the next level). On: masks work there as usual."""
 
     display_name = "Aku Aku in Harder Boss Fights"
+
+
+class RipperRooHealth(NamedRange):
+    """How many hits Ripper Roo (Crash 1's second boss) takes to beat (needs Harder Bosses). The game's is 3. His health
+    bar gets a notch for each hit, and each hit also makes his next hop pattern one platform longer (see Ripper Roo
+    Pattern). by_boss_health: from Boss Health, as for Papu Papu: 3 at 100%, one more every 33%, 6 at 200%."""
+
+    display_name = "Ripper Roo Health"
+    range_start = 3
+    range_end = 9
+    default = 6
+    special_range_names = {"by_boss_health": 0}
+
+
+class RipperRooSpeed(NamedRange):
+    """How fast Ripper Roo hops, in percent of the game's pace (needs Harder Bosses). Both his hops and his pause before
+    each hop get shorter: at 100 (the game's) a hop takes 0.58 s and the pause 0.7 s; at 170 (the default) 0.34 s and
+    0.41 s; at 200 half the game's. by_boss_speed: from Boss Speed (170 at Boss Speed 200, 135 at 150)."""
+
+    display_name = "Ripper Roo Speed"
+    range_start = 100
+    range_end = 200
+    default = 170
+    special_range_names = {"by_boss_speed": 0}
+
+
+class RipperRooPattern(NamedRange):
+    """How many platforms Ripper Roo's hop pattern has when his fight starts (needs Harder Bosses). He hops around a
+    random loop of that many of his 7 platforms, never the same one twice in a loop, over and over until you hit him.
+    Each hit gives him a new loop one platform longer, up to all 7; a death starts over at this length with a new loop.
+    games_own: his own hops from the game, unchanged (then he never hops at you; see Ripper Roo Attack Chance)."""
+
+    display_name = "Ripper Roo Pattern"
+    range_start = 3
+    range_end = 7
+    default = 3
+    special_range_names = {"games_own": 0}
+
+
+class RipperRooAttackChance(Range):
+    """How often Ripper Roo breaks off his pattern to hop onto the platform you're standing on, in percent of his
+    landings (needs Harder Bosses, and his patterns: not games_own). 0: never. 15 (the default): about 1 landing in 6.5.
+    50: every other landing. However high it is, at least 8 s pass between two of these hops, and he makes at least 2
+    hops of a new pattern first. Right after, he goes back to his pattern."""
+
+    display_name = "Ripper Roo Attack Chance"
+    range_start = 0
+    range_end = 50
+    default = 15
+
+
+class RipperRooLeap(DefaultOnToggle):
+    """When Ripper Roo hops at you and you're two platforms away in a straight line (across the front row, across the
+    middle row, or front middle to back middle), he can leap over the platform between to land on yours. Off: he only
+    hops at you from a platform next to yours."""
+
+    display_name = "Ripper Roo Leap"
+
+
+class RipperRooNitros(Range):
+    """How many Nitro crates are on Ripper Roo's platforms when his fight starts (needs Harder Bosses). 0: no Nitros.
+    One more comes every 3 hits, up to Ripper Roo Most Nitros.
+
+    After every hit they move to new platforms: a green outline shows each new spot for 3 s first. Only you set them
+    off. Ripper Roo goes through them (one turns into an outline as he lands on it and comes back once he's off), and his
+    TNT doesn't set them off. They're placed around his pattern so you're never cornered: there's always a free platform
+    he doesn't land on with two ways out, and every free platform can be reached from the others with straight jumps.
+    When that leaves no room for all of them, fewer come that round.
+
+    The Nitros need Ripper Roo's arena file changed: when you connect, the client makes a changed copy (your game's own
+    file is kept) and asks you to restart the game once. /roo_nitro off in the client puts the game's own back."""
+
+    display_name = "Ripper Roo Nitros"
+    range_start = 0
+    range_end = 4
+    default = 2
+
+
+class RipperRooMostNitros(Range):
+    """The most Nitro crates Ripper Roo's fight can have after hits (needs Harder Bosses and Nitros). His fight starts
+    with Ripper Roo Nitros, then one more every 3 hits, up to this. If this is below Ripper Roo Nitros, Ripper Roo
+    Nitros is used. More Nitros mean fewer places to stand, but never so many that you're cut off (see Ripper Roo
+    Nitros)."""
+
+    display_name = "Ripper Roo Most Nitros"
+    range_start = 0
+    range_end = 4
+    default = 3
+
+
+class RipperRooNitroSize(Range):
+    """How big Ripper Roo's Nitros are, in percent of a crate (needs Harder Bosses and Nitros). Touching anywhere inside
+    that size sets one off, so it's the hitbox too. 100: a normal crate, with room to stand on the edge of its platform
+    beside it. 200 (the default): about the size of the platform's top, so you can't use that platform at all while
+    its Nitro is there."""
+
+    display_name = "Ripper Roo Nitro Size"
+    range_start = 100
+    range_end = 200
+    default = 200
 
 
 # sections on the options page and in generated YAMLs, in this order. Archipelago puts Progression Balancing and
@@ -796,6 +901,16 @@ crash_option_groups = [
         BossHitWindow,
         HarderBossesAkuAku,
     ]),
+    OptionGroup("Ripper Roo (Harder Bosses)", [
+        RipperRooHealth,
+        RipperRooSpeed,
+        RipperRooPattern,
+        RipperRooAttackChance,
+        RipperRooLeap,
+        RipperRooNitros,
+        RipperRooMostNitros,
+        RipperRooNitroSize,
+    ]),
     OptionGroup("Cosmetic", [
         CrashFurColor,
         CrashChestColor,
@@ -860,6 +975,14 @@ class CrashOptions(PerGameCommonOptions):
     boss_slam_aim: BossSlamAim
     boss_hit_window: BossHitWindow
     harder_bosses_aku_aku: HarderBossesAkuAku
+    ripper_roo_health: RipperRooHealth
+    ripper_roo_speed: RipperRooSpeed
+    ripper_roo_pattern: RipperRooPattern
+    ripper_roo_attack_chance: RipperRooAttackChance
+    ripper_roo_leap: RipperRooLeap
+    ripper_roo_nitros: RipperRooNitros
+    ripper_roo_most_nitros: RipperRooMostNitros
+    ripper_roo_nitro_size: RipperRooNitroSize
     crash_fur_color: CrashFurColor
     crash_chest_color: CrashChestColor
     crash_pants_color: CrashPantsColor

@@ -1606,6 +1606,19 @@ namespace ingame
         lines.push_back("Roo Nitro: test " + std::to_string(mode) + " on. Restart the game: as it starts, his arena's archive is swapped for this copy (/roo_nitro off and a restart put his own back).");
         return lines;
     }
+    bool roo_nitro_planned(const std::filesystem::path &state_folder)
+    {
+        std::ifstream in(state_folder / "level_patches.txt");
+        std::string line;
+        while (std::getline(in, line))
+            if (const auto f = bar_fields(line); f.size() == 5)
+            {
+                const auto name = lower(f[0]);
+                if (name.size() >= 18 && name.compare(name.size() - 18, 18, "b102_ripperroo.pak") == 0)
+                    return true;
+            }
+        return false;
+    }
     // what the loader did with level patches as the game started (CRASHNSTAP_LEVEL_PATCHES: "in place|put back|skipped|why")
     std::string level_patch_status()
     {

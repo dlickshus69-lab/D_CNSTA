@@ -4,7 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Roo attacks a little less often:** his hop at you now comes 1 in 6.5 landings (was 1 in 5), still at least 8 s apart. In your last run he went for you about every 12 s; now it's about every 13 s.
-- His leap over a platform worked in your run: it happened 3 times, over the middle-middle each time.
-- **Ripper Roo is done** apart from turning the Nitro into a harder-bosses YAML option, which comes next.
-- Before going back to the Stable build: run `/roo_nitro off` and restart the game once on Testing.
+- **Ripper Roo's YAML options** (need `harder_bosses`): `ripper_roo_health` (3–9 hits, default 6), `ripper_roo_speed` (100–200%, default 170), `ripper_roo_pattern` (first loop 3–7 platforms, default 3, or `games_own`), `ripper_roo_attack_chance` (0–50% of his landings, default 15), `ripper_roo_leap` (on), `ripper_roo_nitros` (0–4 at the start, default 2), `ripper_roo_most_nitros` (0–4, default 3), `ripper_roo_nitro_size` (100–200%, default 200). Each one explains itself in the YAML template and the player guide.
+- **Nitros from the YAML, no test command:** connect with a seed that has Nitros, and the client makes his arena's changed file in the background, then asks you to restart the game once.
+- Older seeds play as V1.4.23 did (health and speed from `boss_health` and `boss_speed`).
+- To try: install this apworld, make a Testing seed with `harder_bosses: true` and some Roo options changed, connect, restart when asked, and fight him (`/boss ripper1`). Send the log.

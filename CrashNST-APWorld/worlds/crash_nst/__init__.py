@@ -1129,4 +1129,17 @@ class CrashWorld(World):
         # (V1.4) how far ahead of Crash his slam aims, in percent (0: where Crash is, 100: where he's heading)
         result["boss_slam_aim"] = self.options.boss_slam_aim.value if harder else 55
         result["boss_aku_aku"] = bool(self.options.harder_bosses_aku_aku.value)
+        # (Testing V1.4.24) Ripper Roo's own settings, only with harder_bosses on: his hits (0: by boss_health), his pace in
+        # percent (0: by boss_speed), his first pattern's length (0: the game's own hops), the chance of a hop at Crash in
+        # percent of his landings, the leap over a platform, his Nitros at the start and the most, and their size in percent
+        if harder:
+            options = self.options
+            result["roo_health"] = options.ripper_roo_health.value
+            result["roo_speed"] = options.ripper_roo_speed.value
+            result["roo_pattern"] = options.ripper_roo_pattern.value
+            result["roo_attack"] = options.ripper_roo_attack_chance.value
+            result["roo_leap"] = bool(options.ripper_roo_leap.value)
+            result["roo_nitros"] = options.ripper_roo_nitros.value
+            result["roo_nitros_most"] = max(options.ripper_roo_most_nitros.value, options.ripper_roo_nitros.value)
+            result["roo_nitro_size"] = options.ripper_roo_nitro_size.value
         return result
