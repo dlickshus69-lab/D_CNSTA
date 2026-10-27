@@ -4,7 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Koala Kong's health bar lasts until his last hit.** The game builds his bar with his usual 4 notches before the client can raise his hits, so each notch now stands for 2 of his 8 hits instead of the bar vanishing halfway. The log also checks how to draw all 8 notches next.
-- **Koala Kong's rally (first try, harder bosses on):** when you spin his big rock back, he swats it back at you 2 or 3 times before it can hit him. He flashes gold on each swat, and the rock glows by the swats he has left: red 3, orange 2, yellow 1, green when the next spin will hit him.
-- If a swat doesn't bring the rock back, his swats stop for that visit and the log says why. Faster rocks with each swat come once the swat itself works.
-- To try: `/invincible on`, then `/boss koala`. Spin his big rocks back a few times, watch the bar and the colors, and send the log plus a clip.
+- **Koala Kong's rally, second try:** the first try sent the rock's own throw while it flew, and that did nothing. Now his swat is his own throw (the move he uses to throw the boulder at you), fired as your spun rock gets close to him. The rock still flying at him is moved away so it can't land the hit, and if it hits anyway his health goes back.
+- **Koala Kong's bar, all 8 notches (try):** your last run showed the bar's fill follows the hit count, not the notches it was built with. So the bar's frame is now laid out for his 8 hits before his first hit. If that works, the bar shows 8 notches from his first hit on (7 left). If the game puts its 4-notch frame back, the bar goes back to 2 hits a notch.
+- Gold flash on him at each swat and the rock's color by swats left (red 3, orange 2, yellow 1, green: the next spin hits him) are the same as before.
+- To try: `/invincible on`, then `/boss koala`. Spin his big rocks back, and please record from his first big rock (the swat happens right as the rock reaches him). Send the log and the clip.

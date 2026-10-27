@@ -5981,20 +5981,17 @@ namespace ingame
             // was drawn with (from its NotchParent's length, the most seen in its first 1.5 s), and whether that's decided;
             // his health and the count as last seen and when each last changed (a count is only written once both held)
             Address bar_actor = 0, notch_parent = 0;
+            // V1.5.3 (see bar_grow): the bar's frame parts, its count as the frame was grown, and the grow's step (0 not
+            // tried, 1 written and waiting for his first hit, 2 kept after it, -1 undone: the game laid its own back)
+            Address frame_edge = 0, edge_frame = 0, bar_shadow = 0;
+            int grow_step = 0;
+            bool grow_lowered = false;
+            std::array<float, 5> grow_game{}, grow_ours{};
+            std::uint64_t grow_at = 0;
+            unsigned grow_lines = 0;
             int bar_drawn = 0, count_health = -1, count_seen = -1;
             bool bar_drawn_decided = false;
             std::uint64_t count_health_at = 0, count_seen_at = 0;
-            // research for a bar drawn short (to draw his own notches later): the numbers in its objects equal to its
-            // notches at his full health (object, offset, decimal or not), looked at again after his first hit
-            struct ShortCandidate
-            {
-                Address object = 0;
-                unsigned offset = 0;
-                bool decimal = false;
-            };
-            std::vector<ShortCandidate> short_candidates;
-            std::uint64_t short_check_due = 0;
-            bool short_checked = false;
             // V1.3.28 research (see bar_research): the blue's length as it last settled, and the bar's objects then
             float w_seen = -1, w_settling = -1;
             std::uint64_t w_since = 0;
@@ -6458,7 +6455,7 @@ namespace ingame
             std::set<Address> setting;
             for (const auto &[a, depth] : setting_parts)
                 setting.insert(a);
-            std::vector<std::pair<Address, bool>> parents, healths, notch_parents;
+            std::vector<std::pair<Address, bool>> parents, healths, notch_parents, frame_edges, edge_frames, bar_shadows;
             std::ostringstream parts;
             unsigned named = 0;
             for (const auto &[a, depth] : bar_parts)
@@ -6475,6 +6472,12 @@ namespace ingame
                     healths.emplace_back(a, in_setting);
                 else if (name == "NotchParent")
                     notch_parents.emplace_back(a, in_setting); // (V1.5.2: its length says how many notches the bar was drawn with)
+                else if (name == "FrameEdge")
+                    frame_edges.emplace_back(a, in_setting); // (V1.5.3: the frame's parts laid out for more notches, see bar_grow)
+                else if (name == "edge frame")
+                    edge_frames.emplace_back(a, in_setting);
+                else if (name == "bar shadow")
+                    bar_shadows.emplace_back(a, in_setting);
                 if (!in_setting && named++ < 30)
                     parts << "\nBoss bar part: " << name << " (depth " << depth << ") x " << value<float>(a + 0x68) << " y " << value<float>(a + 0x6c) << " width "
                           << value<float>(a + 0x98) << " height " << value<float>(a + 0x9c) << " scale " << value<float>(a + 0x8c) << " " << value<float>(a + 0x90);
@@ -6494,6 +6497,7 @@ namespace ingame
             t.bar_parent = pick(parents, true);
             t.health_bar = pick(healths, false);
             t.notch_parent = pick(notch_parents, false);
+            t.frame_edge = pick(frame_edges, false), t.edge_frame = pick(edge_frames, false), t.bar_shadow = pick(bar_shadows, false);
             const auto brief = [&](const std::vector<std::pair<Address, bool>> &list, Address chosen) {
                 std::ostringstream out;
                 for (const auto &[a, in_setting] : list)
@@ -6695,51 +6699,111 @@ namespace ingame
                 return 1;
             return ((left - 1) * drawn + hits - 1) / hits + 1;
         }
-        // (V1.5.2 research, see ShortCandidate) the numbers equal to a short bar's notches in its objects
-        void short_bar_research(BossTuning &t, const std::vector<std::pair<Address, unsigned>> &found, int drawn)
+        // V1.5.3 (Testing; Eric's V1.5.2 run: the bar lasted, each notch 2 hits, and its blue after the count went 5 -> 4
+        // was 450 long, past the 433 the game laid it out with: the blue's length goes by the count alone, not by the
+        // notches the bar was laid out for). So a bar drawn short gets its frame laid out for his hits the way the game
+        // lays out a bar with that many notches: BarParent's width (the blue's length at full health), NotchParent's
+        // width (how much of the notches picture shows), FrameEdge's place (the frame's end) and the edge frame's and
+        // bar shadow's widths. The game lays a bar out from its parts at a hit (V1.3.24: a part's scale), so at his first
+        // hit, with the count set to his hits before it, the bar should show his hits' notches (7 of 8 left). If the
+        // game lays its own frame back at that hit, the frame goes back too and each notch is worth more than a hit again
+        std::array<float, 5> bar_layout(int n)
         {
-            t.short_candidates.clear();
-            std::vector<std::int32_t> words(0x200 / 4);
-            for (const auto &found_one : found)
+            // BarParent width, NotchParent width, FrameEdge x, edge frame width, bar shadow width: as the game lays out 4
+            // notches (Koala Kong), 7 (Ripper Roo) and 9 and up (Papu Papu), and in step between them
+            static const std::array<float, 5> four{433, 467, 628, 459, 500}, seven{782, 813, 976, 806, 848}, nine{1013, 1040, 1203, 1033, 1078};
+            std::array<float, 5> out{};
+            for (unsigned i = 0; i < 5; ++i)
+                out[i] = n <= 7 ? four[i] + (seven[i] - four[i]) * static_cast<float>(n - 4) / 3.0f
+                                : seven[i] + (nine[i] - seven[i]) * static_cast<float>(std::min(n, 9) - 7) / 2.0f;
+            return out;
+        }
+        // true while the grown frame keeps the count (its hits left, as a bar of his notches would); false: the short way
+        bool bar_grow(BossTuning &t, std::uint64_t now, int health, int n, const std::function<int()> &count, const std::function<void(int)> &set_count)
+        {
+            if (t.grow_step < 0)
+                return false;
+            const std::array<Address, 5> parts{t.bar_parent, t.notch_parent, t.frame_edge, t.edge_frame, t.bar_shadow};
+            static const std::array<const char *, 5> names{"BarParent", "NotchParent", "FrameEdge", "edge frame", "bar shadow"};
+            static const std::array<unsigned, 5> at{0x98, 0x98, 0x68, 0x98, 0x98};
+            bool all = true;
+            for (unsigned i = 0; i < 5; ++i)
+                all = all && bar_part_ok(parts[i], 0x161cf98, 0x30, names[i]);
+            const int full = t.bar_hits * 100, left = std::clamp((health + 99) / 100, 0, n);
+            if (t.grow_step == 0)
             {
-                const Address a = found_one.first;
-                if (!read(a, words))
-                    continue;
-                for (unsigned i = 2; i < words.size() && t.short_candidates.size() < 600; ++i)
+                if (health != full)
+                    return false;
+                if (!all)
                 {
-                    const unsigned off = i * 4;
-                    if (std::any_of(t.count_places.begin(), t.count_places.end(), [&](const auto &p) { return p.first + p.second == a + off; }))
-                        continue;
-                    float f = 0;
-                    std::memcpy(&f, &words[i], 4);
-                    if (words[i] == drawn)
-                        t.short_candidates.push_back({a, off, false});
-                    else if (f == static_cast<float>(drawn))
-                        t.short_candidates.push_back({a, off, true});
+                    t.grow_step = -1;
+                    std::cout << "Boss bar: not all of its frame's parts were found (BarParent, NotchParent, FrameEdge, edge frame, bar shadow); each notch stays worth more than a hit\n"
+                              << std::flush;
+                    return false;
+                }
+                t.grow_ours = bar_layout(n);
+                for (unsigned i = 0; i < 5; ++i)
+                    t.grow_game[i] = value<float>(parts[i] + at[i]), write(parts[i] + at[i], t.grow_ours[i]);
+                const int was = count();
+                set_count(n);
+                t.grow_step = 1, t.grow_at = now;
+                std::cout << "Boss bar: its frame laid out for " << n << " notches (NotchParent " << t.grow_game[1] << " -> " << t.grow_ours[1] << ", FrameEdge at " << t.grow_game[2]
+                          << " -> " << t.grow_ours[2] << ") and its count " << was << " -> " << n << ": it shows as he's first hit, if the game lays the bar out from its parts then\n"
+                          << std::flush;
+                return true;
+            }
+            if (!all)
+            {
+                // (a part gone: the count kept as a bar of his notches, the frame left as it is)
+                if (const int v = count(); v >= 0 && v < left)
+                    set_count(left);
+                return true;
+            }
+            // which of the frame's parts (not BarParent: the blue's length, the game's to change) are still ours, or the game's again
+            unsigned ours = 0, games = 0;
+            for (unsigned i = 1; i < 5; ++i)
+            {
+                const float v = value<float>(parts[i] + at[i]);
+                ours += std::abs(v - t.grow_ours[i]) < 0.5f ? 1u : 0u;
+                games += std::abs(v - t.grow_game[i]) < 0.5f ? 1u : 0u;
+            }
+            if (t.grow_step == 1 && health < full)
+            {
+                // his first hit: the frame kept (the bar shows his notches now), or laid back by the game
+                if (ours == 4)
+                {
+                    t.grow_step = 2;
+                    std::cout << "Boss bar: after his first hit its frame is still laid out for " << n << " notches; the blue's " << value<float>(t.bar_parent + 0x98)
+                              << " long, the count " << count() << " (his health " << health << ")\n"
+                              << std::flush;
+                }
+                else
+                {
+                    t.grow_step = -1;
+                    for (unsigned i = 1; i < 5; ++i)
+                        write(parts[i] + at[i], t.grow_game[i]);
+                    std::cout << "Boss bar: at his first hit the game laid " << games << " of its frame's 4 parts back as it had them (" << ours
+                              << " still ours): the frame back to its own notches, each worth more than a hit again\n"
+                              << std::flush;
+                    return false;
                 }
             }
-        }
-        void short_bar_research_check(BossTuning &t, int drawn)
-        {
-            t.short_checked = true;
-            std::ostringstream out;
-            unsigned kept = 0, shown = 0;
-            for (const auto &c : t.short_candidates)
+            // kept: laid out ours again if the game laid its own back (a death's refill), and the count at his hits left
+            if (ours < 4)
             {
-                const bool same = c.decimal ? value<float>(c.object + c.offset) == static_cast<float>(drawn) : value<int>(c.object + c.offset) == drawn;
-                if (!same)
-                    continue;
-                ++kept;
-                if (shown++ >= 30)
-                    continue;
-                const auto vt = value<Address>(c.object);
-                out << "\nBoss bar research: " << (c.decimal ? "decimal " : "") << drawn << " at 0x" << std::hex << c.object << std::dec
-                    << (vt >= base() && vt < module_end() ? " type " + hex(static_cast<unsigned>(vt - base())) : std::string()) << " +" << hex(c.offset);
+                for (unsigned i = 1; i < 5; ++i)
+                    write(parts[i] + at[i], t.grow_ours[i]);
+                if (t.grow_lines++ < 6)
+                    std::cout << "Boss bar: its frame laid out for " << n << " notches again (" << 4 - ours << " of its parts had changed; his health " << health << ")\n" << std::flush;
             }
-            std::cout << "Boss bar research: " << kept << " of the " << t.short_candidates.size() << " numbers equal to the bar's " << drawn
-                      << " notches at his full health still are after his first hit (one may be the bar's own notch total)" << out.str() << "\n"
-                      << std::flush;
-            t.short_candidates.clear();
+            if (const int v = count(); v >= 0 && v < left)
+            {
+                set_count(left);
+                if (t.grow_lines++ < 12)
+                    std::cout << "Boss bar: its count " << v << " -> " << left << " (his health " << health << "; it shows once he's hit again)\n" << std::flush;
+            }
+            (void)now;
+            return true;
         }
         void bar_count(BossTuning &t, std::uint64_t now)
         {
@@ -6760,6 +6824,7 @@ namespace ingame
                 {
                     t.count_places.clear(), t.count_last.clear();
                     t.count_searched = t.count_checked = false, t.count_since = now;
+                    t.grow_step = 0, t.grow_lowered = false;
                     break;
                 }
             if (!t.count_searched)
@@ -6788,10 +6853,7 @@ namespace ingame
                 for (const auto &[a, off] : t.count_places)
                     one_spot = one_spot && a + off == t.count_places[0].first + t.count_places[0].second;
                 if (shorter)
-                {
                     t.count_checked = one_spot;
-                    short_bar_research(t, found, drawn);
-                }
                 if (t.count_lines < 30)
                     ++t.count_lines, std::cout << "Boss bar: its own count of notches left found in " << t.count_places.size() << " places (" << drawn << ", at his full health)"
                                                << (shorter ? "; his bar has " + std::to_string(drawn) + " notches for his " + std::to_string(t.bar_hits) +
@@ -6801,14 +6863,6 @@ namespace ingame
                                                << "\n"
                                                << std::flush;
                 return;
-            }
-            // (research, once: after his first hit)
-            if (shorter && !t.short_checked && !t.short_candidates.empty())
-            {
-                if (!t.short_check_due && health < t.bar_hits * 100)
-                    t.short_check_due = now + 600;
-                if (t.short_check_due && now >= t.short_check_due)
-                    short_bar_research_check(t, drawn);
             }
             if (t.count_places.empty())
                 return;
@@ -6845,7 +6899,26 @@ namespace ingame
                 // (only once his health and the count held, see above)
                 if (now - t.count_health_at < 400 || now - t.count_seen_at < 400)
                     return;
+                const auto set_count = [&](int v) {
+                    for (std::size_t i = 0; i < t.count_places.size(); ++i)
+                        write(t.count_places[i].first + t.count_places[i].second, v), t.count_last[i] = v;
+                    t.count_seen = v;
+                };
+#ifndef CRASH_NST_STABLE
+                // (V1.5.3) his frame grown to his hits (see bar_grow)
+                if (bar_grow(t, now, health, most, [&] { return count_at(0); }, set_count))
+                    return;
+#endif
                 target = short_bar_count(std::min(left, t.bar_hits), drawn, t.bar_hits);
+                // (once, after a grown frame was undone at his first hit: the count down to the short way's)
+                if (t.grow_step < 0 && !t.grow_lowered && count_at(0) > target && target > 0)
+                {
+                    t.grow_lowered = true;
+                    if (t.count_lines < 30)
+                        ++t.count_lines, std::cout << "Boss bar: its count " << count_at(0) << " -> " << target << " (" << left << " hits left on " << drawn << " notches)\n" << std::flush;
+                    set_count(target);
+                    return;
+                }
             }
             bool short_of = false;
             for (std::size_t i = 0; i < t.count_places.size(); ++i)
@@ -6915,8 +6988,9 @@ namespace ingame
             bar_count(t, now);
             // the bar's own HealthBar as wide as its setting's (a bar made before the setting changed gets it at its next
             // layout: his first hit, or a death); not with /bar_try none, to compare
-            // (V1.5.2: as wide as the notches it was drawn with: a bar drawn with the game's notches keeps the game's blue)
-            const int drawn_for = t.bar_drawn_decided && t.bar_drawn > 0 ? std::min(t.bar_drawn, t.bar_hits) : t.bar_hits;
+            // (V1.5.2: as wide as the notches it was drawn with: a bar drawn with the game's notches keeps the game's blue;
+            // V1.5.3: one whose frame was grown to his hits, see bar_grow, as wide as his hits again)
+            const int drawn_for = t.grow_step > 0 || !t.bar_drawn_decided || t.bar_drawn <= 0 ? t.bar_hits : std::min(t.bar_drawn, t.bar_hits);
             const float stretch = state.bar_try_target == 1 ? 1.0f : bar_stretch(t.bar_game_hits, drawn_for);
             // (not while the notches it was drawn with are still being found)
             const bool drawn_pending = !t.bar_drawn_decided && bar_part_ok(t.notch_parent, 0x161cf98, 0x30, "NotchParent");
@@ -13755,9 +13829,8 @@ namespace ingame
         }
         // V1.5.2 (Testing, harder bosses on): Koala Kong's rally (Eric: "like a pinball kind of thing... maybe like 2 or 3
         // times he'll swap back and you have to spin the rock again"). Each rock he throws gets 2 or 3 swats: when Crash
-        // spins it back at him (its z7wy1dtc) and he has swats left, then as it gets halfway to him, the rock's own throw
-        // at Crash (kxfns6c4, a message with no values, sent the way the game sends it) is sent again, so it flies back at
-        // Crash, and the hit of the rock that was flying at him is kept from him (see event_sent). He flashes gold as he
+        // spins it back at him (its z7wy1dtc) and he has swats left, then as it nears him, he throws it at Crash again
+        // (see koala_swat), and the hit of the rock that was flying at him is kept from him (see event_sent). He flashes gold as he
         // swats it, and the rock glows by the swats he has left: red 3, orange 2, yellow 1, green none (that one hits
         // him). The rock's last spin back hits him as the game has it. If a swat brings no rock back, his swats are off
         // for the visit (the log says so). Faster rocks with each swat come once this works
@@ -13766,8 +13839,11 @@ namespace ingame
             std::uint64_t entered = 0, scan_at = 0, spun_at = 0, swat_at = 0, watch_until = 0, flash_until = 0, glow_at = 0;
             Address koala = 0, rock = 0, rock_component = 0, big = 0, health_part = 0;
             unsigned throws_seen = 0, spins_seen = 0, blocked_seen = 0, swats = 0, returns = 0, lines = 0;
-            int planned = 0, left = 0, damage_before = -1;
-            bool armed = false, watching = false, broken = false, came_back = false, told_last = false, told_model = false, dumped = false;
+            int planned = 0, left = 0, damage_before = -1, health_before = -1;
+            bool armed = false, watching = false, broken = false, came_back = false, told_last = false, told_model = false, dumped = false, moved = false, big_told = false;
+            bool moved_told = false, health_told = false;
+            float moved_z = 0;
+            PapuSend ai_throw;
             std::array<float, 3> big_from{}, koala_at{};
             std::set<Address> heavies;
             Glow koala_glow, rock_glow;
@@ -13788,19 +13864,6 @@ namespace ingame
             }
         }
         const char *rally_color_name(int left) { return left >= 3 ? "red" : left == 2 ? "orange" : left == 1 ? "yellow" : "green"; }
-        // a script's own message by its id: the message and where it goes (see aku_message)
-        std::pair<Address, Address> script_message(Address component, const std::string &id)
-        {
-            for (const auto delegator : list(value<Address>(value<Address>(component + 56) + 160), 128))
-            {
-                const auto message = value<Address>(delegator + 24), target = value<Address>(delegator + 32);
-                if (!typed(delegator, 0x13bc268) || !typed(message, 0x17b6578) || !typed(target, 0x13bbcb8))
-                    continue;
-                if (string(value<Address>(message + 16), 120).find("_id_" + id) != std::string::npos)
-                    return {message, target};
-            }
-            return {0, 0};
-        }
         std::set<Address> koala_heavy_rocks()
         {
             std::set<Address> found;
@@ -13816,19 +13879,24 @@ namespace ingame
             koala_rally = {};
             koala_rally_on = false, koala_actor = 0, koala_block_until = 0;
         }
+        // V1.5.3 (Eric's V1.5.2 run: "it's not swatting back"; the log: the rock's own kxfns6c4 sent in flight did nothing,
+        // the rock flew on into him and he took the hit. The throw is his AI's: zg4jy91e, his AI's own message with 7
+        // values, then the rock's kxfns6c4, and the RockHeavy01 projectile starts where the rock is). So his swat is his
+        // AI's own throw, sent from a node of our own with the values his AI's node gives it (as Papu Papu's refill is),
+        // as the rock gets three quarters of the way to him. Once a rock flies back at Crash, the one still flying at him
+        // is moved far below the arena so it can't land its hit (and if it does anyway, his damage goes back)
         void koala_swat(KoalaRally &r, std::uint64_t now)
         {
             r.armed = false;
             const auto t = "Koala rally +" + seconds(now - r.entered) + ": ";
-            const bool sender_ok = event_hook.installed || code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
-                                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0});
-            const auto [message, target] = r.rock_component ? script_message(r.rock_component, "kxfns6c4") : std::pair<Address, Address>{0, 0};
-            if (!sender_ok || !message || !field_at(message, "_sender", 32, 8) || !typed(r.rock_component, 0x13bbbd0) ||
-                value<Address>(r.rock_component + 24) != r.rock || !event_owner(r.rock))
+            Address ai = 0;
+            for (const auto &[c, script] : entity_scripts(r.koala))
+                if (script == "BossKoalaKong_AiController")
+                    ai = c;
+            if (!ai || !papu_send_find(r.ai_throw, r.koala, "BossKoalaKong_AiController", ai, "zg4jy91e", 7))
             {
                 r.broken = true;
-                std::cout << t << "can't send the rock's throw (" << (!sender_ok ? "the game's message sender isn't as expected" : !message ? "its script has no kxfns6c4" : "the rock or its script is gone")
-                          << "); his swats are off for this visit\n"
+                std::cout << t << "his AI's throw (zg4jy91e) " << (ai ? "and its values weren't found" : "isn't there (no BossKoalaKong_AiController)") << "; his swats are off for this visit\n"
                           << std::flush;
                 return;
             }
@@ -13838,19 +13906,25 @@ namespace ingame
                 if (typed(c, 0x14da2c0))
                     r.health_part = c;
             r.damage_before = r.health_part ? value<int>(r.health_part + 0x310) : -1;
+            r.health_before = typed(r.koala, 0x1592220) && health_getter_ok() ? actor_health(r.koala) : -1;
             koala_block_until = now + 700;
-            std::array<Address, 11> node{base() + 0x13bc390, 0, message, target};
-            std::array<Address, 6> context{r.rock_component};
             koala_own_send = true;
-            reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(reinterpret_cast<Address>(node.data()), reinterpret_cast<Address>(context.data()));
+            const bool sent = papu_send(r.ai_throw);
             koala_own_send = false;
+            if (!sent)
+            {
+                r.broken = true, koala_block_until = 0;
+                std::cout << t << "his AI's throw couldn't be sent (the game's message sender isn't as expected); his swats are off for this visit\n" << std::flush;
+                return;
+            }
             --r.left, ++r.swats;
-            r.swat_at = now, r.watching = true, r.came_back = false, r.watch_until = now + 450;
+            r.swat_at = now, r.watching = true, r.came_back = false, r.moved = false, r.moved_told = false, r.health_told = false, r.watch_until = now + 600;
             if (glow_on(r.koala_glow, r.koala, koala_gold))
                 r.flash_until = now + 350;
             const bool lit = glow_on(r.rock_glow, r.rock, rally_color(r.left));
-            std::cout << t << "he swats it back (swat " << r.planned - r.left << " of " << r.planned << "; " << r.left << " left, the rock " << (lit ? "glows " : "would glow ")
-                      << rally_color_name(r.left) << ")\n"
+            std::cout << t << "he swats it back: his throw sent (swat " << r.planned - r.left << " of " << r.planned << "; " << r.left << " left, the rock "
+                      << (lit ? "glows " : "would glow ") << rally_color_name(r.left) << "; his health part " << (r.health_part ? "found, damage " + std::to_string(r.damage_before) : std::string("not found"))
+                      << ", his health " << r.health_before << ")\n"
                       << std::flush;
         }
         void koala_rally_update(const Shared &state, const std::string &boss, std::uint64_t now)
@@ -13962,6 +14036,15 @@ namespace ingame
                             {
                                 r.big = owner;
                                 read(r.koala + 32, r.koala_at);
+                                if (!r.big_told)
+                                {
+                                    r.big_told = true;
+                                    std::string scripts;
+                                    for (const auto &[c, script] : entity_scripts(owner))
+                                        scripts += (scripts.empty() ? "" : ", ") + script;
+                                    std::cout << t << "the rock flying at him (" << string(value<Address>(owner + 128)) << ") has " << (scripts.empty() ? std::string("no scripts") : scripts) << "\n"
+                                              << std::flush;
+                                }
                                 break;
                             }
                     }
@@ -13970,7 +14053,7 @@ namespace ingame
                     {
                         const auto far_ = [](const std::array<float, 3> &a, const std::array<float, 3> &b) { return std::hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]); };
                         const float total = far_(r.big_from, r.koala_at), done = far_(r.big_from, at);
-                        if (total > 50 && (done >= 0.5f * total || now - r.spun_at >= 250))
+                        if (total > 50 && (done >= 0.75f * total || now - r.spun_at >= 240))
                             koala_swat(r, now);
                     }
                 }
@@ -13983,23 +14066,54 @@ namespace ingame
                         if (!r.heavies.count(heavy))
                         {
                             r.came_back = true, ++r.returns;
-                            std::cout << t << "the rock flies back at Crash (" << seconds(now - r.swat_at) << " after the swat)\n" << std::flush;
+                            std::array<float, 3> at{};
+                            read(heavy + 32, at);
+                            std::cout << t << "the rock flies back at Crash (" << seconds(now - r.swat_at) << " after the swat, from (" << std::lround(at[0]) << ", " << std::lround(at[1])
+                                      << ", " << std::lround(at[2]) << "))\n"
+                                      << std::flush;
                             break;
                         }
+                // then the one still flying at him moved far below the arena (once), and whether it stays there
+                if (r.came_back && r.big && event_owner(r.big))
+                {
+                    std::array<float, 3> at{};
+                    if (read(r.big + 32, at))
+                    {
+                        if (!r.moved)
+                        {
+                            r.moved = true, r.moved_z = at[2] - 5000.0f;
+                            write(r.big + 40, r.moved_z);
+                        }
+                        else if (!r.moved_told)
+                        {
+                            r.moved_told = true;
+                            std::cout << t << "the rock that was flying at him " << (at[2] < r.moved_z + 1000.0f ? "stayed where it was moved (far below)" : "went back on its way (moving it doesn't hold)")
+                                      << ", at (" << std::lround(at[0]) << ", " << std::lround(at[1]) << ", " << std::lround(at[2]) << ")\n"
+                                      << std::flush;
+                        }
+                    }
+                }
                 // his health back if the hit got through anyway (his health part's damage, as in bar_refill)
                 if (r.health_part && typed(r.health_part, 0x14da2c0) && r.damage_before >= 0 && now < koala_block_until.load())
                     if (const int damage = value<int>(r.health_part + 0x310); damage > r.damage_before)
                     {
                         write(r.health_part + 0x310, r.damage_before);
-                        std::cout << t << "the rock's hit got through: his damage " << damage << " -> " << r.damage_before << "\n" << std::flush;
+                        std::cout << t << "the rock's hit got through: his damage " << damage << " -> " << r.damage_before << " (his health "
+                                  << (typed(r.koala, 0x1592220) && health_getter_ok() ? actor_health(r.koala) : -1) << ")\n"
+                                  << std::flush;
                     }
+                if (r.health_before >= 0 && !r.health_told && typed(r.koala, 0x1592220) && health_getter_ok() && actor_health(r.koala) < r.health_before)
+                {
+                    r.health_told = true;
+                    std::cout << t << "his health " << r.health_before << " -> " << actor_health(r.koala) << " during the swat\n" << std::flush;
+                }
                 if (now >= r.watch_until)
                 {
                     r.watching = false;
                     if (!r.came_back)
                     {
                         r.broken = true, r.left = 0;
-                        std::cout << t << "the rock didn't come back (its throw did nothing in flight); his swats are off for this visit\n" << std::flush;
+                        std::cout << t << "the rock didn't come back (his throw brought no rock); his swats are off for this visit\n" << std::flush;
                     }
                 }
             }
