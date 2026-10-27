@@ -348,6 +348,7 @@ void ClientRuntime::update_display(ClientTick &tick)
                 return static_cast<unsigned>(v.isIntegral() ? std::clamp<std::int64_t>(v.asInt64(), least, most) : fallback);
             };
             const unsigned nitros = number("roo_nitros", 2, 0, 4), most = std::max(nitros, number("roo_nitros_most", 3, 0, 4));
+            box_markers->invincible(invincible_test); // (V1.5.1 test: kept after the game's side starts over)
             box_markers->roo_settings(number("roo_health", 0, 0, 9), number("roo_speed", 0, 0, 200), number("roo_pattern", 3, 0, 7), number("roo_attack", 15, 0, 50),
                                       slot["roo_leap"].isBool() ? slot["roo_leap"].asBool() : true, nitros, most, number("roo_nitro_size", 200, 100, 200));
             // his Nitros need his arena's file changed (a copy; the game's own is kept): for a seed that has them, made now in

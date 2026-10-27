@@ -711,6 +711,12 @@ void BoxMarkers::aku_lock(bool on)
     shared_->aku_lock = on ? 1u : 0u;
     unlock();
 }
+void BoxMarkers::invincible(bool on)
+{
+    lock();
+    shared_->invincible = on ? 1u : 0u;
+    unlock();
+}
 void BoxMarkers::aku_sanity(bool on)
 {
     lock();

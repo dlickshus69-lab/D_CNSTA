@@ -81,6 +81,7 @@ public:
     void aku_lock(bool on);
     // Aku Aku Sanity is on in this seed: no free mask after deaths in a row, Aku Aku item or not (V1.3.46)
     void aku_sanity(bool on);
+    void invincible(bool on);
     // Harder bosses: health and speed in percent (100 the game's own), and the rules on bosses that can be hit any time
     void boss_settings(unsigned health, unsigned speed, bool rules, bool bar_grow, bool masks, unsigned slam_ms, unsigned window_ms, unsigned slam_fixed_ms,
                        unsigned window_fixed_ms, unsigned lead_pct);

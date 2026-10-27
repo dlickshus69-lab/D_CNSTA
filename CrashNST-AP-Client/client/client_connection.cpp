@@ -227,7 +227,7 @@ void ClientRuntime::handle_commands()
                 print_console(
                     "/server host:port | /port number | /slot name | /password value\n/connect | /disconnect | /status "
                     "| /quit | /markers on/off/toggle | /boxmarkers bounds/tint/off | /outoflogic on/off | /hubdistance 0..100000 | "
-                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /aku_give (test) | /boss name, /boss_health, /boss_speed, /boss_rules, /boss_slam, /boss_window, /boss_lead, /boss_bar, /bar_try, /roo_files, /roo_nitro test1|test2|test3|off (tests) | "
+                    "/hubdistance_c1 /hubdistance_c2 /hubdistance_c3 0..100000 | /tint_opacity 0..1 | /slow_tilt 0.2..1 | /nitro_volume 0..100 | /skip_filler | /boss name, /boss_health, /boss_speed, /boss_rules, /invincible on/off (tests) | /roo_nitro on/off | "
                     "/crashsanity on/off/toggle\nChat and !commands go to the AP server. Tab completes commands and "
                     "!hint / !hint_location names.\nF1: console | F7: markers/HUD | F10: vanilla controls");
             else if (command == "/server")
@@ -443,15 +443,6 @@ void ClientRuntime::handle_commands()
                     print_console("Nitro Trap countdown volume: " + std::to_string(value) + ".");
                 }
             }
-            else if (command == "/aku_give")
-            {
-                // test (V1.3.20): one Aku Aku mask for Crash now, as the Aku Aku Mask item gives (in a level, once Crash can move)
-                if (box_markers)
-                {
-                    box_markers->request_aku_give();
-                    print_console("Aku Aku: one mask for Crash now (test; each use gives one more, up to three).");
-                }
-            }
             else if (command == "/skip_filler")
             {
                 // every 1-Up, Wumpa Fruit and Aku Aku Mask received so far counts as given, so none of them comes (a seed
@@ -573,97 +564,6 @@ void ClientRuntime::handle_commands()
                     print_console(what + ": " + (test >= 0 ? std::to_string(test) + "% (test)" : std::string("the seed's")) + ". " + command +
                                   " 100 to 200 sets it for testing (" + (health ? "200 is double" : "125 is a quarter faster") + "), " + command + " off goes back.");
             }
-            else if (command == "/boss_slam")
-            {
-                // test (V1.3.57, Eric: try 0.45 s at 200%, then 0.5 if that's too fast): Papu Papu's slam at 200% boss speed, in
-                // seconds after he stands; the speeds between follow it in even steps of his pace; "off" goes back to 0.45
-                double seconds = -1;
-                try
-                {
-                    if (!argument.empty() && argument != "off")
-                        seconds = std::stod(argument);
-                }
-                catch (const std::exception &)
-                {
-                }
-                if (argument == "off")
-                    boss_slam_test = -1;
-                else if (seconds >= 0.25 && seconds <= 0.9)
-                    boss_slam_test = static_cast<int>(seconds * 1000 + 0.5);
-                const double at = (boss_slam_test >= 0 ? boss_slam_test : 450) / 1000.0, game = 0.9;
-                // (V1.3.61: or the seed's own time at any speed, its YAML's boss_slam_time in hundredths of a second)
-                const auto &yaml = session.slot_data()["boss_slam_time"];
-                std::ostringstream out;
-                out << std::fixed << std::setprecision(2);
-                if (boss_slam_test < 0 && yaml.isIntegral() && yaml.asInt64() > 0)
-                    out << "Boss slam: Papu Papu slams " << std::clamp<std::int64_t>(yaml.asInt64(), 25, 90) / 100.0
-                        << " s after he stands, at any boss speed (this seed's boss_slam_time). /boss_slam 0.25 to 0.9 tries a time at 200% boss speed instead (the speeds below follow it).";
-                else
-                    out << "Boss slam: Papu Papu slams " << at << " s after he stands at 200% boss speed" << (boss_slam_test >= 0 ? " (test)" : "") << "; at 125% "
-                        << game / (1 + 0.25 * (game / at - 1)) << " s, 150% " << game / (1 + 0.5 * (game / at - 1)) << " s, 175% " << game / (1 + 0.75 * (game / at - 1))
-                        << " s, 100% " << game << " s (the game's). /boss_slam 0.25 to 0.9 sets the 200% one, /boss_slam off goes back to the seed's (0.45 at 200% unless its YAML sets one).";
-                print_console(out.str());
-            }
-            else if (command == "/boss_window")
-            {
-                // test (V1.3.58, Eric: "we'll start with 5, and if it's too long, we'll drop it down"): with the boss rules on,
-                // how long Papu Papu can be hit once his red ends before he's red again. V1.3.59 (Eric: "the two second is good
-                // for 200% speed ... scale it based on the speed"): the time at 200% boss speed, longer by the same pace at lower
-                // speeds (twice as long at 100%); "off" goes back to the seed's (V1.3.71: 2.2 s at 200% unless its YAML sets boss_hit_window)
-                double seconds = -1;
-                try
-                {
-                    if (!argument.empty() && argument != "off")
-                        seconds = std::stod(argument);
-                }
-                catch (const std::exception &)
-                {
-                }
-                if (argument == "off")
-                    boss_window_test = -1;
-                else if (seconds >= 0.5 && seconds <= 10)
-                    boss_window_test = static_cast<int>(seconds * 1000 + 0.5);
-                const double at = (boss_window_test >= 0 ? boss_window_test : 2200) / 1000.0;
-                // (V1.3.61: or the seed's own time at any speed, its YAML's boss_hit_window in tenths of a second)
-                const auto &yaml = session.slot_data()["boss_hit_window"];
-                std::ostringstream out;
-                out << std::fixed << std::setprecision(1);
-                if (boss_window_test < 0 && yaml.isIntegral() && yaml.asInt64() > 0)
-                    out << "Boss window: with the boss rules on, Papu Papu can be hit for " << std::clamp<std::int64_t>(yaml.asInt64(), 5, 100) / 10.0
-                        << " s once his red ends, at any boss speed (this seed's boss_hit_window); then he's red again until the slam after his next spin. /boss_window 0.5 to 10 tries a time at 200% boss speed instead (the speeds below follow it).";
-                else
-                    out << "Boss window: with the boss rules on, Papu Papu can be hit for " << at << " s once his red ends at 200% boss speed" << (boss_window_test >= 0 ? " (test)" : "")
-                        << "; at 175% " << at * 200 / 175 << " s, 150% " << at * 200 / 150 << " s, 125% " << at * 200 / 125 << " s, 100% " << at * 2
-                        << " s; then he's red again until the slam after his next spin. /boss_window 0.5 to 10 sets the 200% one, /boss_window off goes back to the seed's (2.2 at 200% unless its YAML sets one).";
-                print_console(out.str());
-            }
-            else if (command == "/boss_lead")
-            {
-                // test (V1.3.66, Eric: "his slam is still pretty hard to dodge ... maybe we could turn down the accuracy"): how far
-                // Papu Papu's slam aim leads Crash, from 0 (where he is) to 1 (where he'll be as it lands if he keeps going), up
-                // to 1.2; "off" goes back to 0.55 (V1.3.67, Eric: "the best accuracy is 55%")
-                double share = -1;
-                try
-                {
-                    if (!argument.empty() && argument != "off")
-                        share = std::stod(argument);
-                }
-                catch (const std::exception &)
-                {
-                }
-                if (argument == "off")
-                    boss_lead_test = -1;
-                else if (share >= 0 && share <= 1.2)
-                    boss_lead_test = static_cast<int>(share * 100 + 0.5);
-                // (V1.4: the seed's is its YAML's boss_slam_aim, in percent; 55 for older seeds)
-                const auto &yaml = session.slot_data()["boss_slam_aim"];
-                const int seed = yaml.isIntegral() ? static_cast<int>(std::clamp<std::int64_t>(yaml.asInt64(), 0, 100)) : 55;
-                std::ostringstream out;
-                out << std::fixed << std::setprecision(2) << "Boss lead: Papu Papu's slam aims " << (boss_lead_test >= 0 ? boss_lead_test : seed) / 100.0
-                    << " of the way to where Crash will be as it lands" << (boss_lead_test >= 0 ? " (test)" : yaml.isIntegral() ? " (this seed's boss_slam_aim)" : "")
-                    << ". /boss_lead 0 to 1.2 sets it (0: where he is, 1: where he'll be if he keeps going), /boss_lead off goes back to the seed's (" << seed / 100.0 << ").";
-                print_console(out.str());
-            }
             else if (command == "/boss_rules")
             {
                 // test (Harder bosses): Papu Papu glows red while he can't be hit; landing on him then costs a life
@@ -676,52 +576,19 @@ void ClientRuntime::handle_commands()
                               "landing on him while he's red is a hit for Crash (the game's own: Aku Aku takes it, or a life without him) "
                               "and doesn't count. /boss_rules on, off, or seed.");
             }
-            else if (command == "/bar_try")
+            else if (command == "/invincible")
             {
-                // test (V1.3.25): the blue's stretch for a bigger bar off to compare (none), or the whole fill stretched
-                // sideways to look at (scale; by the bar's growth unless a factor is given)
-                std::istringstream in(argument);
-                std::string what;
-                float factor = 0;
-                in >> what >> factor;
-                const unsigned target = what == "none" ? 1 : what == "scale" ? 3 : 0;
-                if (!(factor > 0.1f && factor < 10))
-                    factor = 0;
+                // (V1.5.1 test, Eric: "We should add an invincibility command just in case I need to test something") Crash
+                // takes no hits: the game's own "just hit, blinking" switch (DamagedInvulnerable) held on. A fall into a pit,
+                // water or lava is a different kind of death and still kills; not saved, off at the next start
+                if (argument == "on" || argument == "off")
+                    invincible_test = argument == "on";
                 if (box_markers)
-                    box_markers->bar_try(target, factor);
-                print_console(target == 1   ? std::string("Bar try: none (the blue isn't stretched, to compare; it shows from the next hit or death). /bar_try off puts the stretch back.")
-                              : target      ? "Bar try: " + what + " (the whole fill stretched sideways, from the next hit or death; kept until /bar_try off)."
-                                            : std::string("Bar try: off (the blue is stretched to the bar's length). Tests: /bar_try none, /bar_try scale."));
-            }
-            else if (command == "/roo_files")
-            {
-                // research (V1.4.3, Testing build): the files that may bring the real Nitro into Ripper Roo's arena, see
-                // nitro_research_export; in the background (it reads three of the game's archives)
-                if (research_running.exchange(true))
-                    print_console("Roo files: already gathering them.");
-                else
-                {
-                    const auto folder = ingame::game_archives().parent_path() / L"CrashNSTAP" / L"research";
-                    print_console("Roo files: gathering them in the background (a minute or so); the game keeps going.");
-                    std::thread([this, folder]
-                                {
-                                    std::vector<std::string> lines;
-                                    try
-                                    {
-                                        lines = ingame::nitro_research_export(folder);
-                                    }
-                                    catch (const std::exception &e)
-                                    {
-                                        lines = {std::string("Roo files: failed (") + e.what() + ")"};
-                                    }
-                                    {
-                                        std::lock_guard lock(research_mutex);
-                                        research_lines.insert(research_lines.end(), lines.begin(), lines.end());
-                                    }
-                                    research_running = false;
-                                })
-                        .detach();
-                }
+                    box_markers->invincible(invincible_test);
+                print_console(std::string("Invincible: ") + (invincible_test ? "on (test): Crash takes no hits from enemies, bosses, Nitros or explosions. A fall into "
+                                                                              "a pit, water or lava still kills."
+                                                                            : "off.") +
+                              " /invincible on or off.");
             }
             else if (command == "/roo_nitro")
             {
@@ -730,20 +597,21 @@ void ClientRuntime::handle_commands()
                 // loader's plan to swap it in at the next game start; off: his own put back at the next start. (V1.4.10, Eric's
                 // V1.4.9 run: "boss doesnt load. it just stays as a black screen after loading": three tests to find why, see
                 // roo_nitro_archive)
-                const int mode = argument == "test1" ? 1 : argument == "test2" ? 2 : argument == "test3" || argument == "on" ? 3 : 0;
+                // (V1.5.1: the tests are done; on is the one that works, and a seed with Nitros does it by itself)
+                const int mode = argument == "on" ? 3 : 0;
                 if (!mode && argument != "off")
                 {
                     const auto status = ingame::level_patch_status();
                     print_console((status.empty() ? std::string("Roo Nitro: not on this session.") : status) +
-                                  " Tests, each for the next game start: /roo_nitro test1 (his archive with the beach's files, nothing else changed), test2 (their crate "
-                                  "layer loaded as a plain file), test3 (as a map layer, so its spawners are made); /roo_nitro off puts his own back.");
+                                  " A seed with Ripper Roo's Nitros sets his arena up by itself. /roo_nitro off puts the game's own arena file back at the next "
+                                  "game start; /roo_nitro on sets it up again.");
                 }
                 else if (research_running.exchange(true))
                     print_console("Roo Nitro: still busy with the last one.");
                 else
                 {
                     if (mode)
-                        print_console("Roo Nitro: making test " + std::to_string(mode) + "'s copy of his arena's archive in the background (a minute or so); the game keeps going.");
+                        print_console("Roo Nitro: making the changed copy of his arena's file in the background (a minute or so); the game keeps going.");
                     std::thread([this, mode]
                                 {
                                     std::vector<std::string> lines;
@@ -763,15 +631,6 @@ void ClientRuntime::handle_commands()
                                 })
                         .detach();
                 }
-            }
-            else if (command == "/boss_bar")
-            {
-                // test (V1.3.21): with more health, grow the bar's notches (the fill doesn't grow with them yet) or keep the game's
-                if (argument == "grow" || argument == "keep")
-                    boss_bar_grow = argument == "grow";
-                print_console(std::string("Boss bar: ") + (boss_bar_grow ? "grow" : "keep") +
-                              " (test). grow (the default): more notches (V1.3.25 stretches the blue to the bar's length: being tested). keep: "
-                              "the game's notches, full at the start, each hit takes part of one (works). From the next fight. /boss_bar grow or keep.");
             }
             else if (command == "/clear")
                 feed_history.clear();

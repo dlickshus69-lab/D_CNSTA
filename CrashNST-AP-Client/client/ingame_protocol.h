@@ -30,7 +30,7 @@ namespace ingame
                 return i;
         return 5;
     }
-    constexpr unsigned protocol = 34, max_boxes = 8192, max_levels = 112;
+    constexpr unsigned protocol = 35, max_boxes = 8192, max_levels = 112;
     constexpr unsigned default_hub_distance = 250, max_hub_distance = 100000;
     constexpr std::array<unsigned, 3> default_hub_distances{default_hub_distance, default_hub_distance, default_hub_distance};
     constexpr float default_tint_opacity = 0.75f;
@@ -208,6 +208,8 @@ namespace ingame
         // (V1.3.46 / Stable V1.3.4) set by the client: Aku Aku Sanity is on in this seed, so the free mask the game gives
         // after a few deaths in a row stays off, Aku Aku item or not
         unsigned aku_sanity = 0;
+        // (V1.5.1 test, /invincible) set by the client: Crash takes no hits (game_runtime.cpp, hold_invulnerable)
+        unsigned invincible = 0;
         // set by the game thread: bumped when a level ends with a DeathLink still waiting because Crash was on a ride (the
         // client then keeps it for the next level played on foot)
         unsigned death_carry = 0;

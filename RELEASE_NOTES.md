@@ -4,6 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Version 1.5:** Ripper Roo is finished and moves into the Stable build (Stable V1.5), with his YAML options. Testing builds now count up from V1.5.
-- Your test of V1.4.24 confirmed the options reach the game: 7 hits, 3 Nitros at the start, 170% pace, Nitros drawn at 150%.
-- Next in Testing: Koala Kong.
+- **Koala Kong research:** in his fight, everything he throws and drops and his mine carts go to the log as they move, along with his health as it changes. This is so I can build the rally where he swats your rock back.
+- **`/invincible on` / `off`** (test): Crash takes no hits from enemies, bosses, Nitros or explosions. Falling into a pit, water or lava still kills.
+- **Test commands cleaned up:** `/boss_slam`, `/boss_window`, `/boss_lead`, `/boss_bar`, `/bar_try`, `/roo_files` and `/aku_give` are gone. `/roo_nitro` is now just `on` or `off`.
+- To try: `/invincible on`, then `/boss koala`. Spin rocks back at him (F10 gives you Spin), land a few hits, let carts and TNT go by, and send the log.

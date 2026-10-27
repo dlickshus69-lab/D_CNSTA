@@ -683,6 +683,42 @@ namespace ingame
                 }
             return -1;
         }
+        // (V1.5.1 test, /invincible) on: Crash takes no hits. Crash_DamageManager's DamagedInvulnerable game variable (the
+        // game's own "just hit: blinking, no hits" switch) is held on, by its setter and each frame; a fall into a pit, water
+        // or lava is a death of its own and still kills
+        std::atomic_bool invincible_on{false};
+        Address invulnerable_variable()
+        {
+            const auto count = std::min<unsigned>(death_watch_count.load(), 32);
+            for (unsigned i = 0; i < count; ++i)
+                if (std::strcmp(death_watch[i].name, "DamagedInvulnerable") == 0)
+                    return death_watch[i].variable.load();
+            return 0;
+        }
+        void hold_invulnerable(bool on)
+        {
+            static bool was = false;
+            static Address told_for = 0;
+            invincible_on = on;
+            const auto variable = invulnerable_variable();
+            const auto type = variable ? value<Address>(variable) : 0;
+            const bool usable = type && type >= base() && type < base() + 0x2000000 && code_matches(0x4e5c60, std::array<unsigned char, 5>{0xe9, 0xab, 0xe9, 0xff, 0xff});
+            const auto getter = reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60);
+            const auto setter = reinterpret_cast<void (*)(Address, unsigned char)>(death_hook.original ? death_hook.original : base() + 0x502000);
+            if (on && usable && !getter(variable))
+            {
+                setter(variable, 1);
+                if (told_for != variable)
+                    told_for = variable, std::cout << "Invincible: on (Crash's DamagedInvulnerable held on" << (getter(variable) ? ")" : ", but the game refused it)") << "\n" << std::flush;
+            }
+            else if (!on && was && usable && getter(variable))
+            {
+                setter(variable, 0);
+                told_for = 0;
+                std::cout << "Invincible: off\n" << std::flush;
+            }
+            was = on;
+        }
         void player_died_set(Address variable, unsigned char requested)
         {
             const bool in_level = !level_key(string(value<Address>(value<Address>(base() + 0x1a64690) + 184))).empty();
@@ -690,6 +726,9 @@ namespace ingame
             const auto getter = reinterpret_cast<unsigned char (*)(Address)>(base() + 0x4e5c60);
             const bool watched = variable && in_level;
             const bool before = watched && getter(variable);
+            // (V1.5.1 test, /invincible: Crash's "just hit, blinking" switch stays on)
+            if (!requested && invincible_on.load() && variable && variable == invulnerable_variable())
+                requested = 1;
             reinterpret_cast<void (*)(Address, unsigned char)>(death_hook.original)(variable, requested);
             if (watched)
                 if (const bool after = getter(variable) != 0; after != before)
@@ -1317,6 +1356,9 @@ namespace ingame
         // fight (each kind a few times), to find the one that hurts Crash the way a boss's attack does, and the one that
         // tells a boss he was hit
         std::array<std::atomic<Address>, 4> boss_event_targets{};
+        // (V1.5.1 research, Testing: Koala Kong) what he throws and drops, and his mine carts: their messages go to the log
+        // like the boss's own (see koala_research_update)
+        std::array<std::atomic<Address>, 24> koala_event_targets{};
         // Papu Papu's rule (V1.3.11): while he's red, the messages his scripts send when Crash lands on him (the hit's:
         // his deflect script's ppfqleko and his health script's alo0v4l5 start it, V1.3.5's log) are kept for a tenth of
         // a second, so the hit doesn't happen: no hit reaction, no bounce for Crash
@@ -1853,10 +1895,12 @@ namespace ingame
                     }
                 if (blocked)
                     return 0;
-                if (const auto since = boss_event_since.load(); since && target && boss_event_lines.load() < 900)
+                if (const auto since = boss_event_since.load(); since && target && boss_event_lines.load() < 1600)
                 {
                     bool boss = false;
                     for (const auto &b : boss_event_targets)
+                        boss = boss || b.load() == target;
+                    for (const auto &b : koala_event_targets)
                         boss = boss || b.load() == target;
                     if (boss || target == crash)
                     {
@@ -13327,6 +13371,121 @@ namespace ingame
             // V1.4.2 run; his stage's timer is looked at as he lands instead, see roo_research_update)
             std::cout << std::flush;
         }
+#ifndef CRASH_NST_STABLE
+        // (V1.5.1 research, Testing: Koala Kong, Eric: "like a pinball kind of thing. Like, maybe like 2 or 3 times he'll like
+        // swap back and you have to spin it, spin the rock again"; his first run, the boss research: he throws
+        // ProjectileData_Rock01 (BossKoalaKong_Projectile_NormalThrow) and BossRock (B103_KoalaKong_BossRock), FallingTnt
+        // (BossKoalaKong_TntHandler) drops, MovingMineCart (B103_KoalaKong_MovingMineCart) rolls): each of those as it appears,
+        // where it goes (every 0.1 s while it moves, 40 places at most each), where it's gone, with Crash and Koala Kong's
+        // places; Koala Kong's health as it changes; and their messages, like his (koala_event_targets)
+        struct KoalaResearch
+        {
+            struct Thing
+            {
+                std::string name;
+                std::array<float, 3> at{}, logged{};
+                std::uint64_t since = 0, logged_at = 0;
+                unsigned places = 0;
+            };
+            std::uint64_t entered = 0, next = 0;
+            Address koala = 0;
+            int health = -1;
+            unsigned lines = 0, slot = 0;
+            std::map<Address, Thing> things;
+        } koala_research;
+        void koala_research_update(const std::string &boss, std::uint64_t now)
+        {
+            auto &k = koala_research;
+            if (boss != "B103")
+            {
+                if (k.entered)
+                {
+                    k = {};
+                    for (auto &t : koala_event_targets)
+                        t = 0;
+                }
+                return;
+            }
+            if (!k.entered)
+                k.entered = now, std::cout << "Koala research: his throws, drops and carts go to the log as they move\n" << std::flush;
+            if (now < k.next || k.lines > 2500)
+                return;
+            k.next = now + 100;
+            std::array<float, 3> crash{}, koala{};
+            const bool crash_known = player() && read(player() + 32, crash);
+            const auto where = [](const std::array<float, 3> &v) {
+                return "(" + std::to_string(std::lround(v[0])) + ", " + std::to_string(std::lround(v[1])) + ", " + std::to_string(std::lround(v[2])) + ")";
+            };
+            const auto t = [&] { return "Koala research +" + seconds(now - k.entered) + ": "; };
+            std::set<Address> seen;
+            for (const auto owner : event_owners())
+            {
+                const auto name = string(value<Address>(owner + 128));
+                if (name.rfind("BossKoalaKong_Character", 0) == 0)
+                {
+                    k.koala = owner;
+                    continue;
+                }
+                if (name.find("Rock") == std::string::npos && name.find("Tnt") == std::string::npos && name.find("TNT") == std::string::npos &&
+                    name.find("MineCart") == std::string::npos && name.find("rojectile") == std::string::npos)
+                    continue;
+                if (name.find("entityData") != std::string::npos)
+                    continue;
+                std::array<float, 3> at{};
+                if (!read(owner + 32, at))
+                    continue;
+                seen.insert(owner);
+                auto it = k.things.find(owner);
+                if (it == k.things.end())
+                {
+                    KoalaResearch::Thing thing;
+                    thing.name = name, thing.at = at, thing.logged = at, thing.since = now, thing.logged_at = now;
+                    k.things.emplace(owner, thing);
+                    koala_event_targets[k.slot++ % koala_event_targets.size()] = owner;
+                    if (k.koala)
+                        read(k.koala + 32, koala);
+                    ++k.lines, std::cout << t() << name << " appears at " << where(at) << (crash_known ? ", Crash at " + where(crash) : std::string())
+                                         << (k.koala ? ", Koala Kong at " + where(koala) : std::string()) << "\n" << std::flush;
+                    continue;
+                }
+                auto &thing = it->second;
+                thing.at = at;
+                const float moved = std::hypot(at[0] - thing.logged[0], at[1] - thing.logged[1], at[2] - thing.logged[2]);
+                if (moved > 5 && thing.places < 40 && now - thing.logged_at >= 100)
+                {
+                    ++thing.places, ++k.lines;
+                    std::cout << t() << thing.name << " at " << where(at) << " (" << std::lround(moved / (static_cast<float>(now - thing.logged_at) / 1000.0f))
+                              << " a second)" << (crash_known ? ", Crash at " + where(crash) : std::string()) << "\n" << std::flush;
+                    thing.logged = at, thing.logged_at = now;
+                }
+            }
+            for (auto it = k.things.begin(); it != k.things.end();)
+                if (!seen.count(it->first))
+                {
+                    ++k.lines, std::cout << t() << it->second.name << " gone at " << where(it->second.at) << " after " << seconds(now - it->second.since) << "\n" << std::flush;
+                    it = k.things.erase(it);
+                }
+                else
+                    ++it;
+            // his health (his actor's +0xf8: 100 a hit, the boss research's find)
+            if (k.koala && event_owner(k.koala))
+                if (const int health = value<int>(k.koala + 0xf8); health != k.health)
+                {
+                    if (k.health >= 0)
+                    {
+                        std::string near;
+                        float best = 1e9f;
+                        for (const auto &[a, thing] : k.things)
+                            if (read(k.koala + 32, koala); std::hypot(thing.at[0] - koala[0], thing.at[1] - koala[1]) < best)
+                                best = std::hypot(thing.at[0] - koala[0], thing.at[1] - koala[1]), near = thing.name;
+                        ++k.lines, std::cout << t() << "Koala Kong's health " << k.health << " -> " << health
+                                             << (near.empty() ? std::string() : " (nearest to him: " + near + ", " + std::to_string(std::lround(best)) + " away)")
+                                             << (crash_known ? ", Crash at " + where(crash) : std::string()) << "\n" << std::flush;
+                    }
+                    k.health = health;
+                }
+        }
+#endif
         void roo_research_update(const Shared &state, const std::string &boss, std::uint64_t now)
         {
             auto &r = roo_research;
@@ -13536,6 +13695,11 @@ namespace ingame
                 t = {};
                 t.level = boss, t.entered = now;
                 roo_research = {}; // (V1.4.1: each visit from scratch)
+#ifndef CRASH_NST_STABLE
+                koala_research = {}; // (V1.5.1)
+                for (auto &k : koala_event_targets)
+                    k = 0;
+#endif
                 {
                     std::lock_guard lock(roo_outline_mutex);
                     roo_outline_spots.clear();
@@ -13581,6 +13745,9 @@ namespace ingame
             if (boss == "B101")
                 papu_rule(t, state, now);
             roo_research_update(state, boss, now); // (V1.4.1)
+#ifndef CRASH_NST_STABLE
+            koala_research_update(boss, now); // (V1.5.1)
+#endif
             stretch_bar_fill(t, state, now);
             if (now < t.next)
                 return;
@@ -17454,6 +17621,7 @@ namespace ingame
             state.heartbeat_game = now;
         }
         vanilla_movement = state.vanilla_controls != 0;
+        hold_invulnerable(state.invincible != 0); // (V1.5.1 test, /invincible)
         move_shuffle = state.move_shuffle != 0;
         owned_moves = state.owned_moves;
         move_lock_until = state.traps_paused ? 0 : state.move_lock_until;
