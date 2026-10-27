@@ -1282,6 +1282,17 @@ namespace ingame
         std::array<std::atomic<Address>, 4> roo_nitro_entity{};
         std::set<std::string> roo_nitro_events_seen;
         std::atomic<unsigned> roo_nitro_kept{0};
+        // (V1.4.17, Testing) in Ripper Roo's arena with /roo_nitro's copy in: N. Sanity Beach's crates' own level scripts
+        // get nothing (see event_sent); which scripts those are, by their class, as found; what they'd have got, once each
+        // (whether /roo_nitro's copy is in, and whether the level loaded is his: checked by event_sent itself every 100 ms
+        // from the game's level path, so a game over's reload, with no frames of the client's, is covered, and another
+        // level's crates never are)
+        std::atomic_bool roo_beach_patch{false}, roo_zone_in{false};
+        std::atomic<std::uint64_t> roo_zone_at{0};
+        std::mutex beach_meta_mutex;
+        std::unordered_map<Address, std::pair<Address, bool>> beach_meta_block; // (by graph: its name's place, and whether kept)
+        std::set<std::string> beach_blocked_seen;
+        std::atomic<unsigned> beach_blocked{0};
         std::array<std::atomic<std::uint64_t>, 4> trap_event_since{};
         // its common_Crate_Explode script sent something: it went off (the crate itself stays, so this is how to tell)
         std::array<std::atomic_bool, 4> trap_event_exploded{};
@@ -1701,6 +1712,62 @@ namespace ingame
         Address event_sent(Address event, Address context)
         {
             const auto crash = event_crash.load();
+#ifndef CRASH_NST_STABLE
+            // (V1.4.17, Eric's V1.4.16 run: "the game crashed again when I got a game over and retried"; the log: after the
+            // game over his fight started over as meant and no Nitro was made, then the game crashed in a script (the same
+            // place as V1.4.14 and V1.4.15, the stack's last frame in the game's script runner) as the fight's intro started.
+            // N. Sanity Beach's crates (in his arena with /roo_nitro's copy) have the beach's own level scripts: its help
+            // after deaths (DDA_Section, which makes crates Aku Aku crates), checkpoints, the time trial, the box count, the
+            // stack check and the camera fade, which look for that level's things (its checkpoint, camera, box counter), and a
+            // game over is a start over after deaths. In his arena with the copy in, nothing reaches those scripts (by their
+            // class); the crates' spawners and the crates themselves still get theirs. Each kind kept from them goes to the
+            // log once)
+            if (roo_beach_patch.load())
+                if (const auto t = GetTickCount64(); t - roo_zone_at.load() >= 100)
+                {
+                    auto zone = string(value<Address>(value<Address>(base() + 0x1a64690) + 184), 120);
+                    std::transform(zone.begin(), zone.end(), zone.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    roo_zone_in = zone.find("bosses/b102") != std::string::npos, roo_zone_at = t;
+                }
+            if (roo_beach_patch.load() && roo_zone_in.load() && event && context)
+                if (const auto component = value<Address>(context))
+                {
+                    // (a game over's reload can put another graph where one was: one known by its place and its name's both)
+                    const auto meta = value<Address>(component + 56), name_at = meta ? value<Address>(meta + 16) : 0;
+                    bool block = false, known = false;
+                    {
+                        std::lock_guard lock(beach_meta_mutex);
+                        if (const auto it = beach_meta_block.find(meta); it != beach_meta_block.end() && it->second.first == name_at)
+                            known = true, block = it->second.second;
+                    }
+                    if (!known)
+                    {
+                        static const std::set<std::string> level_scripts{"Scripts.Graph.DDA_Section", "Scripts.Graph.common_Crate_Checkpoint", "Scripts.Graph.common_Crate_TimeTrial",
+                                                                         "Scripts.Graph.common_Crate_StackChecker", "Scripts.Graph.common_Crate_LevelCount",
+                                                                         "Scripts.Graph.common_CameraDistanceFadeEntity"};
+                        block = name_at && level_scripts.count(string(name_at, 120)) != 0;
+                        std::lock_guard lock(beach_meta_mutex);
+                        if (beach_meta_block.size() < 4096 || beach_meta_block.count(meta))
+                            beach_meta_block[meta] = {name_at, block};
+                    }
+                    if (block)
+                    {
+                        ++beach_blocked;
+                        auto graph = string(value<Address>(meta + 16), 120);
+                        if (graph.rfind("Scripts.Graph.", 0) == 0)
+                            graph.erase(0, 14);
+                        const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                        bool fresh = false;
+                        {
+                            std::lock_guard lock(event_mutex);
+                            fresh = beach_blocked_seen.size() < 40 && beach_blocked_seen.insert(graph + "|" + name).second;
+                        }
+                        if (fresh)
+                            std::cout << "Roo Nitro: a beach crate's " << graph << " kept from " << name << "\n" << std::flush;
+                        return 0;
+                    }
+                }
+#endif
 #ifndef CRASH_NST_STABLE
             if (const auto ride = ride_research_actor.load(); ride && event && context && ride_event_lines.load() < 160)
                 if (const auto component = value<Address>(context); component && value<Address>(component + 24) == ride)
@@ -11800,6 +11867,10 @@ namespace ingame
             std::vector<std::uint64_t> nitro_made_at, nitro_due;
             std::set<Address> nitro_gone;
             bool nitro_plan_new = false, nitro_plan_after_hit = false, nitro_warm = false;
+            // (V1.4.17) his next hop's platform, and which Nitros are an outline while he's at theirs
+            int next_target = -1;
+            std::vector<bool> nitro_hidden;
+            unsigned hide_lines = 0;
             std::set<Address> nitro_moved;
             int nitro_making = -1;
             std::uint64_t nitro_making_since = 0;
@@ -11988,7 +12059,11 @@ namespace ingame
                     r.game_floats.clear(), r.pace_set.clear(), r.pace_wild.clear();
                     r.nitro_platforms.clear(), r.nitro_plan.clear(), r.nitro_crates.clear(), r.nitro_made_at.clear(), r.nitro_due.clear();
                     r.nitro_plan_new = false, r.nitro_making = -1, r.nitro_warm = false, r.nitro_moved.clear(), r.nitro_gone.clear(), r.beach_moved.clear();
-                    r.nitro_whys.clear();
+                    r.nitro_whys.clear(), r.nitro_hidden.clear(), r.next_target = -1;
+                    {
+                        std::lock_guard lock(beach_meta_mutex);
+                        beach_meta_block.clear();
+                    }
                     for (auto &e : roo_nitro_entity)
                         e = 0;
                     {
@@ -12408,7 +12483,9 @@ namespace ingame
                     const int next = fight ? ((counter % n) + n) % n : 0;
                     const int from = fight ? roo_on : platform_near({377, 313, 76}); // (after a death he starts on the middle right)
                     r.fight_hits = fight ? r.fight_hits + 1 : 0;
-                    const unsigned length = std::min(3u + r.fight_hits, 12u);
+                    // (V1.4.17, Eric's V1.4.16 run: "make sure he doesn't never like jump in the same spot for his pattern": at most
+                    // 7, each platform once)
+                    const unsigned length = std::min(3u + r.fight_hits, 7u);
                     unsigned start = 0;
                     // (V1.4.14, Eric's V1.4.13 run, the real Nitro there at last: "I kind of wish where they spawn the second
                     // battle starts ... And then whenever you hit him, the nitro bombs will spawn at a different place, but it
@@ -12438,8 +12515,44 @@ namespace ingame
                         }
                         std::shuffle(can.begin(), can.end(), rng), std::shuffle(again.begin(), again.end(), rng);
                         can.insert(can.end(), again.begin(), again.end());
-                        const std::size_t want = std::min<std::size_t>(2 + r.fight_hits / 2, 4);
-                        nitros.assign(can.begin(), can.begin() + static_cast<std::ptrdiff_t>(std::min(want, can.size())));
+                        // (V1.4.17, Eric's V1.4.16 run: "let's not make the Nitro box impossible. Like when you do add more,
+                        // let's not make it impossible": 2, 3 from the third hit, never more; the platforms left free all
+                        // reachable from each other by a straight jump (front to back or side to side), Crash's among them)
+                        const std::size_t want = std::min<std::size_t>(2 + (r.fight_hits >= 3 ? 1 : 0), 3);
+                        const auto straight = [&](int a, int b) {
+                            const auto [ca, ra] = cell(a);
+                            const auto [cb, rb] = cell(b);
+                            return std::abs(ca - cb) + std::abs(ra - rb) == 1;
+                        };
+                        const auto fair = [&](const std::vector<int> &picked) {
+                            std::vector<int> free;
+                            for (std::size_t q = 0; q < r.platforms.size(); ++q)
+                                if (std::find(picked.begin(), picked.end(), static_cast<int>(q)) == picked.end())
+                                    free.push_back(static_cast<int>(q));
+                            if (free.empty() || (crash_on >= 0 && std::find(free.begin(), free.end(), crash_on) == free.end()))
+                                return false;
+                            std::vector<int> reached{free.front()};
+                            for (std::size_t k = 0; k < reached.size(); ++k)
+                                for (const int x : free)
+                                    if (std::find(reached.begin(), reached.end(), x) == reached.end() && straight(reached[k], x))
+                                        reached.push_back(x);
+                            return reached.size() == free.size();
+                        };
+                        for (std::size_t n = std::min(want, can.size()); n > 0 && nitros.empty(); --n)
+                            for (unsigned tries = 0; tries < 200 && nitros.empty(); ++tries)
+                            {
+                                std::vector<int> picked;
+                                if (tries == 0)
+                                    picked.assign(can.begin(), can.begin() + static_cast<std::ptrdiff_t>(n));
+                                else
+                                {
+                                    auto shuffled = can;
+                                    std::shuffle(shuffled.begin(), shuffled.end(), rng);
+                                    picked.assign(shuffled.begin(), shuffled.begin() + static_cast<std::ptrdiff_t>(n));
+                                }
+                                if (fair(picked))
+                                    nitros = picked;
+                            }
                         r.nitro_plan = nitros, r.nitro_plan_new = true, r.nitro_plan_after_hit = fight;
                     }
                     bool set = false, fourth = false;
@@ -12454,6 +12567,7 @@ namespace ingame
                         if (set)
                         {
                             commit(values);
+                            r.next_target = pattern[start];
                             r.pattern = pattern, r.pattern_stage = next, r.entry_detour = {};
                             r.entry_pos = {static_cast<int>(start), static_cast<int>((start + 1) % length), static_cast<int>((start + 2) % length),
                                            fourth ? static_cast<int>((start + 3) % length) : -1};
@@ -12501,6 +12615,7 @@ namespace ingame
                     {
                         const auto a = static_cast<unsigned>(i + 1) % 4, b = static_cast<unsigned>(i + 2) % 4, c = static_cast<unsigned>(i + 3) % 4;
                         const int next_on = slot_platform(stage_slot(on_stage, a));
+                        r.next_target = next_on;
                         // where the next one is in the pattern (found again if it isn't what's there)
                         int t1 = r.entry_pos[a];
                         if (t1 < 0 || t1 >= length || (!r.entry_detour[a] && r.pattern[static_cast<std::size_t>(t1)] != next_on))
@@ -12642,7 +12757,11 @@ namespace ingame
                         else
                             set_entity_position(e, {at[0], at[1], -6000.0f}), r.nitro_gone.insert(e);
                     }
+                    for (std::size_t j = 0; j < crates.size(); ++j)
+                        if (crates[j])
+                            set_entity_position(crates[j], nitro_spot(r.nitro_plan[j]));
                     r.nitro_platforms = r.nitro_plan, r.nitro_crates = crates, r.nitro_due = due, r.nitro_made_at = made;
+                    r.nitro_hidden.assign(crates.size(), false);
                     std::string names;
                     for (const int q : r.nitro_platforms)
                         names += (names.empty() ? "" : " and ") + platform_name(q);
@@ -12668,8 +12787,32 @@ namespace ingame
                                                        << (crash_on >= 0 ? ", Crash " + std::to_string(std::lround(std::hypot(crash[0] - spot[0], crash[1] - spot[1]))) : std::string())
                                                        << "; his health " << (health_getter_ok() ? std::to_string(actor_health(r.roo) / 100) + " hits" : std::string("?")) << ")\n" << std::flush;
                         r.nitro_crates[k] = 0, r.nitro_due[k] = now + 3000;
+                        if (k < r.nitro_hidden.size())
+                            r.nitro_hidden[k] = false;
                         continue;
                     }
+                    // (V1.4.17, Eric's V1.4.16 run: "when he's on the outline of the Nitro, or on a Nitro, I think it should
+                    // just turn into an outline. But the second he leaves that outline Nitro box, it goes immediately back into
+                    // a Nitro"; the log: a Nitro is solid to him: his hop onto one's platform took 1.5 s and ended back where
+                    // he started, then he hopped in place): while his next hop is to its platform, he's on it, or he's over it,
+                    // the Nitro is moved far below and its outline drawn instead; back the moment he's off it
+                    // (and one hidden stays an outline while Crash is on its platform: never back on top of him)
+                    const int q = r.nitro_platforms[k];
+                    const bool over = std::hypot(roo_at[0] - spot[0], roo_at[1] - spot[1]) < 170;
+                    const bool hidden = k < r.nitro_hidden.size() && r.nitro_hidden[k];
+                    const bool away = q == r.next_target || q == roo_on || over || (hidden && q == crash_on);
+                    if (away != hidden)
+                    {
+                        if (r.nitro_hidden.size() < r.nitro_crates.size())
+                            r.nitro_hidden.resize(r.nitro_crates.size());
+                        r.nitro_hidden[k] = away;
+                        set_entity_position(e, away ? std::array<float, 3>{spot[0], spot[1], -6000.0f} : spot);
+                        if (r.nitro_lines < 80 && r.hide_lines++ < 12)
+                            ++r.nitro_lines, std::cout << "Roo Nitro: the one on " << platform_name(q) << (away ? " an outline while he comes to it" : " back now he's off it") << "\n" << std::flush;
+                        continue;
+                    }
+                    if (hidden)
+                        continue;
                     // moved by the game (a borrowed spawner's crate can go "home" to it): back on its platform
                     if (std::hypot(at[0] - spot[0], at[1] - spot[1]) > 20)
                     {
@@ -12706,7 +12849,7 @@ namespace ingame
                 {
                     std::vector<std::array<float, 3>> spots;
                     for (std::size_t k = 0; k < r.nitro_crates.size(); ++k)
-                        if (!r.nitro_crates[k])
+                        if (!r.nitro_crates[k] || (k < r.nitro_hidden.size() && r.nitro_hidden[k]))
                             spots.push_back(nitro_spot(r.nitro_platforms[k]));
                     std::lock_guard lock(roo_outline_mutex);
                     roo_outline_spots = std::move(spots);
@@ -12787,6 +12930,9 @@ namespace ingame
         void roo_research_update(const Shared &state, const std::string &boss, std::uint64_t now)
         {
             auto &r = roo_research;
+            // (V1.4.17: the beach crates' level scripts get nothing in his arena with the copy in, see event_sent)
+            if (boss == "B102" && !roo_beach_patch.load() && ingame::level_patch_in_place())
+                roo_beach_patch = true;
             if (boss != "B102")
             {
                 if (r.entered)
@@ -12999,6 +13145,13 @@ namespace ingame
                 }
                 for (auto &e : roo_nitro_entity)
                     e = 0;
+                // (V1.4.17: the beach crates' guard only in his arena: never in another level, where those scripts are a
+                // level's own crates', its checkpoints and box count)
+                roo_zone_in = false, roo_zone_at = 0;
+                {
+                    std::lock_guard lock(beach_meta_mutex);
+                    beach_meta_block.clear();
+                }
                 // (V1.3.28) Papu Papu's stomps from here on only
                 papu_entity = 0, papu_bounce_node = 0, papu_bounce_component = 0, papu_bounce_message = 0, papu_beaten_blocks = 0;
                 probe_count_at = 0, probe_timer_at = 0, probe_state_at = 0, probe_damage_at = 0, probe_lines = 0, other_probe_lines = 0;

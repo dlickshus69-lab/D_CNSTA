@@ -4,8 +4,8 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Game over crash fixed (I think):** after a game over the client could make a Nitro from the old fight's leftovers. It now takes the Nitro straight from the current fight, which also makes them appear sooner.
-- **Roo goes through the Nitros:** his patterns use every platform again, and a Nitro he lands on doesn't go off. Only you touching one does.
-- **More Nitros as you hit him:** 2 to start, 3 after your 2nd hit, 4 after your 4th. At least 3 platforms always stay clear.
-- **Roo is a bit faster at high Boss Speed:** 1.5x at 200% (was 1.35x).
-- To try: test 3 still on, `/boss ripper1` with harder bosses on, and get a game over once. Send the log and a clip.
+- **Nitros turn into outlines for Roo:** when he's heading to a Nitro's platform or standing on it, the Nitro becomes an outline. It comes back as soon as he's off it, but not while you're standing there.
+- **Game over crash, second try:** the beach crates' own level scripts (checkpoint, Aku Aku help, box count) are now kept quiet in Roo's arena. Those scripts are the new suspect.
+- **Nitros never impossible:** 2 to start, 3 after your 3rd hit, never more. The free platforms always connect by straight jumps, including the one you're on.
+- **No repeat platforms in his pattern:** it grows to 7 at most, each platform once, so he never hops in place.
+- To try: test 3 still on, `/boss ripper1` with harder bosses on, and get a game over once. If it still crashes, run `/roo_nitro off`, restart the game and do one game over without the Nitros. Send the logs.
