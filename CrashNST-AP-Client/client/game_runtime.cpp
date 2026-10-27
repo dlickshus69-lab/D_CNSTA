@@ -1380,6 +1380,10 @@ namespace ingame
         // (V1.5.7) the rock's landing as the game sends it (5da8f86k after his throw), and its z6g8ytyk (V1.5.6's log: about
         // 2.5 s after a landing that wasn't spun: it goes, sinking)
         std::atomic_uint koala_lands{0}, koala_sinks{0};
+        // (V1.5.9, Eric's V1.5.8 run: twice the rock got z6g8ytyk 0.9 s after Crash spun it (a spin as it landed: no 5da8f86k
+        // first), and the rally's last flight then hit him for nothing) the rock a rally holds: its z6g8ytyk is kept from it
+        std::atomic<Address> koala_hold_rock{0};
+        std::atomic_uint koala_sinks_kept{0};
         std::mutex koala_block_mutex;
         std::vector<std::string> koala_blocked_names;
         thread_local bool koala_own_send = false;
@@ -1935,7 +1939,14 @@ namespace ingame
                         else if (name.find("_id_5da8f86k") != std::string::npos)
                             ++koala_lands;
                         else if (name.find("_id_z6g8ytyk") != std::string::npos)
+                        {
+                            if (target == koala_hold_rock.load())
+                            {
+                                ++koala_sinks_kept;
+                                return 0;
+                            }
                             ++koala_sinks;
+                        }
                     }
                     else if (name.rfind("BossKoalaKong_AiController.", 0) == 0 && name.find("_id_zg4jy91e") != std::string::npos)
                         koala_ai_node = event, koala_ai_message = value<Address>(event + 16), koala_ai_component = component;
@@ -13895,7 +13906,13 @@ namespace ingame
             float first_speed = 0;
             std::vector<std::pair<Address, float>> snap;
             double snap_t = 0;
-            std::vector<std::pair<Address, bool>> timers; // (place, counts up)
+            std::vector<std::pair<Address, float>> timers; // (V1.5.9: place, its number as the flight started: held there)
+            unsigned sinks_kept_seen = 0;
+            // (V1.5.9) the last flight at him (no swats left): how far it was from him sideways each frame, and his health
+            // as it started; checked once it's gone (a hit tells how near the rock gets before it hits him)
+            float last_side = 0;
+            int final_health = -1;
+            std::uint64_t calib_at = 0;
             float flight_speed = 0, turn_speed = 0;
             std::vector<Candidate> candidates;
             std::size_t trying = 0;
@@ -13903,6 +13920,9 @@ namespace ingame
             Glow koala_glow, rock_glow;
         } koala_rally;
         constexpr std::array<float, 4> koala_gold{1.7f, 1.25f, 0.2f, 0.75f};
+        // (V1.5.9) how near (sideways) a rock flying at Koala Kong gets before it hits him, as last measured this session (0:
+        // not yet; V1.5.1's research put it between 170 and 250)
+        float koala_hit_radius = 0;
         std::array<float, 4> rally_color(int left)
         {
             switch (left)
@@ -13923,7 +13943,7 @@ namespace ingame
             glow_off(koala_rally.koala_glow);
             glow_off(koala_rally.rock_glow);
             koala_rally = {};
-            koala_rally_on = false, koala_actor = 0, koala_block_until = 0;
+            koala_rally_on = false, koala_actor = 0, koala_block_until = 0, koala_hold_rock = 0;
             koala_ai_node = 0, koala_ai_message = 0, koala_ai_component = 0;
         }
         std::string koala_where(const std::array<float, 3> &v)
@@ -14117,6 +14137,25 @@ namespace ingame
                 else if (koala_spun_rock.load() == r.rock && r.rock && !r.told_last && r.lines++ < 80)
                     r.told_last = true, std::cout << t << "Crash spins it back and he has no swats left: it hits him\n" << std::flush;
             }
+            // (V1.5.9) the rock a rally holds (its sinking kept from it), and what was kept
+            koala_hold_rock = r.step >= 0 && r.step != 3 ? r.rock : 0;
+            if (const auto n = koala_sinks_kept.load(); n != r.sinks_kept_seen)
+                r.sinks_kept_seen = n, std::cout << t << "kept the rock from sinking (its z6g8ytyk) while the rally holds it\n" << std::flush;
+            // (V1.5.9) the last flight's hit, 0.3 s after it's gone: his health down means it hit him from that far
+            if (r.calib_at && now >= r.calib_at)
+            {
+                r.calib_at = 0;
+                const int health = typed(r.koala, 0x1592220) && health_getter_ok() ? actor_health(r.koala) : -1;
+                if (health >= 0 && r.final_health >= 0 && health < r.final_health && r.last_side > 50)
+                {
+                    koala_hit_radius = koala_hit_radius > 0 ? std::min(koala_hit_radius, r.last_side) : r.last_side;
+                    std::cout << t << "it hit him " << std::lround(r.last_side) << " from him sideways (his health " << r.final_health << " -> " << health
+                              << "): swats turn the rock " << std::lround(koala_hit_radius + 50) << " from him from now on\n"
+                              << std::flush;
+                }
+                else
+                    std::cout << t << "the last flight is gone " << std::lround(r.last_side) << " from him, his health " << r.final_health << " -> " << health << "\n" << std::flush;
+            }
             if (r.step < 0 || r.step == 3)
                 return;
             // (V1.5.6) a landed flight, watched until it's gone (or the next spin)
@@ -14126,6 +14165,8 @@ namespace ingame
                 if (r.big)
                 {
                     // (a place being tried went with the flight: nothing to put back)
+                    if (r.step == 5)
+                        r.calib_at = now + 300;
                     std::cout << t
                               << (r.step == 5   ? "the spun rock reached him (his health " + std::to_string(typed(r.koala, 0x1592220) && health_getter_ok() ? actor_health(r.koala) : -1) + ")"
                                   : r.step == 2 || r.step == 4 ? std::string("the turned rock's flight is over")
@@ -14146,6 +14187,19 @@ namespace ingame
                     {
                         r.big = owner, r.big_t0 = precise_seconds();
                         read(r.koala + 32, r.koala_at);
+                        // (V1.5.9: its numbers as it starts, to find its timers: V1.5.8's run, the flight ends about 2 s on)
+                        r.snap.clear(), r.snap_t = r.big_t0, r.timers.clear(), r.timers_found = false;
+                        {
+                            std::vector<Address> objects{owner};
+                            for (const auto part : list(value<Address>(owner + 24), 64))
+                                objects.push_back(part);
+                            std::vector<float> f(0x400 / 4);
+                            for (const auto object : objects)
+                                if (object && readable(object, 0x400) && read(object, f))
+                                    for (unsigned i = 2; i < f.size(); ++i)
+                                        if (std::isfinite(f[i]) && f[i] >= 0.0f && f[i] < 30.0f)
+                                            r.snap.emplace_back(object + i * 4, f[i]);
+                        }
                         if (!r.big_told)
                         {
                             r.big_told = true;
@@ -14167,6 +14221,29 @@ namespace ingame
             std::array<float, 3> crash{};
             if (const auto p = player(); !p || !read(p + 32, crash))
                 return;
+            // (V1.5.9) its timers: the numbers that moved with the clock since it started, found once (0.08 s on or later),
+            // then held at their start every frame of the rally, so the flight lasts as long as the rally does
+            if (!r.timers_found && clock - r.snap_t >= 0.08 && !r.snap.empty())
+            {
+                r.timers_found = true;
+                const double dt = clock - r.snap_t;
+                const double slack = 0.02 + 0.1 * dt;
+                std::ostringstream found;
+                for (const auto &[place, was] : r.snap)
+                {
+                    const float v = value<float>(place);
+                    const bool up = std::abs((v - was) - dt) < slack, down = std::abs((v - was) + dt) < slack;
+                    if ((up || down) && r.timers.size() < 8)
+                    {
+                        r.timers.emplace_back(place, was);
+                        found << " 0x" << std::hex << place << std::dec << " " << (up ? "up" : "down") << " " << was << " -> " << v;
+                    }
+                }
+                r.snap.clear();
+                std::cout << t << "the flight's timers (" << std::lround(dt * 1000) << " ms on): " << (r.timers.empty() ? std::string("none found") : found.str()) << "\n" << std::flush;
+            }
+            for (const auto &[place, start] : r.timers)
+                write(place, start);
             // its speed, then the places that hold it
             if (r.step == 0)
             {
@@ -14205,8 +14282,10 @@ namespace ingame
                         }
                     }
                 }
-                // (faster with each swat: half its own speed on the first, then 0.6 and 0.7)
-                r.turn_speed = r.flight_speed * (0.5f + 0.1f * static_cast<float>(r.planned - r.left));
+                // (V1.5.9, Eric: "Crash's spin animation takes too long for it to like be able to use again. So you gotta find
+                // speed and plus the right speed for the rock": back at Crash at 900 a second on the first swat, 150 faster
+                // each swat after)
+                r.turn_speed = 900.0f + 150.0f * static_cast<float>(r.planned - r.left);
                 std::ostringstream places;
                 for (const auto &c : r.candidates)
                     places << "\n" << t << "  " << (c.position ? "near him: " : "its speed? ") << c.about << " " << koala_where(c.was) << (c.position ? std::string() : " (x" + std::to_string(c.ratio).substr(0, 5) + ")");
@@ -14225,20 +14304,24 @@ namespace ingame
             // one place at a time, set to head at Crash; kept if the rock turns
             if (r.step == 1)
             {
-                // (V1.5.6) the turn as the rock is 40% of the way to him, headed for a landing spot: 120 in front of Crash
-                // (his way to Koala Kong) at the height a landed rock is (60 over the floor)
+                // (V1.5.9, Eric: "it looks like it just stops halfway": V1.5.6 to V1.5.8 turned it at 40% of the way.) The turn
+                // as the rock comes as near him as it can without hitting him: 50 outside where a rock last hit him (sideways),
+                // 300 until that's measured (V1.5.1's research: a hit comes 170 to 250 from him). Headed for a landing spot
+                // 140 in front of Crash (his way to Koala Kong) at the height a landed rock is (60 over the floor)
                 if (!r.gate_open)
                 {
-                    const float total = std::hypot(r.koala_at[0] - r.big_p0[0], r.koala_at[1] - r.big_p0[1], r.koala_at[2] - r.big_p0[2]);
-                    const float done = std::hypot(at[0] - r.big_p0[0], at[1] - r.big_p0[1], at[2] - r.big_p0[2]);
-                    if (total > 50 && done < 0.4f * total)
+                    std::array<float, 3> koala{};
+                    read(r.koala + 32, koala);
+                    const float side = std::hypot(koala[0] - at[0], koala[1] - at[1]);
+                    const float turn_at = koala_hit_radius > 0 ? koala_hit_radius + 50.0f : 300.0f;
+                    if (side > turn_at)
                         return;
                     r.gate_open = true;
                 }
                 if (!r.trial_written)
                 {
                     const float side = r.koala_at[1] >= crash[1] ? 1.0f : -1.0f;
-                    r.aim = {crash[0], crash[1] + 120.0f * side, std::min(crash[2], 20.0f) + 60.0f};
+                    r.aim = {crash[0], crash[1] + 140.0f * side, std::min(crash[2], 20.0f) + 60.0f};
                 }
                 const std::array<float, 3> to{r.aim[0] - at[0], r.aim[1] - at[1], r.aim[2] - at[2]};
                 const float d = std::max(1.0f, std::hypot(to[0], to[1], to[2]));
@@ -14308,20 +14391,6 @@ namespace ingame
                     std::cout << t << "LANDED: the turned rock stopped at " << koala_where(at) << " (" << std::lround(d) << " from its spot), Crash at " << koala_where(crash)
                               << ": spin it\n"
                               << std::flush;
-                    // (its numbers now, to find its timers 0.5 s on)
-                    if (!r.timers_found)
-                    {
-                        r.snap.clear(), r.snap_t = clock;
-                        std::vector<std::pair<Address, std::size_t>> objects{{r.big, 0x400}};
-                        for (const auto part : list(value<Address>(r.big + 24), 64))
-                            objects.emplace_back(part, 0x400);
-                        std::vector<float> f(0x400 / 4);
-                        for (const auto &[object, size] : objects)
-                            if (object && readable(object, size) && read(object, f))
-                                for (unsigned i = 2; i < f.size(); ++i)
-                                    if (std::isfinite(f[i]) && f[i] >= 0.0f && f[i] < 30.0f)
-                                        r.snap.emplace_back(object + i * 4, f[i]);
-                    }
                     return;
                 }
                 r.last_d = d;
@@ -14340,27 +14409,6 @@ namespace ingame
                     r.step = -1, r.big = 0;
                     return;
                 }
-                // its timers: the numbers that moved with the clock since it landed
-                if (!r.timers_found && clock - r.snap_t >= 0.5)
-                {
-                    r.timers_found = true;
-                    const double dt = clock - r.snap_t;
-                    std::ostringstream found;
-                    for (const auto &[place, was] : r.snap)
-                    {
-                        const float v = value<float>(place);
-                        const bool up = std::abs((v - was) - dt) < 0.03, down = std::abs((v - was) + dt) < 0.03;
-                        if ((up || down) && r.timers.size() < 8)
-                        {
-                            r.timers.emplace_back(place, up);
-                            found << " 0x" << std::hex << place << std::dec << " " << (up ? "up" : "down") << " (" << v << ")";
-                        }
-                    }
-                    r.snap.clear();
-                    std::cout << t << "the landed flight's timers (" << seconds(static_cast<std::uint64_t>((clock - r.big_t0) * 1000)) << " since it started): "
-                              << (r.timers.empty() ? std::string("none found") : found.str()) << "\n"
-                              << std::flush;
-                }
                 const auto spin = crash_spin_at.load();
                 if (!movement_attack_hook.installed && !r.told_no_hooks)
                     r.told_no_hooks = true, std::cout << t << "Crash's spins can't be seen in this seed (no movement hooks: no Crashsanity styles or Ability Shuffle)\n" << std::flush;
@@ -14378,23 +14426,20 @@ namespace ingame
                     const float speed = r.first_speed > 0 ? r.first_speed : 2000.0f;
                     auto &c = r.candidates[r.trying];
                     write(c.at, std::array<float, 3>{to[0] / d * speed, to[1] / d * speed, to[2] / d * speed});
-                    // its timers back (an age to 0.3 s, a time left to 9.5 s)
-                    for (const auto &[place, up] : r.timers)
-                        write(place, up ? 0.3f : 9.5f);
                     std::cout << t << "SPUN: Crash spun it (" << std::lround(side) << " from it): it flies at him at " << std::lround(speed) << " a second"
-                              << (r.timers.empty() ? std::string() : ", " + std::to_string(r.timers.size()) + " timers back")
+                              << (r.timers.empty() ? std::string() : ", its " + std::to_string(r.timers.size()) + " timers held")
                               << (r.left > 0 ? "" : "; he has no swats left: it hits him") << "\n"
                               << std::flush;
                     if (r.left > 0)
                     {
                         // his next swat: turned again at 40% of the way to him, faster
                         c.was = {to[0] / d * speed, to[1] / d * speed, to[2] / d * speed};
-                        r.flight_speed = speed, r.turn_speed = speed * (0.5f + 0.1f * static_cast<float>(r.planned - r.left));
+                        r.flight_speed = speed, r.turn_speed = 900.0f + 150.0f * static_cast<float>(r.planned - r.left);
                         r.big_p0 = at, r.koala_at = koala, r.big_t0 = clock;
                         r.step = 1, r.gate_open = false, r.trial_written = false, r.last_d = 1e9f, r.land_samples = 0;
                     }
                     else
-                        r.step = 5, r.spun_at = now;
+                        r.step = 5, r.spun_at = now, r.final_health = typed(r.koala, 0x1592220) && health_getter_ok() ? actor_health(r.koala) : -1;
                     return;
                 }
                 // (not spun in 5 s: it falls into the lava)
@@ -14410,6 +14455,12 @@ namespace ingame
                 }
             }
             // the last spin's flight at him: whether it hit him (his health)
+            if (r.step == 5)
+            {
+                std::array<float, 3> koala{};
+                read(r.koala + 32, koala);
+                r.last_side = std::hypot(koala[0] - at[0], koala[1] - at[1]);
+            }
             if (r.step == 5 && now - r.spun_at > 3000)
                 r.step = -1, std::cout << t << "the last flight at him didn't end in 3 s\n" << std::flush;
             // landed: where it is now and then (and what appears or goes, in the research lines)
