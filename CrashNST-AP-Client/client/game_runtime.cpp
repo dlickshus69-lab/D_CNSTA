@@ -11879,7 +11879,7 @@ namespace ingame
             std::set<Address> nitro_gone;
             bool nitro_plan_new = false, nitro_plan_after_hit = false, nitro_warm = false;
             // (V1.4.17) his next hop's platform, and which Nitros are an outline while he's at theirs
-            int next_target = -1;
+            int next_target = -1, hop_from = -1; // (V1.4.22: and the platform he last landed on)
             std::vector<bool> nitro_hidden;
             unsigned hide_lines = 0;
             // (V1.4.18) each Nitro's last distance from him (coming or going), how far out one becomes an outline as he
@@ -12308,6 +12308,20 @@ namespace ingame
                 const auto [cb, rb] = cell(b);
                 return std::abs(ca - cb) <= 1 && std::abs(ra - rb) <= 1;
             };
+            // (V1.4.22) two apart in a straight line, a platform between: the front left and right, the middle left and
+            // right, the front and back middle; the one between, or -1
+            const auto skipped = [&](int a, int b) {
+                if (a < 0 || b < 0 || a == b)
+                    return -1;
+                const auto [ca, ra] = cell(a);
+                const auto [cb, rb] = cell(b);
+                if (!((std::abs(ca - cb) == 2 && ra == rb) || (std::abs(ra - rb) == 2 && ca == cb)))
+                    return -1;
+                for (std::size_t q = 0; q < r.platforms.size(); ++q)
+                    if (cell(static_cast<int>(q)) == std::pair<int, int>{(ca + cb) / 2, (ra + rb) / 2})
+                        return static_cast<int>(q);
+                return -1;
+            };
             const auto platform_near = [&](const std::array<float, 3> &at) {
                 int best = -1;
                 float best_d = 120;
@@ -12496,6 +12510,8 @@ namespace ingame
             const int roo_on = r.pool_ready && roo_where(r.roo, roo_at) ? platform_near(roo_at) : -1;
             const bool landed = r.landed_event;
             r.landed_event = false;
+            if (landed && roo_on >= 0)
+                r.hop_from = roo_on;
             int on_stage = -1;
             for (std::size_t i = 0; i < r.stages.size(); ++i)
                 if (r.stages[i].on_at && value<unsigned char>(r.stages[i].c + r.stages[i].on_at))
@@ -12594,7 +12610,8 @@ namespace ingame
                         // (from the most Nitros down): besides the above, a platform off his path and free must be left when his
                         // path doesn't take them all ("safe"); one safe platform with two ways out (not a dead end like the back)
                         // above all else; then Nitros off his path (they take the places Crash would rest: not easy), Nitros next
-                        // to a safe platform or Crash's, and not where they just were; ties at random
+                        // to a safe platform or Crash's, and not where they just were (V1.4.22: far above the last two); ties at
+                        // random
                         const std::size_t count = r.platforms.size();
                         std::vector<bool> on_path(count), was(count);
                         for (const int x : pattern)
@@ -12645,8 +12662,13 @@ namespace ingame
                                     score += on_path[q] ? 0.0f : 3.0f;
                                     if (std::any_of(safe.begin(), safe.end(), [&](int y) { return straight(x, y); }) || (crash_on >= 0 && straight(x, crash_on)))
                                         score += 1.0f;
+                                    // (V1.4.22, Eric's V1.4.21 run: "is it normal that one of the nitro [bombs] will stay in place
+                                    // ... the top middle one just staying in the same spot while the other one was moving": the
+                                    // back middle, a dead end and often off his path, kept winning; and from V1.4.13: "whenever
+                                    // you hit him, the nitro bombs will spawn at a different place": -4, so one stays only when
+                                    // the rules above leave nothing else)
                                     if (was[q])
-                                        score -= 1.0f;
+                                        score -= 4.0f;
                                 }
                                 score += tie(rng);
                                 if (score > best_score)
@@ -12743,12 +12765,17 @@ namespace ingame
                             bool onto_crash = false;
                             int on_crash = -1;
                             std::array<float, 3> crash{};
+                            // (V1.4.22, Eric's V1.4.21 run: "when he tries to attack you, his randomness, maybe he can skip one
+                            // platform and jump to the other": onto Crash two platforms away in a straight line too, over the
+                            // one between, and back to his pattern the same way if need be)
+                            bool skip = false;
                             if (r.stage_hops >= 2 && now - r.crash_hop_at >= 8000 && rng() % 5 == 0 && player() && roo_where(player(), crash))
                             {
                                 on_crash = platform_near(crash);
+                                const auto reach = [&](int x, int y) { return neighbors(x, y) || skipped(x, y) >= 0; };
                                 if (on_crash >= 0 && on_crash != next_on && on_crash != roo_on && on_crash != want_b &&
-                                    on_crash != r.pattern[static_cast<std::size_t>((after + 1) % length)] && neighbors(next_on, on_crash) && neighbors(on_crash, want_b))
-                                    onto_crash = put(values, stage_slot(on_stage, b), on_crash, keep);
+                                    on_crash != r.pattern[static_cast<std::size_t>((after + 1) % length)] && reach(next_on, on_crash) && reach(on_crash, want_b))
+                                    onto_crash = put(values, stage_slot(on_stage, b), on_crash, keep), skip = skipped(next_on, on_crash) >= 0;
                             }
                             if (onto_crash || put(values, stage_slot(on_stage, b), want_b, keep))
                             {
@@ -12763,7 +12790,8 @@ namespace ingame
                                 {
                                     r.crash_hop_at = now, ++r.crash_hops;
                                     if (r.control_lines < 120)
-                                        ++r.control_lines, std::cout << "Roo control: his hop after next is onto Crash, on " << platform_name(on_crash) << ", then back to his pattern\n";
+                                        ++r.control_lines, std::cout << "Roo control: his hop after next is onto Crash, on " << platform_name(on_crash)
+                                                                     << (skip ? " (over " + platform_name(skipped(next_on, on_crash)) + ")" : std::string()) << ", then back to his pattern\n";
                                 }
                             }
                             else if (r.desync_lines < 12)
@@ -13140,7 +13168,11 @@ namespace ingame
                     // back on top of him. If he's already down at a crate's height over it as it goes, it goes 40 sooner after
                     const bool hidden = k < r.nitro_hidden.size() && r.nitro_hidden[k];
                     const bool crash_near = crash_known && in_box(crash, spot, 38 * nitro_scale + 40);
-                    const bool away = hidden ? d < 150 || crash_near : d < 60 || (d < r.hide_at && d < last - 0.5f);
+                    // (V1.4.22: on a hop over a platform, its Nitro stays as it is, him far above it; on the platform he
+                    // leaps to, it goes twice as far out, his leap twice as fast)
+                    const int over_q = r.next_target >= 0 && r.hop_from >= 0 ? skipped(r.hop_from, r.next_target) : -1;
+                    const float hide_from = over_q >= 0 && q == r.next_target ? r.hide_at * 2 : r.hide_at;
+                    const bool away = hidden ? d < 150 || crash_near : q != over_q && (d < 60 || (d < hide_from && d < last - 0.5f));
                     if (away != hidden)
                     {
                         if (r.nitro_hidden.size() < r.nitro_crates.size())
@@ -13246,8 +13278,9 @@ namespace ingame
             }
             // his pace at a boss speed: hops and the wait after each landing shorter
             const unsigned speed = std::clamp(state.boss_speed, 100u, 200u);
-            // (V1.4.16, Eric's V1.4.15 run: "he just needs to be a little faster": 50% faster at 200%, was 35%)
-            const float pace = 1.0f + 0.5f * static_cast<float>(speed - 100) / 100.0f;
+            // (V1.4.16, Eric's V1.4.15 run: "he just needs to be a little faster": 50% faster at 200%, was 35%; V1.4.22, Eric's
+            // V1.4.21 run: "can we maybe speed him up a little bit? Yeah, we just need to speed him up a little bit": 70%)
+            const float pace = 1.0f + 0.7f * static_cast<float>(speed - 100) / 100.0f;
             // (set only where it holds the game's own value or ours: one that changes by itself, a countdown, is left alone)
             const auto paced = [&](Address at, const char *what)
             {

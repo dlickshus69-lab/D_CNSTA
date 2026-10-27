@@ -4,8 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Nitros placed around Roo's pattern:** each time he starts a new pattern (fight start, after a hit, after a death), the Nitros are placed knowing exactly where he'll jump that round.
-- **Never cornered:** there's always a free platform Roo never lands on that round, and it has two ways out (not a dead end like the back platform). This was the trap in your last clip.
-- **Still not easy:** Nitros go on the platforms off his path when they can, the spots you'd rest on, and next to your safe spots, but never so many that you're cut off. At a 6- or 7-platform pattern there's no spot off his path left, so you have to keep moving.
-- The log line for each pattern now lists the safe platforms too.
-- To try: test 3 still on, `/boss ripper1` with harder bosses on. Play through all the hits and say whether it ever feels impossible or too easy. Send the log.
+- **Roo a bit faster:** 1.7x at 200% Boss Speed (was 1.5x). His hops take 0.34 s, and his pause before each one 0.41 s.
+- **Nitros move after every hit:** the back-middle one in your clip stayed put because it kept scoring as the best spot. Now a Nitro only stays where it was if there's truly no other place that keeps the rules.
+- **He can leap over a platform to attack you:** when he goes for you and you're two platforms away in a straight line, he can jump over the one in between. A Nitro on the platform he jumps over stays a Nitro.
+- To try: test 3 still on, `/boss ripper1` with harder bosses on. Watch for his long leap at you (the log says "over ..." when it happens) and check that the speed feels right. Send the log and a clip.
