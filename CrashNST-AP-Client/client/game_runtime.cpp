@@ -1365,6 +1365,9 @@ namespace ingame
         // back is kept from him, and what was kept; whether the message going through is our own
         std::atomic_bool koala_rally_on{false};
         std::atomic<Address> koala_actor{0}, koala_throw_rock{0}, koala_throw_component{0}, koala_spun_rock{0};
+        // (V1.5.4) his AI's own throw as the game sends it (V1.5.3's log: its message isn't in his AI's list of the messages
+        // it takes, so it couldn't be looked up there): the game's node that sends it, the message, and his AI's script
+        std::atomic<Address> koala_ai_node{0}, koala_ai_message{0}, koala_ai_component{0};
         std::atomic<std::uint64_t> koala_spun_at{0}, koala_block_until{0};
         std::atomic_uint koala_throws{0}, koala_spins{0}, koala_blocked{0};
         std::mutex koala_block_mutex;
@@ -1920,6 +1923,8 @@ namespace ingame
                         else if (name.find("_id_z7wy1dtc") != std::string::npos)
                             koala_spun_rock = target, koala_spun_at = GetTickCount64(), ++koala_spins;
                     }
+                    else if (name.rfind("BossKoalaKong_AiController.", 0) == 0 && name.find("_id_zg4jy91e") != std::string::npos)
+                        koala_ai_node = event, koala_ai_message = value<Address>(event + 16), koala_ai_component = component;
                     else if (target == koala_actor.load() && GetTickCount64() < koala_block_until.load())
                     {
                         const auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
@@ -13841,9 +13846,8 @@ namespace ingame
             unsigned throws_seen = 0, spins_seen = 0, blocked_seen = 0, swats = 0, returns = 0, lines = 0;
             int planned = 0, left = 0, damage_before = -1, health_before = -1;
             bool armed = false, watching = false, broken = false, came_back = false, told_last = false, told_model = false, dumped = false, moved = false, big_told = false;
-            bool moved_told = false, health_told = false;
+            bool moved_told = false, health_told = false, node_told = false;
             float moved_z = 0;
-            PapuSend ai_throw;
             std::array<float, 3> big_from{}, koala_at{};
             std::set<Address> heavies;
             Glow koala_glow, rock_glow;
@@ -13882,24 +13886,31 @@ namespace ingame
         // V1.5.3 (Eric's V1.5.2 run: "it's not swatting back"; the log: the rock's own kxfns6c4 sent in flight did nothing,
         // the rock flew on into him and he took the hit. The throw is his AI's: zg4jy91e, his AI's own message with 7
         // values, then the rock's kxfns6c4, and the RockHeavy01 projectile starts where the rock is). So his swat is his
-        // AI's own throw, sent from a node of our own with the values his AI's node gives it (as Papu Papu's refill is),
-        // as the rock gets three quarters of the way to him. Once a rock flies back at Crash, the one still flying at him
-        // is moved far below the arena so it can't land its hit (and if it does anyway, his damage goes back)
+        // AI's own throw, as the rock gets three quarters of the way to him. (V1.5.4, Eric's V1.5.3 run: the message
+        // wasn't in his AI's list of the messages it takes, so V1.5.3 never sent it: now it's the game's own node for it,
+        // kept as his first throw goes through, sent again from his AI's script.) Once a rock flies back at Crash, the one
+        // still flying at him is moved far below the arena so it can't land its hit (and if it does anyway, his damage
+        // goes back)
         void koala_swat(KoalaRally &r, std::uint64_t now)
         {
             r.armed = false;
             const auto t = "Koala rally +" + seconds(now - r.entered) + ": ";
-            Address ai = 0;
-            for (const auto &[c, script] : entity_scripts(r.koala))
-                if (script == "BossKoalaKong_AiController")
-                    ai = c;
-            if (!ai || !papu_send_find(r.ai_throw, r.koala, "BossKoalaKong_AiController", ai, "zg4jy91e", 7))
+            // (V1.5.4) his throw as the game sent it last (see koala_ai_node): the same node, from his AI's script
+            const auto node = koala_ai_node.load(), message = koala_ai_message.load(), ai = koala_ai_component.load();
+            const bool sender_ok = event_hook.installed || code_matches(0x767da0, std::array<unsigned char, 16>{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x57, 0x48,
+                                                                                                                0x83, 0xec, 0x40, 0x48, 0x83, 0x79, 0x10, 0});
+            if (!sender_ok || !node || !message || !ai || value<Address>(node + 16) != message || value<Address>(ai + 24) != r.koala || !typed(ai, 0x13bbbd0))
             {
                 r.broken = true;
-                std::cout << t << "his AI's throw (zg4jy91e) " << (ai ? "and its values weren't found" : "isn't there (no BossKoalaKong_AiController)") << "; his swats are off for this visit\n"
+                std::cout << t << "his AI's throw (zg4jy91e) "
+                          << (!sender_ok ? "can't be sent (the game's message sender isn't as expected)"
+                                         : !node ? "hasn't been seen yet" : "isn't where it was (his AI changed)")
+                          << "; his swats are off for this visit\n"
                           << std::flush;
                 return;
             }
+            if (!r.node_told)
+                r.node_told = true, std::cout << t << "his throw's node: " << object_brief(node, 0x40, 3) << "\n" << std::flush;
             r.heavies = koala_heavy_rocks();
             r.health_part = 0;
             for (const auto c : list(value<Address>(r.koala + 24), 128))
@@ -13908,15 +13919,10 @@ namespace ingame
             r.damage_before = r.health_part ? value<int>(r.health_part + 0x310) : -1;
             r.health_before = typed(r.koala, 0x1592220) && health_getter_ok() ? actor_health(r.koala) : -1;
             koala_block_until = now + 700;
+            std::array<Address, 6> context{ai};
             koala_own_send = true;
-            const bool sent = papu_send(r.ai_throw);
+            reinterpret_cast<Address (*)(Address, Address)>(base() + 0x767da0)(node, reinterpret_cast<Address>(context.data()));
             koala_own_send = false;
-            if (!sent)
-            {
-                r.broken = true, koala_block_until = 0;
-                std::cout << t << "his AI's throw couldn't be sent (the game's message sender isn't as expected); his swats are off for this visit\n" << std::flush;
-                return;
-            }
             --r.left, ++r.swats;
             r.swat_at = now, r.watching = true, r.came_back = false, r.moved = false, r.moved_told = false, r.health_told = false, r.watch_until = now + 600;
             if (glow_on(r.koala_glow, r.koala, koala_gold))
