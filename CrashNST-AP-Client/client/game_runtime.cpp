@@ -1277,6 +1277,11 @@ namespace ingame
         std::atomic_bool event_research_done{true};
         // research: every event a trap Nitro gets, with the time since it appeared, to find what sends it "home"
         std::array<std::atomic<Address>, 4> trap_event_entity{};
+        // (V1.4.15, Testing) Ripper Roo's Nitros as they are now (see roo_control), for the event hook: nothing but Crash sets
+        // them off; and the kinds of message they get, once each, for the log
+        std::array<std::atomic<Address>, 4> roo_nitro_entity{};
+        std::set<std::string> roo_nitro_events_seen;
+        std::atomic<unsigned> roo_nitro_kept{0};
         std::array<std::atomic<std::uint64_t>, 4> trap_event_since{};
         // its common_Crate_Explode script sent something: it went off (the crate itself stays, so this is how to tell)
         std::array<std::atomic_bool, 4> trap_event_exploded{};
@@ -1741,6 +1746,37 @@ namespace ingame
                             trap_event_exploded[i] = true;
                         break;
                     }
+#ifndef CRASH_NST_STABLE
+                // (V1.4.15, Eric's V1.4.14 run: "So it was working. I like it. What I want now is hoping that maybe the TNT
+                // doesn't set off the nitro bombs"; and from the start: "he goes through the Nitro, but you're not allowed
+                // to"): what reaches one of Ripper Roo's Nitros' explosion script while Crash isn't touching it (more than
+                // 200 from it) doesn't go through: a TNT's blast nearby, or Roo on it, doesn't set it off; Crash touching it
+                // still does. Each kind of message one gets goes to the log once, with how far Crash and the nearest of
+                // his Big TNTs are, and whether it went through
+                for (unsigned i = 0; !blocked && target && i < roo_nitro_entity.size(); ++i)
+                    if (roo_nitro_entity[i].load() == target)
+                    {
+                        auto graph = string(value<Address>(value<Address>(component + 56) + 16), 120);
+                        if (graph.rfind("Scripts.Graph.", 0) == 0)
+                            graph.erase(0, 14);
+                        std::array<float, 3> n{}, c{};
+                        const bool known = read(target + 32, n) && read(crash + 32, c);
+                        const float d = known ? std::hypot(n[0] - c[0], n[1] - c[1], n[2] - c[2]) : 0.0f;
+                        blocked = graph == "common_Crate_Explode" && known && d > 200;
+                        if (blocked)
+                            ++roo_nitro_kept;
+                        const auto name = string(value<Address>(value<Address>(event + 16) + 16), 120);
+                        bool fresh = false;
+                        {
+                            std::lock_guard lock(event_mutex);
+                            fresh = roo_nitro_events_seen.size() < 60 && roo_nitro_events_seen.insert(graph + "|" + name).second;
+                        }
+                        if (fresh)
+                            std::cout << "Roo Nitro event: its " << graph << " gets " << name << " (Crash " << (known ? std::to_string(std::lround(d)) : std::string("?"))
+                                      << " from it): " << (blocked ? "kept from going through" : "through") << "\n" << std::flush;
+                        break;
+                    }
+#endif
                 if (blocked)
                     return 0;
                 if (const auto since = boss_event_since.load(); since && target && boss_event_lines.load() < 900)
@@ -11913,6 +11949,37 @@ namespace ingame
             if ((!r.stages_found || !event_owner(r.ai ? value<Address>(r.ai + 24) : 0)) && now >= r.next_stages)
             {
                 r.next_stages = now + 1000;
+                // (V1.4.15, Eric's V1.4.14 run: "it crashed when I got game over and restarted the boss again"; the log: a
+                // game over loads his level again, every object of the fight made anew, but the boss is still B102, so his
+                // stages' list entries (the pool) and the Nitros were the old fight's, and "no pattern of 3 fits" came from
+                // reading freed memory, then the game crashed (+0xdf3979, reading 0x2) after V1.4.14 wrote into it: when his
+                // stages are looked for again with ones found before, all of that starts over, nothing written to the old)
+                if (r.pool_told || r.stages_found)
+                {
+                    r.slots.clear(), r.pool_original.clear(), r.slot_stage.clear(), r.platform_of.clear(), r.platforms.clear();
+                    r.pattern.clear(), r.entry_pos = {-1, -1, -1, -1}, r.entry_detour = {}, r.pattern_stage = -1, r.fight_hits = 0;
+                    r.prepared = false, r.pool_ready = false, r.pool_told = false, r.pool_changed = false, r.active = -1, r.stage_hops = 0;
+                    r.stage_walk.clear(), r.counter_fixed = false;
+                    r.game_floats.clear(), r.pace_set.clear(), r.pace_wild.clear();
+                    r.nitro_platforms.clear(), r.nitro_plan.clear(), r.nitro_crates.clear(), r.nitro_made_at.clear(), r.nitro_due.clear();
+                    r.nitro_plan_new = false, r.nitro_making = -1, r.nitro_warm = false, r.nitro_moved.clear(), r.nitro_gone.clear(), r.beach_moved.clear();
+                    for (auto &e : roo_nitro_entity)
+                        e = 0;
+                    {
+                        std::lock_guard lock(roo_outline_mutex);
+                        roo_outline_spots.clear();
+                    }
+                    {
+                        std::lock_guard lock(nitro_scan_mutex);
+                        nitro_level_info = {};
+                    }
+                    {
+                        std::lock_guard lock(nitro_find_mutex);
+                        nitro_find = {};
+                    }
+                    nitro_spawn_state = {}; // (a spawn the old fight had going: its spawner's gone with it)
+                    std::cout << "Roo control: his fight's objects were made anew (a game over): everything found again\n" << std::flush;
+                }
                 r.stages.clear(), r.ai = 0, r.hop_turn = 0, r.watch_ints.clear(), r.watch_bytes.clear(), r.watch_last.clear();
                 for (const auto &[c, script] : entity_scripts(r.roo))
                 {
@@ -12627,6 +12694,9 @@ namespace ingame
                         }
                         break;
                     }
+                // (the event hook's list of them)
+                for (std::size_t k = 0; k < roo_nitro_entity.size(); ++k)
+                    roo_nitro_entity[k] = k < r.nitro_crates.size() ? r.nitro_crates[k] : 0;
                 // the outlines: platforms waiting for their Nitro
                 {
                     std::vector<std::array<float, 3>> spots;
@@ -12659,7 +12729,9 @@ namespace ingame
             }
             else if (r.nitro_warm)
             {
-                // (the rules off: no outlines)
+                // (the rules off: no outlines, nothing kept from them)
+                for (auto &e : roo_nitro_entity)
+                    e = 0;
                 std::lock_guard lock(roo_outline_mutex);
                 roo_outline_spots.clear();
             }
@@ -12919,6 +12991,8 @@ namespace ingame
                     std::lock_guard lock(roo_outline_mutex);
                     roo_outline_spots.clear();
                 }
+                for (auto &e : roo_nitro_entity)
+                    e = 0;
                 // (V1.3.28) Papu Papu's stomps from here on only
                 papu_entity = 0, papu_bounce_node = 0, papu_bounce_component = 0, papu_bounce_message = 0, papu_beaten_blocks = 0;
                 probe_count_at = 0, probe_timer_at = 0, probe_state_at = 0, probe_damage_at = 0, probe_lines = 0, other_probe_lines = 0;
