@@ -4,7 +4,7 @@ This is the **Testing build**: it has what's still being worked on (Harder bosse
 
 ## What's new
 
-- **Koala Kong's swat: the turned rock lands (V1.5.6's run).** It turned and stopped in front of Crash every time, but you couldn't spin it: the spinnable rock only comes with the game's own landing, and after about 2.5 s it sank.
-- **Now your spin counts:** spin within reach of where the turned rock stopped (in the 2.5 s before it sinks), and the rock gets the same "spun back" message the game sends, so it flies at Koala again. Then he swats it again or it hits him, by swats left. This needs your seed's movement hooks (Ability Shuffle or Crashsanity styles). The log says if it can't see your spins.
-- Rock colors and his gold flash as before. His 8-notch bar unchanged.
-- To try: `/invincible on`, then `/boss koala`. After his swat, run up to where the rock stops and spin it. Send the log and the clip.
+- **Koala Kong's rally, now all on one rock (V1.5.7's run):** your spins near the landed rock were seen every time, but the game's "spun back" message didn't send it flying. The rock's own messages only announce what happened, so they can't make it fly. Now the client flies the rock itself, the whole way: he swats it back (gold flash), it stops in front of Crash, and your spin sends it flying at him again. Then he swats it again, faster, or, with no swats left, it hits him like a normal throw.
+- If you don't spin it within 5 seconds, it drops into the lava.
+- The rock stays the same one, so it doesn't sink anymore, and the client also tries to reset its 10-second lifetime with each spin. The log says whether that worked.
+- To try: `/invincible on`, then `/boss koala`. Play a whole rally: spin his rock, spin it again each time it comes back, until it hits him. Send the log and the clip.

@@ -13888,6 +13888,14 @@ namespace ingame
             std::uint64_t landed_at = 0;
             unsigned lands_seen = 0, sinks_seen = 0, spin_told = 0;
             bool dumped_throw = false, dumped_land = false, dumped_ours = false, dumped_spin = false, told_no_hooks = false;
+            // (V1.5.8) the 40% mark passed for this flight's turn; the flight's first speed (Crash's spin's); its timers
+            // (numbers in it moving with the clock: its age, or its time left; it ends 10 s after it starts), as read when it
+            // landed and found 0.5 s later
+            bool gate_open = false, timers_found = false;
+            float first_speed = 0;
+            std::vector<std::pair<Address, float>> snap;
+            double snap_t = 0;
+            std::vector<std::pair<Address, bool>> timers; // (place, counts up)
             float flight_speed = 0, turn_speed = 0;
             std::vector<Candidate> candidates;
             std::size_t trying = 0;
@@ -14104,7 +14112,7 @@ namespace ingame
                     if (r.big)
                         r.old_flights.insert(r.big);
                     r.step = 0, r.big = 0, r.spun_at = now, r.trial_written = false, r.candidates.clear(), r.trying = 0, r.turned_samples = 0, r.land_samples = 0,
-                    r.last_d = 1e9f;
+                    r.last_d = 1e9f, r.gate_open = false, r.first_speed = 0, r.timers_found = false, r.timers.clear();
                 }
                 else if (koala_spun_rock.load() == r.rock && r.rock && !r.told_last && r.lines++ < 80)
                     r.told_last = true, std::cout << t << "Crash spins it back and he has no swats left: it hits him\n" << std::flush;
@@ -14118,7 +14126,12 @@ namespace ingame
                 if (r.big)
                 {
                     // (a place being tried went with the flight: nothing to put back)
-                    std::cout << t << (r.step == 2 || r.step == 4 ? "the turned rock's flight is over" : "the rock reached him before it was turned") << "\n" << std::flush;
+                    std::cout << t
+                              << (r.step == 5   ? "the spun rock reached him (his health " + std::to_string(typed(r.koala, 0x1592220) && health_getter_ok() ? actor_health(r.koala) : -1) + ")"
+                                  : r.step == 2 || r.step == 4 ? std::string("the turned rock's flight is over")
+                                                               : std::string("the rock reached him before it was turned"))
+                              << "\n"
+                              << std::flush;
                     r.step = -1, r.big = 0;
                     return;
                 }
@@ -14163,6 +14176,8 @@ namespace ingame
                 const std::array<float, 3> v{static_cast<float>((at[0] - r.big_p0[0]) / dt), static_cast<float>((at[1] - r.big_p0[1]) / dt),
                                              static_cast<float>((at[2] - r.big_p0[2]) / dt)};
                 r.flight_speed = std::hypot(v[0], v[1], v[2]);
+                if (r.first_speed <= 0)
+                    r.first_speed = r.flight_speed;
                 if (r.flight_speed < 100)
                 {
                     if (dt > 0.2)
@@ -14212,12 +14227,13 @@ namespace ingame
             {
                 // (V1.5.6) the turn as the rock is 40% of the way to him, headed for a landing spot: 120 in front of Crash
                 // (his way to Koala Kong) at the height a landed rock is (60 over the floor)
-                if (!r.trial_written && r.trying == 0)
+                if (!r.gate_open)
                 {
                     const float total = std::hypot(r.koala_at[0] - r.big_p0[0], r.koala_at[1] - r.big_p0[1], r.koala_at[2] - r.big_p0[2]);
                     const float done = std::hypot(at[0] - r.big_p0[0], at[1] - r.big_p0[1], at[2] - r.big_p0[2]);
                     if (total > 50 && done < 0.4f * total)
                         return;
+                    r.gate_open = true;
                 }
                 if (!r.trial_written)
                 {
@@ -14274,8 +14290,12 @@ namespace ingame
                 return;
             }
             // turned: on to its landing spot (V1.5.5's runs: the turned flight goes through Crash and the floor, it only hits
-            // Koala Kong), and there stopped, and the rock told it landed: its 5da8f86k, the message it sends itself as
-            // his throw lands on Crash's side (then the rock Crash can spin is made, BossRock_BounceLandCollision)
+            // Koala Kong), and there stopped. (V1.5.8, Eric's V1.5.7 run: the rock's own messages are only told what
+            // happened, the work is the game's collisions: its 5da8f86k there made no rock Crash could spin and the rock sank
+            // 2.5 s later, and its z7wy1dtc after Crash's spin made no flight at Koala Kong.) So the rally is this one flight
+            // all through: stopped where it lands (no message: it doesn't sink), and when Crash spins near it, sent at Koala
+            // Kong again at its first speed; there it's his next swat (turned again at 40%) or, with none left, it hits him
+            // as the game's flight does. Its timers go back each time Crash spins it (the flight ends 10 s after it starts)
             if (r.step == 2)
             {
                 const float d = std::hypot(r.aim[0] - at[0], r.aim[1] - at[1], r.aim[2] - at[2]);
@@ -14284,27 +14304,33 @@ namespace ingame
                     const auto &c = r.candidates[r.trying];
                     if (!c.position)
                         write(c.at, std::array<float, 3>{0, 0, 0});
-                    const bool told = koala_rock_send(r.rock_component, "5da8f86k");
                     r.step = 4, r.land_t = clock, r.land_samples = 0, r.landed_at = now;
-                    if (!r.dumped_ours && typed(r.rock_component, 0x13bbbd0))
-                        r.dumped_ours = true, log_graph_fields(r.rock_component, "Koala rally: the rock as ours lands");
                     std::cout << t << "LANDED: the turned rock stopped at " << koala_where(at) << " (" << std::lround(d) << " from its spot), Crash at " << koala_where(crash)
-                              << "; the rock " << (told ? "told it landed (5da8f86k)" : "couldn't be told it landed (its 5da8f86k wasn't found)") << "\n"
+                              << ": spin it\n"
                               << std::flush;
+                    // (its numbers now, to find its timers 0.5 s on)
+                    if (!r.timers_found)
+                    {
+                        r.snap.clear(), r.snap_t = clock;
+                        std::vector<std::pair<Address, std::size_t>> objects{{r.big, 0x400}};
+                        for (const auto part : list(value<Address>(r.big + 24), 64))
+                            objects.emplace_back(part, 0x400);
+                        std::vector<float> f(0x400 / 4);
+                        for (const auto &[object, size] : objects)
+                            if (object && readable(object, size) && read(object, f))
+                                for (unsigned i = 2; i < f.size(); ++i)
+                                    if (std::isfinite(f[i]) && f[i] >= 0.0f && f[i] < 30.0f)
+                                        r.snap.emplace_back(object + i * 4, f[i]);
+                    }
                     return;
                 }
                 r.last_d = d;
                 return;
             }
-            // (V1.5.7, Eric's V1.5.6 run: it landed in front of Crash each time, but the rock Crash can spin
-            // (BossRock_BounceLandCollision) only comes with the game's own landing, and after about 2.5 s the rock sank.)
-            // So a spin of Crash's near where it landed (within 220 sideways, the 0.4 s after he starts it) is taken as the
-            // rock spun: it's sent what the game sends it as Crash spins its rock (5da8f86k, then z7wy1dtc), which makes the
-            // rock fly at Koala Kong again (a new BigRockToBoss); the landed flight is sent down out of the way
             if (r.step == 4)
             {
-                // (the rock gone, sunk: nothing left to spin; its flight sent down out of the way)
-                if (!r.rock || !event_owner(r.rock) || value<Address>(r.rock_component + 24) != r.rock)
+                // (the rock gone: nothing left to spin; its flight sent down out of the way)
+                if (!r.rock || !event_owner(r.rock))
                 {
                     const auto &c = r.candidates[r.trying];
                     if (!c.position)
@@ -14314,6 +14340,27 @@ namespace ingame
                     r.step = -1, r.big = 0;
                     return;
                 }
+                // its timers: the numbers that moved with the clock since it landed
+                if (!r.timers_found && clock - r.snap_t >= 0.5)
+                {
+                    r.timers_found = true;
+                    const double dt = clock - r.snap_t;
+                    std::ostringstream found;
+                    for (const auto &[place, was] : r.snap)
+                    {
+                        const float v = value<float>(place);
+                        const bool up = std::abs((v - was) - dt) < 0.03, down = std::abs((v - was) + dt) < 0.03;
+                        if ((up || down) && r.timers.size() < 8)
+                        {
+                            r.timers.emplace_back(place, up);
+                            found << " 0x" << std::hex << place << std::dec << " " << (up ? "up" : "down") << " (" << v << ")";
+                        }
+                    }
+                    r.snap.clear();
+                    std::cout << t << "the landed flight's timers (" << seconds(static_cast<std::uint64_t>((clock - r.big_t0) * 1000)) << " since it started): "
+                              << (r.timers.empty() ? std::string("none found") : found.str()) << "\n"
+                              << std::flush;
+                }
                 const auto spin = crash_spin_at.load();
                 if (!movement_attack_hook.installed && !r.told_no_hooks)
                     r.told_no_hooks = true, std::cout << t << "Crash's spins can't be seen in this seed (no movement hooks: no Crashsanity styles or Ability Shuffle)\n" << std::flush;
@@ -14322,25 +14369,49 @@ namespace ingame
                     ++r.spin_told, std::cout << t << "Crash spins " << std::lround(side) << " from where it landed (220 or closer counts)\n" << std::flush;
                 if (spin > r.landed_at && now - spin < 400 && side < 220.0f)
                 {
-                    const auto &c = r.candidates[r.trying];
-                    if (!c.position)
-                        write(c.at, std::array<float, 3>{0, 0, -3000});
-                    const bool landed = koala_rock_send(r.rock_component, "5da8f86k");
-                    const bool spun = landed && koala_rock_send(r.rock_component, "z7wy1dtc");
-                    if (!r.dumped_spin && typed(r.rock_component, 0x13bbbd0))
-                        r.dumped_spin = true, log_graph_fields(r.rock_component, "Koala rally: the rock as Crash spins ours");
-                    std::cout << t << "SPUN: Crash spun the landed rock (" << std::lround(side) << " from it); its z7wy1dtc " << (spun ? "sent" : "couldn't be sent")
+                    // at Koala Kong's chest (200 over his feet), at the flight's first speed
+                    std::array<float, 3> koala{};
+                    read(r.koala + 32, koala);
+                    koala[2] += 200.0f;
+                    const std::array<float, 3> to{koala[0] - at[0], koala[1] - at[1], koala[2] - at[2]};
+                    const float d = std::max(1.0f, std::hypot(to[0], to[1], to[2]));
+                    const float speed = r.first_speed > 0 ? r.first_speed : 2000.0f;
+                    auto &c = r.candidates[r.trying];
+                    write(c.at, std::array<float, 3>{to[0] / d * speed, to[1] / d * speed, to[2] / d * speed});
+                    // its timers back (an age to 0.3 s, a time left to 9.5 s)
+                    for (const auto &[place, up] : r.timers)
+                        write(place, up ? 0.3f : 9.5f);
+                    std::cout << t << "SPUN: Crash spun it (" << std::lround(side) << " from it): it flies at him at " << std::lround(speed) << " a second"
+                              << (r.timers.empty() ? std::string() : ", " + std::to_string(r.timers.size()) + " timers back")
                               << (r.left > 0 ? "" : "; he has no swats left: it hits him") << "\n"
                               << std::flush;
-                    r.old_flights.insert(r.big);
-                    if (spun && r.left > 0)
-                        r.step = 0, r.big = 0, r.spun_at = now, r.trial_written = false, r.candidates.clear(), r.trying = 0, r.turned_samples = 0, r.land_samples = 0,
-                        r.last_d = 1e9f;
+                    if (r.left > 0)
+                    {
+                        // his next swat: turned again at 40% of the way to him, faster
+                        c.was = {to[0] / d * speed, to[1] / d * speed, to[2] / d * speed};
+                        r.flight_speed = speed, r.turn_speed = speed * (0.5f + 0.1f * static_cast<float>(r.planned - r.left));
+                        r.big_p0 = at, r.koala_at = koala, r.big_t0 = clock;
+                        r.step = 1, r.gate_open = false, r.trial_written = false, r.last_d = 1e9f, r.land_samples = 0;
+                    }
                     else
-                        r.step = -1, r.big = 0;
+                        r.step = 5, r.spun_at = now;
+                    return;
+                }
+                // (not spun in 5 s: it falls into the lava)
+                if (now - r.landed_at > 5000)
+                {
+                    const auto &c = r.candidates[r.trying];
+                    if (!c.position)
+                        write(c.at, std::array<float, 3>{0, 0, -1500});
+                    std::cout << t << "Crash didn't spin it in 5 s: it falls\n" << std::flush;
+                    r.old_flights.insert(r.big);
+                    r.step = -1, r.big = 0;
                     return;
                 }
             }
+            // the last spin's flight at him: whether it hit him (his health)
+            if (r.step == 5 && now - r.spun_at > 3000)
+                r.step = -1, std::cout << t << "the last flight at him didn't end in 3 s\n" << std::flush;
             // landed: where it is now and then (and what appears or goes, in the research lines)
             if (r.step == 4 && r.land_samples < 10 && clock - r.land_t >= 0.25 * (r.land_samples + 1))
             {
