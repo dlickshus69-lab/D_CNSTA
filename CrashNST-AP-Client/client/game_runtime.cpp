@@ -4120,6 +4120,31 @@ namespace ingame
                     continue;
                 if (name.rfind("Crate_", 0) == 0)
                     scan.crates.push_back(at);
+#ifndef CRASH_NST_STABLE
+                // (V1.4.16, Testing: Ripper Roo's arena with /roo_nitro's copy has no Nitro crate, and the template the memory
+                // search found after a game over could be the old fight's, freed: V1.4.14's and V1.4.15's crash, inside the
+                // spawn. Each of N. Sanity Beach's crates' time-trial script holds the Nitro's template (a handle in its data,
+                // V1.4.11's log), so it's taken from a crate of this fight)
+                if (!scan.nitro_template && level == "Boss" && name.rfind("Crate_", 0) == 0)
+                    for (const auto c : list(value<Address>(owner + 24), 64))
+                    {
+                        if (scan.nitro_template || !typed(c, 0x13bbbd0) || string(value<Address>(value<Address>(c + 56) + 16)) != "Scripts.Graph.common_Crate_TimeTrial")
+                            continue;
+                        const auto data = value<Address>(c + 16);
+                        const auto meta = typed(data, 0x13bbb10) ? value<Address>(data + 32) : 0;
+                        const unsigned count = meta ? value<unsigned>(meta + 24) : 0;
+                        const auto fields = meta ? value<Address>(meta + 40) : 0;
+                        for (unsigned i = 0; fields && count <= 256 && i < count && !scan.nitro_template; ++i)
+                        {
+                            const auto field = value<Address>(fields + i * 8);
+                            if (value<std::uint16_t>(field + 22) != 8)
+                                continue;
+                            const auto v = value<Address>(data + value<std::uint16_t>(field + 24));
+                            if (const auto e = resolve(v) ? resolve(v) : v; nitro_template_valid(e))
+                                scan.nitro_template = e;
+                        }
+                    }
+#endif
                 // the Nitro's template, from a Nitro crate's spawner
                 if (!scan.nitro_template && kind_of(name) == "Crate_Nitro")
                     for (const auto c : list(value<Address>(owner + 24), 64))
@@ -11963,6 +11988,7 @@ namespace ingame
                     r.game_floats.clear(), r.pace_set.clear(), r.pace_wild.clear();
                     r.nitro_platforms.clear(), r.nitro_plan.clear(), r.nitro_crates.clear(), r.nitro_made_at.clear(), r.nitro_due.clear();
                     r.nitro_plan_new = false, r.nitro_making = -1, r.nitro_warm = false, r.nitro_moved.clear(), r.nitro_gone.clear(), r.beach_moved.clear();
+                    r.nitro_whys.clear();
                     for (auto &e : roo_nitro_entity)
                         e = 0;
                     {
@@ -12386,57 +12412,36 @@ namespace ingame
                     unsigned start = 0;
                     // (V1.4.14, Eric's V1.4.13 run, the real Nitro there at last: "I kind of wish where they spawn the second
                     // battle starts ... And then whenever you hit him, the nitro bombs will spawn at a different place, but it
-                    // will show you an outline where it's gonna spawn in, and it'll take like a few seconds before it does spawn
-                    // in"; "yes, he can break it", the log: he set off the one on a platform of his pattern as he landed, and
-                    // again as it came back: with /roo_nitro's copy in, the two platforms the Nitros go on are picked with
-                    // the pattern, which keeps off them: not where he is, nor where Crash is (as the fight starts, not where
-                    // they start: the middle right and front middle), after a hit away from where they were if it can be;
-                    // the first pair a pattern fits around, or one Nitro, or none)
+                    // will show you an outline where it's gonna spawn in"): with /roo_nitro's copy in, the platforms the
+                    // Nitros go on are picked as each stage starts: not where he is, nor where Crash is (as the fight starts,
+                    // not where they start: the middle right and front middle), after a hit away from where they were if it
+                    // can be. (V1.4.16, Eric's V1.4.15 run: "the TNT isn't set off to nitro, which is good ... fix the nitro him
+                    // being able to clip through the nitro bomb without hitting him ... because I want to add more nitro bombs
+                    // the more you hit him, but not like where it's kind of impossible ... he has more routes, and I want to add
+                    // more basically nitros where you're gonna have to like maybe jump sideways": he goes through them (a Nitro
+                    // only goes off with Crash at it, see the event hook), so his patterns use every platform again (V1.4.14 kept
+                    // them off the Nitros' platforms); 2 Nitros, 3 from the second hit, 4 from the fourth: 3 platforms at least
+                    // always free)
                     std::vector<int> nitros;
-                    std::vector<int> pattern;
+                    const auto pattern = make_pattern(length, from, start);
                     if (nitro_mode)
                     {
                         std::array<float, 3> crash{};
                         const int crash_on = player() && roo_where(player(), crash) ? platform_near(crash) : -1;
-                        std::vector<int> can;
+                        std::vector<int> can, again;
                         for (std::size_t q = 0; q < r.platforms.size(); ++q)
                         {
                             const auto name = platform_name(static_cast<int>(q));
                             if (static_cast<int>(q) == from || static_cast<int>(q) == crash_on || (!fight && (name == "front-middle" || name == "middle-right")))
                                 continue;
-                            can.push_back(static_cast<int>(q));
+                            (std::find(r.nitro_platforms.begin(), r.nitro_platforms.end(), static_cast<int>(q)) == r.nitro_platforms.end() ? can : again).push_back(static_cast<int>(q));
                         }
-                        std::vector<std::vector<int>> choices;
-                        for (std::size_t a = 0; a < can.size(); ++a)
-                            for (std::size_t b = a + 1; b < can.size(); ++b)
-                                choices.push_back({can[a], can[b]});
-                        std::shuffle(choices.begin(), choices.end(), rng);
-                        const auto overlap = [&](const std::vector<int> &c) {
-                            return std::count_if(c.begin(), c.end(), [&](int x) { return std::find(r.nitro_platforms.begin(), r.nitro_platforms.end(), x) != r.nitro_platforms.end(); });
-                        };
-                        std::stable_sort(choices.begin(), choices.end(), [&](const auto &x, const auto &y) { return overlap(x) < overlap(y); });
-                        std::vector<std::vector<int>> singles;
-                        for (const int x : can)
-                            singles.push_back({x});
-                        std::shuffle(singles.begin(), singles.end(), rng);
-                        choices.insert(choices.end(), singles.begin(), singles.end());
-                        choices.push_back({});
-                        for (const auto &choice : choices)
-                        {
-                            std::vector<bool> blocked(r.platforms.size());
-                            for (const int x : choice)
-                                blocked[static_cast<std::size_t>(x)] = true;
-                            pattern = make_pattern(length, from, start, &blocked);
-                            if (!pattern.empty())
-                            {
-                                nitros = choice;
-                                break;
-                            }
-                        }
+                        std::shuffle(can.begin(), can.end(), rng), std::shuffle(again.begin(), again.end(), rng);
+                        can.insert(can.end(), again.begin(), again.end());
+                        const std::size_t want = std::min<std::size_t>(2 + r.fight_hits / 2, 4);
+                        nitros.assign(can.begin(), can.begin() + static_cast<std::ptrdiff_t>(std::min(want, can.size())));
                         r.nitro_plan = nitros, r.nitro_plan_new = true, r.nitro_plan_after_hit = fight;
                     }
-                    else
-                        pattern = make_pattern(length, from, start);
                     bool set = false, fourth = false;
                     if (!pattern.empty())
                     {
@@ -12737,7 +12742,8 @@ namespace ingame
             }
             // his pace at a boss speed: hops and the wait after each landing shorter
             const unsigned speed = std::clamp(state.boss_speed, 100u, 200u);
-            const float pace = 1.0f + 0.35f * static_cast<float>(speed - 100) / 100.0f;
+            // (V1.4.16, Eric's V1.4.15 run: "he just needs to be a little faster": 50% faster at 200%, was 35%)
+            const float pace = 1.0f + 0.5f * static_cast<float>(speed - 100) / 100.0f;
             // (set only where it holds the game's own value or ours: one that changes by itself, a countdown, is left alone)
             const auto paced = [&](Address at, const char *what)
             {
